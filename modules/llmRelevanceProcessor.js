@@ -39,6 +39,8 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
 const { refreshLock } = require('./queueManager');
+const { matchSignalToTrend } = require('./trendClustering');
+const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -258,6 +260,43 @@ const applyCriticalRequiresCompetitorOverride = (classification, article, compet
   return classification;
 };
 
+// NEW: Deterministic safety net — the model sometimes returns a sector
+// value outside the 5 allowed values (Technology, Supply Chain, Product,
+// Sustainability, Consumer), which violates the DB check constraint and
+// silently drops the whole signal insert. This maps anything unexpected
+// to the closest valid sector before storage, so a signal is never lost.
+const VALID_SECTORS = ['Technology', 'Supply Chain', 'Product', 'Sustainability', 'Consumer'];
+
+const SECTOR_FALLBACK_MAP = {
+  finance: 'Product',
+  banking: 'Product',
+  fintech: 'Product',
+  logistics: 'Supply Chain',
+  manufacturing: 'Supply Chain',
+  environment: 'Sustainability',
+  environmental: 'Sustainability',
+  retail: 'Consumer',
+  ai: 'Technology',
+  software: 'Technology',
+};
+
+const applySectorValidation = (classification) => {
+  if (!classification.sector) return classification;
+
+  if (VALID_SECTORS.includes(classification.sector)) return classification;
+
+  const normalized = classification.sector.toLowerCase().trim();
+  const mapped = SECTOR_FALLBACK_MAP[normalized];
+
+  if (mapped) {
+    console.log(`  [SectorValidation] Mapping invalid sector "${classification.sector}" -> "${mapped}"`);
+    return { ...classification, sector: mapped };
+  }
+
+  console.log(`  [SectorValidation] Unrecognized sector "${classification.sector}", defaulting to "Technology"`);
+  return { ...classification, sector: 'Technology' };
+};
+
 // ── Fill prompt placeholders ─────────────────────────────────────────────────
 // CHANGED: now accepts clientContext (optional) — inserted wherever the
 // prompt template has a {client_context} placeholder. Prompts that don't
@@ -332,7 +371,7 @@ const synthesizeContent = async (article, classification) => {
 
 // ── Call LM Studio for relevance classification + signal extraction ──────────
 // CHANGED: now accepts clientContext, passed through to fillPromptTemplate
-const classifyArticle = async (promptTemplate, industry, article, clientContext = null) => {
+const classifyArticle = async (promptTemplate, industry, article, clientContext = null, moduleId = null) => {
   const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text, clientContext);
 
   try {
@@ -430,6 +469,20 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
       }
     }
 
+
+    if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+      return {
+        is_relevant: Boolean(parsed.is_relevant),
+        reason: parsed.reason || 'No reason provided',
+        signal_title: parsed.signal_title || article.title,
+        signal_type: parsed.signal_type || 'Innovation',
+        organization: parsed.organization || 'Unknown',
+        sector: parsed.sector || 'Technology',
+        horizon_estimate: parsed.horizon_estimate || 'mid_term',
+        summary: parsed.summary || '',
+      };
+    }
+
     return {
       is_relevant: Boolean(parsed.is_relevant),
       reason: parsed.reason || 'No reason provided',
@@ -444,6 +497,21 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
 
   } catch (err) {
     console.log(`  [!] LLM classification failed for "${article.title}": ${err.message}`);
+
+    if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+      return {
+        is_relevant: false,
+        technical_failure: true,
+        reason: `Classification failed: ${err.message}`,
+        signal_title: article.title,
+        signal_type: 'Innovation',
+        organization: 'Unknown',
+        sector: 'Technology',
+        horizon_estimate: 'mid_term',
+        summary: '',
+      };
+    }
+
     return {
       is_relevant: false,
       technical_failure: true,
@@ -485,7 +553,7 @@ const setupPolicyCollection = async () => {
   }
 
   // Always ensure indexes exist — safe to call even if they already exist
-  const indexFields = ['article_id', 'client_id', 'industry', 'module_id']; // CHANGED: added module_id
+  const indexFields = ['article_id', 'client_id', 'industry', 'module_id'];
   for (const field of indexFields) {
     try {
       await qdrant.createPayloadIndex(POLICY_COLLECTION, {
@@ -577,24 +645,49 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
   // Step 5 — Store structured signal for frontend
-  const { error: signalError } = await supabase.from('policy_signals').insert({
+  const signalInsert = {
     article_id: articleId,
     client_id: clientId,
     industry,
     source_article_url: article.url,
     source_published_date: article.publishedDate,
     signal_title: classification.signal_title,
-    category: classification.category,
-    impact_level: classification.impact_level,
-    source_type: classification.source_type,
-    country: classification.country,
     summary: classification.summary,
-    business_impact: classification.business_impact,
     job_id: jobId,
-    module_id: moduleId,       // CHANGED: new
-    submodule_id: submoduleId, // CHANGED: new
-  });
+    module_id: moduleId,
+    submodule_id: submoduleId,
+  };
+
+  if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+    signalInsert.signal_type = classification.signal_type;
+    signalInsert.organization = classification.organization;
+    signalInsert.sector = classification.sector;
+    signalInsert.horizon_estimate = classification.horizon_estimate;
+  } else {
+    signalInsert.category = classification.category;
+    signalInsert.impact_level = classification.impact_level;
+    signalInsert.source_type = classification.source_type;
+    signalInsert.country = classification.country;
+    signalInsert.business_impact = classification.business_impact;
+  }
+
+  const { data: newSignal, error: signalError } = await supabase
+    .from('policy_signals')
+    .insert(signalInsert)
+    .select()
+    .single();
   if (signalError) console.error('[Storage] signal insert error:', signalError.message);
+
+  // Step 6 — Forward Outlook trend matching (only runs for that module)
+  if (moduleId === FORWARD_OUTLOOK_MODULE_ID && newSignal) {
+    try {
+      const fingerprintText = `${synthesizedTitle}. ${contentToChunk.slice(0, 400)}`;
+      const fingerprintEmbedding = await embedText(fingerprintText);
+      await matchSignalToTrend(newSignal.id, fingerprintEmbedding, moduleId, clientId, industry, article.publishedDate);
+    } catch (trendErr) {
+      console.error('[TrendMatch] Failed to match signal to trend:', trendErr.message);
+    }
+  }
 
   return chunks.length;
 };
@@ -630,9 +723,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
-    let classification = await classifyArticle(promptTemplate, industry, article, clientContext); // CHANGED: passes clientContext
+    let classification = await classifyArticle(promptTemplate, industry, article, clientContext, moduleId);
     classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
     classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
+    classification = applySectorValidation(classification);
 
     if (classification.technical_failure) {
       await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
@@ -650,9 +744,16 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       );
       await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
       relevantCount++;
-      console.log(
-        `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
-      );
+
+      if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+        console.log(
+          `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
+        );
+      } else {
+        console.log(
+          `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
+        );
+      }
     } else {
       await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId);
       irrelevantCount++;
@@ -706,4 +807,5 @@ module.exports = {
   getCompetitorsList,        // TEMP: exported for Gemini comparison script
   applySectorsToAvoidOverride,             // TEMP: exported for Gemini comparison script
   applyCriticalRequiresCompetitorOverride, // TEMP: exported for Gemini comparison script
+  FORWARD_OUTLOOK_MODULE_ID,
 };

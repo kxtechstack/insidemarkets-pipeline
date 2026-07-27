@@ -10,7 +10,7 @@ const { removeSameTopicArticles } = require('./modules/topicDedup');
 const { filterLowQualityArticles } = require('./modules/qualityFilter');
 const { pushToProcessedQueue } = require('./modules/processedQueue');
 const { startJobTracking, updateJobStage, completeJobTracking, markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
-const { processQueueInBatches } = require('./modules/llmRelevanceProcessor');
+const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID } = require('./modules/llmRelevanceProcessor');
 const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
@@ -534,6 +534,23 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
       storedFinal: llmResult.relevant,
     });
 
+    // TEMP (testing only): manually chain promotion + weekly scoring right
+    // after the pipeline finishes, so the full flow can be validated in one
+    // run during development. In production this should NOT run inline —
+    // promotion and scoring need their own independent schedule (e.g. daily
+    // and weekly cron), decoupled from how often /run fires. Remove this
+    // block once a real scheduler exists.
+    if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+      try {
+        const { runPromotionCheck, runWeeklyScoring } = require('./modules/trendClustering');
+        console.log('\n[TEMP] Running promotion check + weekly scoring inline for testing...');
+        await runPromotionCheck(moduleId, clientId, industry);
+        await runWeeklyScoring(moduleId, clientId, industry);
+      } catch (tempErr) {
+        console.error('[TEMP] Promotion/scoring chain failed:', tempErr.message);
+      }
+    }
+
     // DONE
     await setStatus(jobId, {
       status: 'completed',
@@ -562,6 +579,40 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     console.log(`Lock released for client: ${clientId}, submodule: ${submoduleId}`);
   }
 };
+
+app.post('/admin/users-last-signin', async (req, res) => {
+  const { emails } = req.body;
+
+  if (!emails || !Array.isArray(emails) || emails.length === 0) {
+    return res.status(400).json({ error: 'emails array is required' });
+  }
+
+  try {
+    const { data, error } = await supabaseClient.auth.admin.listUsers({
+      page: 1,
+      perPage: 1000
+    });
+
+    if (error) {
+      console.error('[UsersLastSignin] Error:', error.message);
+      return res.status(500).json({ error: error.message });
+    }
+
+    const emailSet = new Set(emails.map(e => e.toLowerCase()));
+    const result = {};
+
+    data.users.forEach(user => {
+      if (emailSet.has(user.email.toLowerCase())) {
+        result[user.email.toLowerCase()] = user.last_sign_in_at || null;
+      }
+    });
+
+    return res.json({ lastSignins: result });
+  } catch (err) {
+    console.error('[UsersLastSignin] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 
 const PORT = process.env.PORT || 3000;
