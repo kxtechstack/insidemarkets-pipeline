@@ -206,7 +206,7 @@ const setupTrendCollection = async () => {
   }
 };
 
-const AUTO_JOIN_THRESHOLD = 0.5; // how close a match needs to be to auto-join a trend
+const AUTO_JOIN_THRESHOLD = 0.7; // how close a match needs to be to auto-join a trend
 
 /**
  * Checks if a new signal matches an EXISTING trend (one that already
