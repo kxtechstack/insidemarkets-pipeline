@@ -14,6 +14,7 @@ const qdrant = new QdrantClient({
 
 const TREND_COLLECTION = process.env.TREND_QDRANT_COLLECTION || 'trend_matching';
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
+const DEDUP_COLLECTION = process.env.DEDUP_QDRANT_COLLECTION || 'dedup_titles';
 
 const MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473'; // Forward Outlook
 
@@ -66,7 +67,6 @@ async function cleanupForwardModule() {
     .from('processed_urls')
     .delete()
     .eq('module_id', MODULE_ID);
-    
 
   // Remove vectors from Qdrant
   await qdrant.delete(TREND_COLLECTION, {
@@ -83,6 +83,19 @@ async function cleanupForwardModule() {
   });
 
   await qdrant.delete(POLICY_COLLECTION, {
+    filter: {
+      must: [
+        {
+          key: 'module_id',
+          match: {
+            value: MODULE_ID,
+          },
+        },
+      ],
+    },
+  });
+
+  await qdrant.delete(DEDUP_COLLECTION, {
     filter: {
       must: [
         {
