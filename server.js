@@ -443,9 +443,9 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
 
     // Step 2 - Sort newest first
     const sorted = sortByNewest(articles);
-    console.log("\n========== FIRST 90 SORTED ARTICLES ==========\n");
+    console.log("\n========== SORTED ARTICLES ==========\n");
 
-    sorted.slice(0, 90).forEach((article, index) => {
+    sorted.slice(0, 99).forEach((article, index) => {
       console.log(`${index + 1}. ${article.publishedDate} | ${article.title}`);
     });
 
