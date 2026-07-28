@@ -16,6 +16,7 @@ const generateHighlight = async (clientId, moduleId) => {
   .select('source_published_date')
   .eq('client_id', clientId)
   .eq('module_id', moduleId) // CHANGED: scoped to this module only
+  .not('source_published_date', 'is', null)
   .order('source_published_date', { ascending: false })
   .limit(1)
   .single();

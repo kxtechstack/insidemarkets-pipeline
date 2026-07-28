@@ -62,6 +62,12 @@ async function cleanupForwardModule() {
     .delete()
     .eq('module_id', MODULE_ID);
 
+  await supabase
+    .from('processed_urls')
+    .delete()
+    .eq('module_id', MODULE_ID);
+    
+
   // Remove vectors from Qdrant
   await qdrant.delete(TREND_COLLECTION, {
     filter: {
