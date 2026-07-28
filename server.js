@@ -527,8 +527,9 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     // Step 6 - LLM relevance classification + signal extraction
     // CHANGED: processQueueInBatches now takes moduleId before submoduleId
     const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
-    await generateHighlight(clientId, moduleId); // CHANGED: now passes moduleId
-
+    if (moduleId !== FORWARD_OUTLOOK_MODULE_ID) {
+      await generateHighlight(clientId, moduleId);
+    }
     await updateJobStage(jobId, 'llm_processing', {
       afterLlm: llmResult.relevant,
       storedFinal: llmResult.relevant,
