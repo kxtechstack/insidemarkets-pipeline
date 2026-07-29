@@ -86,7 +86,7 @@ const getCompetitorsList = async (clientId) => {
 // never mention them). This checks every competitor name the model used
 // against the ACTUAL signals text in code, and strips/downgrades any
 // fabricated competitor claim before it's stored.
-const applyCompetitorGroundingCheck = (result, signalsText, competitors) => {
+const applyCompetitorGroundingCheck = (result, signalsText, competitors, signals) => {
   if (!Array.isArray(competitors) || competitors.length === 0) return result;
 
   const signalsLower = signalsText.toLowerCase();
@@ -114,9 +114,11 @@ const applyCompetitorGroundingCheck = (result, signalsText, competitors) => {
 
   // If dropping fabricated bullets left too few (or zero), fall back to a
   // generic bullet so the trend card never ships with an empty array.
+  const involvedOrgs = [...new Set((signals || []).map(s => s.organization).filter(Boolean))];
+  const orgList = involvedOrgs.length > 0 ? involvedOrgs.slice(0, 3).join(', ') : 'emerging players';
   const finalBusinessImpact = cleanedBusinessImpact.length > 0
     ? cleanedBusinessImpact
-    : ['This trend touches the clients core sector but does not yet involve a named competitor based on available signals.'];
+    : [`This trend is currently being driven by ${orgList} rather than any of the client's named competitors, making it worth monitoring as an emerging opportunity rather than a defensive priority.`];
 
   // summary is free-form prose, so we can't cleanly delete just the
   // company name mid-sentence without garbling the sentence. Instead, split
@@ -331,6 +333,44 @@ const matchSignalToTrend = async (signalId, signalEmbedding, moduleId, clientId,
     await storeOwnVector();
     await updateTrendCentroid(existingMatch.trendId);
     console.log(`  [TrendMatch] Signal ${signalId} auto-joined trend ${existingMatch.trendId}`);
+
+    // Always regenerate summary/business_impact/impact/sector so the
+    // writeup reflects the full current signal set. Only regenerate the
+    // NAME once 5+ new signals have joined since it was last set --
+    // names shouldn't flip-flop on every single addition.
+    const { data: trendRow } = await supabase
+      .from('trend_clusters')
+      .select('client_id, name, last_named_signal_count')
+      .eq('id', existingMatch.trendId)
+      .single();
+
+    const refreshed = await generateTrendNameAndWriteup(existingMatch.trendId, industry, trendRow?.client_id);
+
+    if (refreshed) {
+      const currentSignalCount = (await getMemberArticleIds(existingMatch.trendId)).length;
+      const signalsSinceLastNaming = currentSignalCount - (trendRow?.last_named_signal_count || 0);
+      const shouldRenameToo = signalsSinceLastNaming >= 5;
+
+      const updatePayload = {
+        summary: refreshed.summary,
+        business_impact: refreshed.business_impact,
+        impact: refreshed.impact,
+        sector: refreshed.sector,
+      };
+
+      if (shouldRenameToo) {
+        updatePayload.name = refreshed.name;
+        updatePayload.last_named_signal_count = currentSignalCount;
+        console.log(`  [TrendMatch] Renamed trend ${existingMatch.trendId} to "${refreshed.name}" (${signalsSinceLastNaming} new signals since last naming)`);
+      } else {
+        console.log(`  [TrendMatch] Summary/impact refreshed for trend ${existingMatch.trendId}, name kept ("${trendRow?.name}") — ${signalsSinceLastNaming}/5 signals since last naming`);
+      }
+
+      await supabase.from('trend_clusters').update(updatePayload).eq('id', existingMatch.trendId);
+    } else {
+      console.log(`  [TrendMatch] Writeup refresh failed for trend ${existingMatch.trendId}, keeping previous writeup`);
+    }
+
     return { status: 'auto_joined', trendId: existingMatch.trendId };
   }
 
@@ -481,12 +521,14 @@ const promoteCandidate = async (trendId, industry) => {
   // generateTrendWriteup pair — one LLM round-trip instead of two.
   const result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
   if (result) {
+    const memberCountAtNaming = (await getMemberArticleIds(trendId)).length;
     await supabase.from('trend_clusters').update({
       name: result.name,
       summary: result.summary,
       business_impact: result.business_impact,
       impact: result.impact,
       sector: result.sector,
+      last_named_signal_count: memberCountAtNaming,
     }).eq('id', trendId);
   }
 
@@ -707,7 +749,21 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
       return null;
     }
 
-    const signalsText = signals
+    // Cap how many signals go into the prompt. Sending all of them (e.g.
+    // 24) both times out the local model AND produces a more diluted,
+    // generic summary -- more raw text doesn't improve synthesis with a
+    // small model, it just drowns the real signal. Take the most RECENT
+    // N signals, since those best reflect the trend's current state.
+    const MAX_SIGNALS_FOR_WRITEUP = 12;
+    const signalsForWriteup = signals.length > MAX_SIGNALS_FOR_WRITEUP
+      ? signals.slice(-MAX_SIGNALS_FOR_WRITEUP)
+      : signals;
+
+    if (signals.length > MAX_SIGNALS_FOR_WRITEUP) {
+      console.log(`  [NamingWriteup] Trend ${trendId} has ${signals.length} signals — using most recent ${MAX_SIGNALS_FOR_WRITEUP} for writeup generation`);
+    }
+
+    const signalsText = signalsForWriteup
       .map((s, i) => `${i + 1}. [${s.signal_type}] ${s.organization} — ${s.signal_title}: ${s.summary}`)
       .join('\n');
 
@@ -729,7 +785,7 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
       temperature: 0.4,
       max_tokens: 600, // bumped from the old writeup-only 500 — response now also carries the name
     }, {
-      timeout: 90000,
+      timeout: 150000,
       headers: {
         'Content-Type': 'application/json',
         'ngrok-skip-browser-warning': 'true',
@@ -751,7 +807,7 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
     // context but not actually present in the signals it was given) and
     // strip/downgrade before this ever reaches the database.
     const competitors = await getCompetitorsList(clientId);
-    result = applyCompetitorGroundingCheck(result, signalsText, competitors);
+    result = applyCompetitorGroundingCheck(result, signalsText, competitors, signals);
 
     // The model consistently under-rates trends to Medium even when a
     // named competitor genuinely has 2+ real signals backing the trend —
