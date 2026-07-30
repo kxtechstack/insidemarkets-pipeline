@@ -10,7 +10,7 @@ const { removeSameTopicArticles } = require('./modules/topicDedup');
 const { filterLowQualityArticles } = require('./modules/qualityFilter');
 const { pushToProcessedQueue } = require('./modules/processedQueue');
 const { startJobTracking, updateJobStage, completeJobTracking, markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
-const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID } = require('./modules/llmRelevanceProcessor');
+const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
 const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
@@ -527,7 +527,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     // Step 6 - LLM relevance classification + signal extraction
     // CHANGED: processQueueInBatches now takes moduleId before submoduleId
     const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
-    if (moduleId !== FORWARD_OUTLOOK_MODULE_ID) {
+    if (moduleId !== FORWARD_OUTLOOK_MODULE_ID && moduleId !== MARKET_DYNAMICS_MODULE_ID) {
       await generateHighlight(clientId, moduleId);
     }
     await updateJobStage(jobId, 'llm_processing', {

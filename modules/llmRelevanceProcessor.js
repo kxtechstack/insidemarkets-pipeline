@@ -41,7 +41,7 @@ const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueu
 const { refreshLock } = require('./queueManager');
 const { matchSignalToTrend } = require('./trendClustering');
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
-
+const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Log each article's processing result to Supabase ────────────────────────
@@ -221,6 +221,69 @@ const getCompetitorsList = async (clientId) => {
   }
 };
 
+// NEW: Fetches this client's enabled signals for a module, grouped by submodule
+// (dimension). Used to (a) constrain the classification prompt to only the
+// client's active taxonomy, and (b) validate whatever the LLM returns.
+const getEnabledSignalsForClient = async (clientId, moduleId) => {
+  const { data, error } = await supabase
+    .schema('admin')
+    .from('client_signals')
+    .select(`
+      is_enabled,
+      signals!inner (
+        id, signal_name, submodule_id, module_id,
+        submodules!inner ( id, submodule_name )
+      )
+    `)
+    .eq('client_id', clientId)
+    .eq('is_enabled', true)
+    .eq('signals.module_id', moduleId);
+
+  if (error) {
+    console.log(`[MonitoringScope] Error fetching enabled signals for client ${clientId}: ${error.message}`);
+    return [];
+  }
+
+  return (data || []).map(row => ({
+    signal_id: row.signals.id,
+    signal_name: row.signals.signal_name,
+    submodule_id: row.signals.submodule_id,
+    submodule_name: row.signals.submodules.submodule_name,
+  }));
+};
+
+// NEW: Formats the enabled signals list into readable text for the prompt,
+// grouped by dimension.
+const formatScopeForPrompt = (enabledSignals) => {
+  if (enabledSignals.length === 0) return null;
+  return enabledSignals
+    .map((s, i) => `${i + 1}. ${s.signal_name} (dimension: ${s.submodule_name})`)
+    .join('\n');
+};
+
+// NEW: Deterministic safety net — checks the LLM's chosen signal against the
+// client's actual enabled scope. If it picked something outside scope
+// (hallucinated or drifted), mark irrelevant instead of storing it silently
+// under an unmonitored signal.
+const applyMonitoringScopeValidation = (classification, enabledSignals) => {
+  if (enabledSignals.length === 0) return classification; // no scope configured — don't block
+
+  const match = enabledSignals[classification.signal_number - 1];
+
+  if (!classification.signal_number || !match) {
+    console.log(`  [MonitoringScope] signal_number ${classification.signal_number} is not a valid enabled signal — marking irrelevant`);
+    return { ...classification, is_relevant: false, reason: 'Signal not in client monitoring scope' };
+  }
+
+  return {
+    ...classification,
+    submodule_id: match.submodule_id,
+    signal_id: match.signal_id,
+    submodule_name: match.submodule_name,
+    signal_name: match.signal_name, // guaranteed correct — pulled from DB, not the model's output
+  };
+};
+
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
 // the "cap impact_level at Low" instruction in the prompt, this checks
 // the classification result against the client's sectors_to_avoid list
@@ -301,14 +364,16 @@ const applySectorValidation = (classification) => {
 // CHANGED: now accepts clientContext (optional) — inserted wherever the
 // prompt template has a {client_context} placeholder. Prompts that don't
 // have this placeholder (like Policy & Risk) are unaffected.
-const fillPromptTemplate = (template, industry, title, text, clientContext = null) => {
+const fillPromptTemplate = (template, industry, title, text, clientContext = null, monitoringScope = null) => {
   const truncatedText = (text || '').slice(0, TEXT_TRUNCATE_LENGTH);
   const contextText = clientContext || 'No specific client context available. Use industry-level reasoning only.';
+  const scopeText = monitoringScope || 'No monitoring scope configured.';
   return template
     .replace(/{industry}/g, industry)
     .replace(/{title}/g, title || '')
     .replace(/{text}/g, truncatedText)
-    .replace(/{client_context}/g, contextText);
+    .replace(/{client_context}/g, contextText)
+    .replace(/{monitoring_scope}/g, scopeText);
 };
 
 // ── Clean raw article text before synthesis ──────────────────────────────────
@@ -371,8 +436,8 @@ const synthesizeContent = async (article, classification) => {
 
 // ── Call LM Studio for relevance classification + signal extraction ──────────
 // CHANGED: now accepts clientContext, passed through to fillPromptTemplate
-const classifyArticle = async (promptTemplate, industry, article, clientContext = null, moduleId = null) => {
-  const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text, clientContext);
+const classifyArticle = async (promptTemplate, industry, article, clientContext = null, moduleId = null, monitoringScope = null) => {
+  const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text, clientContext, monitoringScope);
 
   try {
     const response = await axios.post(LM_STUDIO_URL, {
@@ -483,6 +548,18 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
       };
     }
 
+    if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+      return {
+        is_relevant: Boolean(parsed.is_relevant),
+        reason: parsed.reason || 'No reason provided',
+        signal_number: Number.isInteger(parsed.signal_number) ? parsed.signal_number : 0,
+        country: parsed.country || 'Global',
+        organization: parsed.organization || 'Unknown',
+        signal_title: parsed.signal_title || article.title,
+        summary: parsed.summary || '',
+      };
+    }
+
     return {
       is_relevant: Boolean(parsed.is_relevant),
       reason: parsed.reason || 'No reason provided',
@@ -508,6 +585,19 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
         organization: 'Unknown',
         sector: 'Technology',
         horizon_estimate: 'mid_term',
+        summary: '',
+      };
+    }
+
+    if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+      return {
+        is_relevant: false,
+        technical_failure: true,
+        reason: `Classification failed: ${err.message}`,
+        signal_number: 0,
+        country: 'Global',
+        organization: 'Unknown',
+        signal_title: article.title,
         summary: '',
       };
     }
@@ -644,6 +734,55 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   });
   if (fullError) console.error('[Storage] full insert error:', fullError.message);
 
+  // Step 4.5 — Market Dynamics branches off here entirely: instead of a
+  // policy_signals row, it stores the individual article as a
+  // market_dynamics_signals row (full audit trail — title, org, date,
+  // source), then creates/enriches the market_insights card, then links
+  // the two together.
+  if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+    try {
+      const { enrichOrCreateInsight } = require('./marketInsights');
+
+      const { data: signalRow, error: sigError } = await supabase
+        .from('market_dynamics_signals')
+        .insert({
+          article_id: articleId,
+          client_id: clientId,
+          module_id: moduleId,
+          submodule_id: classification.submodule_id,
+          signal_id: classification.signal_id,
+          category: classification.submodule_name || null,
+          signal_title: synthesizedTitle,
+          summary: contentToChunk,
+          organization: classification.organization || 'Unknown',
+          country: classification.country,
+          source_url: article.url,
+          published_date: article.publishedDate,
+        })
+        .select()
+        .single();
+      if (sigError) console.error('[Storage] market_dynamics_signals insert error:', sigError.message);
+
+      const result = await enrichOrCreateInsight(
+        clientId,
+        moduleId,
+        classification.submodule_id,
+        classification.signal_id,
+        articleId,
+        contentToChunk,
+        industry,
+        classification.submodule_name
+      );
+
+      if (signalRow && result.insightId) {
+        await supabase.from('market_dynamics_signals').update({ insight_id: result.insightId }).eq('id', signalRow.id);
+      }
+    } catch (mdErr) {
+      console.error(`  [MarketDynamics] Failed to enrich/create insight for "${article.title}": ${mdErr.message} — skipping, continuing to next article`);
+    }
+    return chunks.length;
+  }
+
   // Step 5 — Store structured signal for frontend
   const signalInsert = {
     article_id: articleId,
@@ -708,6 +847,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   let clientContext = null;
   let sectorsToAvoid = [];
   let competitors = [];
+  let enabledSignals = [];
   if (MODULES_NEEDING_CLIENT_CONTEXT.has(moduleId)) {
     clientContext = await getClientContext(clientId);
     if (clientContext) {
@@ -716,6 +856,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
     sectorsToAvoid = await getSectorsToAvoid(clientId);
     competitors = await getCompetitorsList(clientId);
   }
+  if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+    enabledSignals = await getEnabledSignalsForClient(clientId, moduleId);
+    console.log(`[MonitoringScope] Client ${clientId} has ${enabledSignals.length} enabled signal(s) for Market Dynamics`);
+  }
 
   let relevantCount = 0;
   let irrelevantCount = 0;
@@ -723,10 +867,16 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
-    let classification = await classifyArticle(promptTemplate, industry, article, clientContext, moduleId);
+    let classification = await classifyArticle(
+      promptTemplate, industry, article, clientContext, moduleId,
+      moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
+    );
     classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
     classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
     classification = applySectorValidation(classification);
+    if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+      classification = applyMonitoringScopeValidation(classification, enabledSignals);
+    }
 
     if (classification.technical_failure) {
       await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
@@ -808,4 +958,5 @@ module.exports = {
   applySectorsToAvoidOverride,             // TEMP: exported for Gemini comparison script
   applyCriticalRequiresCompetitorOverride, // TEMP: exported for Gemini comparison script
   FORWARD_OUTLOOK_MODULE_ID,
+  MARKET_DYNAMICS_MODULE_ID,
 };

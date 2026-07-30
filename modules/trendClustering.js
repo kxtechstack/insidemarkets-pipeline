@@ -209,6 +209,10 @@ const setupTrendCollection = async () => {
 };
 
 const AUTO_JOIN_THRESHOLD = 0.65; // how close a match needs to be to auto-join a trend
+const MERGE_SEARCH_THRESHOLD = 0.60; // used only at promotion time, comparing a candidate's
+// pooled centroid against other ACTIVE trends' centroids -- lower than AUTO_JOIN_THRESHOLD
+// because comparing two averaged centroids is a much more stable signal than one raw
+// article vs a centroid, so it can afford to be a bit more permissive.
 
 /**
  * Checks if a new signal matches an EXISTING trend (one that already
@@ -453,7 +457,11 @@ const checkPromotionEligibility = async (trendId) => {
 /**
  * Promotes a candidate trend to active: creates its centroid for the
  * first time, generates name + writeup (single combined LLM call), and
- * flips its status.
+ * flips its status. BEFORE creating a brand new active trend, checks
+ * whether this candidate's pooled centroid already matches an existing
+ * active trend closely enough that it should be MERGED instead of
+ * duplicated -- this is what stops near-identical trends like
+ * "Sustainable Refill" / "Sustainability Refill" from both existing.
  */
 const promoteCandidate = async (trendId, industry) => {
   const { data: trendRow } = await supabase
@@ -488,6 +496,74 @@ const promoteCandidate = async (trendId, industry) => {
   }
   for (let i = 0; i < dim; i++) centroid[i] /= vectors.length;
 
+  // NEW: before creating a brand new active trend, check if this
+  // candidate's pooled centroid is close to an EXISTING active trend's
+  // centroid. Pure article-vs-centroid matching (AUTO_JOIN_THRESHOLD)
+  // only ever runs per-signal, using one article's wording at a time --
+  // this pooled-centroid-vs-centroid check is a cleaner, more stable
+  // comparison, run once at promotion time.
+  const mergeSearch = await qdrant.search(TREND_COLLECTION, {
+    vector: centroid,
+    filter: {
+      must: [
+        { key: 'type', match: { value: 'centroid' } },
+        { key: 'module_id', match: { value: trendRow?.module_id } },
+        { key: 'client_id', match: { value: trendRow?.client_id } },
+        { key: 'industry', match: { value: industry } },
+      ],
+    },
+    limit: 1,
+    with_payload: true,
+  });
+
+  const mergeMatch = mergeSearch[0];
+
+  if (mergeMatch && mergeMatch.score >= MERGE_SEARCH_THRESHOLD) {
+    const existingTrendId = mergeMatch.payload.trend_id;
+    console.log(`  [Promotion] Candidate ${trendId}'s pooled centroid matches existing active trend ${existingTrendId} (score: ${mergeMatch.score.toFixed(3)}) — merging instead of creating a duplicate.`);
+
+    const { data: candidateMembers } = await supabase
+      .from('trend_membership')
+      .select('id, signal_id')
+      .eq('trend_id', trendId);
+
+    const { data: existingMembers } = await supabase
+      .from('trend_membership')
+      .select('signal_id')
+      .eq('trend_id', existingTrendId);
+    const existingSignalIds = new Set((existingMembers || []).map(m => m.signal_id));
+
+    for (const member of candidateMembers || []) {
+      if (existingSignalIds.has(member.signal_id)) {
+        await supabase.from('trend_membership').delete().eq('id', member.id);
+      } else {
+        await supabase.from('trend_membership').update({ trend_id: existingTrendId }).eq('id', member.id);
+      }
+    }
+
+    // This candidate never had its own centroid (it wasn't promoted yet),
+    // so nothing to clean up in Qdrant for it -- just delete its row.
+    await supabase.from('trend_clusters').delete().eq('id', trendId);
+
+    await updateTrendCentroid(existingTrendId);
+    const mergedResult = await generateTrendNameAndWriteup(existingTrendId, industry, trendRow?.client_id);
+    if (mergedResult) {
+      const memberCount = (await getMemberArticleIds(existingTrendId)).length;
+      await supabase.from('trend_clusters').update({
+        name: mergedResult.name,
+        summary: mergedResult.summary,
+        business_impact: mergedResult.business_impact,
+        impact: mergedResult.impact,
+        sector: mergedResult.sector,
+        last_named_signal_count: memberCount,
+      }).eq('id', existingTrendId);
+    }
+
+    console.log(`  [Promotion] Merged into existing trend ${existingTrendId}: "${mergedResult?.name}"`);
+    return { status: 'merged', mergedIntoTrendId: existingTrendId, name: mergedResult?.name };
+  }
+
+  // No merge match -- proceed with normal promotion as before
   const centroidPointId = uuidv4();
   await qdrant.upsert(TREND_COLLECTION, {
     points: [{
@@ -517,8 +593,6 @@ const promoteCandidate = async (trendId, industry) => {
     return { status: 'error', error: error.message };
   }
 
-  // Single combined call replaces the old generateTrendName +
-  // generateTrendWriteup pair — one LLM round-trip instead of two.
   const result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
   if (result) {
     const memberCountAtNaming = (await getMemberArticleIds(trendId)).length;
