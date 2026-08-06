@@ -63,6 +63,7 @@ const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
   checkCompatibility: false,
+  timeout: 30000, // NEW — was hitting 10s default timeout on cold connections
 });
 
 const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
@@ -78,6 +79,24 @@ const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP) || 50;
 const TEXT_TRUNCATE_LENGTH = Number(process.env.LLM_TEXT_TRUNCATE_LENGTH) || 5000;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// NEW: Retries a Qdrant/network operation up to 3 times with backoff,
+// so a single transient timeout doesn't crash the entire batch run.
+const retryWithBackoff = async (fn, label, maxRetries = 3) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxRetries) {
+        console.log(`  [Retry] ${label} failed after ${maxRetries} attempts: ${err.message}`);
+        throw err;
+      }
+      const delay = attempt * 2000;
+      console.log(`  [Retry] ${label} failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms: ${err.message}`);
+      await sleep(delay);
+    }
+  }
+};
 
 // ── Embedding model ──────────────────────────────────────────────────────────
 let embedderPromise = null;
@@ -229,36 +248,67 @@ const getEnabledSignalsForClient = async (clientId, moduleId) => {
     .schema('admin')
     .from('client_signals')
     .select(`
-      is_enabled,
-      signals!inner (
-        id, signal_name, submodule_id, module_id,
-        submodules!inner ( id, submodule_name )
-      )
-    `)
+  is_enabled,
+  signals!inner (
+    id,
+    signal_name,
+    signal_definition,
+    submodule_id,
+    module_id,
+    submodules!inner (
+      id,
+      submodule_name
+    )
+  )
+`)
     .eq('client_id', clientId)
     .eq('is_enabled', true)
-    .eq('signals.module_id', moduleId);
+    .eq('signals.module_id', moduleId)
+.order('submodule_id', { foreignTable: 'signals' })
+.order('signal_name', { foreignTable: 'signals' });
 
   if (error) {
     console.log(`[MonitoringScope] Error fetching enabled signals for client ${clientId}: ${error.message}`);
     return [];
   }
 
-  return (data || []).map(row => ({
+ return (data || []).map(row => ({
     signal_id: row.signals.id,
     signal_name: row.signals.signal_name,
+    signal_definition: row.signals.signal_definition,
     submodule_id: row.signals.submodule_id,
     submodule_name: row.signals.submodules.submodule_name,
-  }));
+}));
 };
 
 // NEW: Formats the enabled signals list into readable text for the prompt,
 // grouped by dimension.
 const formatScopeForPrompt = (enabledSignals) => {
-  if (enabledSignals.length === 0) return null;
-  return enabledSignals
-    .map((s, i) => `${i + 1}. ${s.signal_name} (dimension: ${s.submodule_name})`)
-    .join('\n');
+  if (!enabledSignals.length) return null;
+
+  const grouped = {};
+  let counter = 1;
+
+  for (const signal of enabledSignals) {
+    if (!grouped[signal.submodule_name]) {
+      grouped[signal.submodule_name] = [];
+    }
+    grouped[signal.submodule_name].push(signal);
+  }
+
+  let output = "";
+
+  for (const [dimension, signals] of Object.entries(grouped)) {
+    output += `\n=== ${dimension} ===\n`;
+
+    for (const signal of signals) {
+      output += `${counter}. ${signal.signal_name}\n`;
+      output += `Definition: ${signal.signal_definition}\n\n`;
+      counter++;
+    }
+  }
+
+  return output.trim();
 };
 
 // NEW: Deterministic safety net — checks the LLM's chosen signal against the
@@ -266,7 +316,7 @@ const formatScopeForPrompt = (enabledSignals) => {
 // (hallucinated or drifted), mark irrelevant instead of storing it silently
 // under an unmonitored signal.
 const applyMonitoringScopeValidation = (classification, enabledSignals) => {
-  if (enabledSignals.length === 0) return classification; // no scope configured — don't block
+  if (enabledSignals.length === 0) return classification;
 
   const match = enabledSignals[classification.signal_number - 1];
 
@@ -275,13 +325,7 @@ const applyMonitoringScopeValidation = (classification, enabledSignals) => {
     return { ...classification, is_relevant: false, reason: 'Signal not in client monitoring scope' };
   }
 
-  return {
-    ...classification,
-    submodule_id: match.submodule_id,
-    signal_id: match.signal_id,
-    submodule_name: match.submodule_name,
-    signal_name: match.signal_name, // guaranteed correct — pulled from DB, not the model's output
-  };
+  return { ...classification, submodule_id: match.submodule_id, signal_id: match.signal_id };
 };
 
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
@@ -321,6 +365,39 @@ const applyCriticalRequiresCompetitorOverride = (classification, article, compet
   }
 
   return classification;
+};
+
+const VALID_SIGNAL_CATEGORIES = [
+  'Market Intelligence', 'Corporate Activity', 'Investment Activity',
+  'Consumer & Demand', 'Innovation & Product', 'Regulatory & Compliance',
+  'Macro & Economic', 'Leadership',
+];
+
+const SIGNAL_CATEGORY_FALLBACK_MAP = {
+  funding: 'Investment Activity', venture: 'Investment Activity', investment: 'Investment Activity',
+  'private equity': 'Investment Activity', merger: 'Corporate Activity', acquisition: 'Corporate Activity',
+  consolidation: 'Corporate Activity', partnership: 'Corporate Activity', restructuring: 'Corporate Activity',
+  demand: 'Consumer & Demand', consumer: 'Consumer & Demand', pricing: 'Consumer & Demand', retail: 'Consumer & Demand',
+  product: 'Innovation & Product', innovation: 'Innovation & Product', technology: 'Innovation & Product', launch: 'Innovation & Product',
+  regulation: 'Regulatory & Compliance', compliance: 'Regulatory & Compliance', policy: 'Regulatory & Compliance', legal: 'Regulatory & Compliance',
+  macro: 'Macro & Economic', economic: 'Macro & Economic', inflation: 'Macro & Economic', interest: 'Macro & Economic',
+  executive: 'Leadership', ceo: 'Leadership', appointment: 'Leadership', hire: 'Leadership', resign: 'Leadership',
+};
+
+const applySignalCategoryValidation = (classification) => {
+  const raw = (classification.category || '').trim();
+  if (VALID_SIGNAL_CATEGORIES.includes(raw)) return classification;
+
+  const normalized = raw.toLowerCase();
+  const mappedKey = Object.keys(SIGNAL_CATEGORY_FALLBACK_MAP).find(k => normalized.includes(k));
+  const mapped = mappedKey ? SIGNAL_CATEGORY_FALLBACK_MAP[mappedKey] : null;
+
+  if (mapped) {
+    console.log(`  [SignalCategory] Mapping "${classification.category}" -> "${mapped}"`);
+    return { ...classification, category: mapped };
+  }
+  console.log(`  [SignalCategory] Unrecognized category "${classification.category}", defaulting to "Market Intelligence"`);
+  return { ...classification, category: 'Market Intelligence' };
 };
 
 // NEW: Deterministic safety net — the model sometimes returns a sector
@@ -552,7 +629,9 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
       return {
         is_relevant: Boolean(parsed.is_relevant),
         reason: parsed.reason || 'No reason provided',
+        topic_summary: parsed.topic_summary || null,
         signal_number: Number.isInteger(parsed.signal_number) ? parsed.signal_number : 0,
+        category: parsed.category || null,
         country: parsed.country || 'Global',
         organization: parsed.organization || 'Unknown',
         signal_title: parsed.signal_title || article.title,
@@ -595,6 +674,7 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
         technical_failure: true,
         reason: `Classification failed: ${err.message}`,
         signal_number: 0,
+        category: null,
         country: 'Global',
         organization: 'Unknown',
         signal_title: article.title,
@@ -674,7 +754,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   // Step 2 — Chunk synthesized body and store in Qdrant
   const points = [];
   for (let i = 0; i < chunks.length; i++) {
-    const vector = await embedText(chunks[i]);
+    const vector = await retryWithBackoff(() => embedText(chunks[i]), `embed chunk ${i}`);
     points.push({
       id: uuidv4(),
       vector,
@@ -694,7 +774,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   }
 
   if (points.length > 0) {
-    await qdrant.upsert(POLICY_COLLECTION, { points });
+    await retryWithBackoff(() => qdrant.upsert(POLICY_COLLECTION, { points }), 'Qdrant upsert');
   }
 
   // Step 3 — Store metadata in Supabase (synthesized title, no raw text)
@@ -751,10 +831,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
           module_id: moduleId,
           submodule_id: classification.submodule_id,
           signal_id: classification.signal_id,
-          category: classification.submodule_name || null,
           signal_title: synthesizedTitle,
-          summary: contentToChunk,
+          summary: classification.summary || contentToChunk.slice(0, 300),
           organization: classification.organization || 'Unknown',
+          category: classification.category,
           country: classification.country,
           source_url: article.url,
           published_date: article.publishedDate,
@@ -770,8 +850,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
         classification.signal_id,
         articleId,
         contentToChunk,
-        industry,
-        classification.submodule_name
+        industry
       );
 
       if (signalRow && result.insightId) {
@@ -874,8 +953,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
     classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
     classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
     classification = applySectorValidation(classification);
+
     if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
       classification = applyMonitoringScopeValidation(classification, enabledSignals);
+      classification = applySignalCategoryValidation(classification);
     }
 
     if (classification.technical_failure) {
@@ -889,8 +970,8 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         clientId,
         industry,
         jobId,
-        moduleId,    // CHANGED: new
-        submoduleId  // CHANGED: new
+        moduleId,
+        submoduleId
       );
       await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
       relevantCount++;
@@ -932,7 +1013,15 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
     console.log(`\n[LLMProcessor] --- Batch ${batchNumber} (${remaining} remaining) ---`);
 
     const batch = await pullProcessedBatch(queueKey, batchSize);
-    const result = await processArticlesForRelevance(batch, clientId, industry, jobId, moduleId, submoduleId); // CHANGED: passes moduleId
+    let result;
+    try {
+      result = await processArticlesForRelevance(batch, clientId, industry, jobId, moduleId, submoduleId);
+    } catch (batchErr) {
+      console.error(`[LLMProcessor] Batch ${batchNumber} failed, skipping to next batch: ${batchErr.message}`);
+      remaining = await getProcessedQueueLength(queueKey);
+      batchNumber++;
+      continue;
+    }
 
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;
@@ -957,6 +1046,7 @@ module.exports = {
   getCompetitorsList,        // TEMP: exported for Gemini comparison script
   applySectorsToAvoidOverride,             // TEMP: exported for Gemini comparison script
   applyCriticalRequiresCompetitorOverride, // TEMP: exported for Gemini comparison script
+  applySignalCategoryValidation, // TEMP: exported for testing
   FORWARD_OUTLOOK_MODULE_ID,
   MARKET_DYNAMICS_MODULE_ID,
 };

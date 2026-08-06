@@ -1,9 +1,42 @@
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 
+const { pipeline } = require('@xenova/transformers');
+
+let embedderPromise = null;
+const getEmbedder = () => {
+  if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  return embedderPromise;
+};
+const embedText = async (text) => {
+  const embedder = await getEmbedder();
+  const output = await embedder(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
+};
+
+const cosineSimilarity = (a, b) => {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+};
+
+const CARD_SIMILARITY_THRESHOLD = 0.45;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
 const LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'llama-3.2-3b-instruct';
+const getDimensionName = async (submoduleId) => {
+  const { data } = await supabase
+    .schema('admin')
+    .from('submodules')
+    .select('submodule_name')
+    .eq('id', submoduleId)
+    .single();
+  return data?.submodule_name || null;
+};
 
 // Repairs common LLM JSON formatting issues before parsing (small models
 // occasionally return slightly malformed JSON — stray commas, unescaped
@@ -68,15 +101,37 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-// Step 1 — does a card already exist at this exact address?
-const findExistingInsight = async (clientId, signalId) => {
-  const { data } = await supabase
+// Step 1 — find the most similar EXISTING card for this signal, if any
+// crosses the similarity threshold. Uses content similarity, not just
+// "does any card exist for this signal" — so unrelated companies/topics
+// under the same signal get their own separate cards.
+const findExistingInsight = async (clientId, signalId, articleText) => {
+  const { data: candidates } = await supabase
     .from('market_insights')
     .select('*')
     .eq('client_id', clientId)
-    .eq('signal_id', signalId)
-    .maybeSingle();
-  return data || null;
+    .eq('signal_id', signalId);
+
+  if (!candidates || candidates.length === 0) return null;
+
+  const newEmbedding = await embedText((articleText || '').slice(0, 1000));
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const card of candidates) {
+    const cardText = `${card.title} ${card.summary}`.slice(0, 1000);
+    const cardEmbedding = await embedText(cardText);
+    const score = cosineSimilarity(newEmbedding, cardEmbedding);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = card;
+    }
+  }
+
+  console.log(`  [CardMatch] Best match score: ${bestScore.toFixed(3)} (threshold: ${CARD_SIMILARITY_THRESHOLD})`);
+
+  return bestScore >= CARD_SIMILARITY_THRESHOLD ? bestMatch : null;
 };
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
@@ -98,9 +153,9 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
     : 'EXISTING CARD: none — this is the first signal for this topic.';
 
   const finalPrompt = promptRow.prompt_template
-    .replace('{industry}', industry)
-    .replace('{existing_card}', existingText)
-    .replace('{new_article}', newArticleText);
+  .replace(/{industry}/g, industry)
+  .replace(/{existing_card}/g, existingText)
+  .replace(/{new_article}/g, newArticleText);
 
   const response = await axios.post(LM_STUDIO_URL, {
     model: LM_STUDIO_MODEL,
@@ -122,16 +177,18 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
   return {
     title: parsed.title,
     summary: parsed.summary,
+    short_summary: parsed.short_summary,
     business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
-    country: parsed.country || existingCard?.country || 'Unknown',
+    country: parsed.country || existingCard?.country || 'Global',
   };
 };
 
 // Step 3 — the main entry point. Called once per relevant Market Dynamics article.
-const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, submoduleName = null) => {
-  const existing = await findExistingInsight(clientId, signalId);
+const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
+  const existing = await findExistingInsight(clientId, signalId, articleText);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
+  const category = await getDimensionName(submoduleId);
 
   if (existing) {
     await supabase
@@ -139,9 +196,10 @@ const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, 
       .update({
         title: writeup.title,
         summary: writeup.summary,
+        short_summary: writeup.short_summary,
         business_impact: writeup.business_impact,
         country: writeup.country,
-        category: submoduleName || existing.category,
+        category,
         signal_count: existing.signal_count + 1,
         relevance_level: calculateRelevanceLevel(existing.signal_count + 1),
         last_enriched_at: new Date().toISOString(),
@@ -162,9 +220,10 @@ const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, 
       signal_id: signalId,
       title: writeup.title,
       summary: writeup.summary,
+      short_summary: writeup.short_summary,
       business_impact: writeup.business_impact,
       country: writeup.country,
-      category: submoduleName || null,
+      category,
       signal_count: 1,
       relevance_level: calculateRelevanceLevel(1),
       last_enriched_at: new Date().toISOString(),

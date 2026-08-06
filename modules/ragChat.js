@@ -18,16 +18,24 @@ const qdrant = new QdrantClient({
 
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 
-const getRagPromptTemplate = async () => {
+const RAG_MODULE_PROMPTS = {
+  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'rag_chat_policy_v1',                      // Policy & Risk
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'rag_chat_market_dynamics_v1',      // Market Dynamics
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'rag_chat_forward_outlook_v1',      // Forward Outlook
+};
+
+const getRagPromptTemplate = async (moduleId) => {
+  const promptId = RAG_MODULE_PROMPTS[moduleId] || 'rag_chat_policy_v1';
+
   const { data, error } = await supabase
     .from('prompts')
     .select('prompt_template')
-    .eq('id', 'rag_chat_v1')
+    .eq('id', promptId)
     .eq('is_active', true)
     .single();
 
   if (error || !data) {
-    throw new Error(`Could not load RAG prompt: ${error?.message}`);
+    throw new Error(`Could not load RAG prompt '${promptId}': ${error?.message}`);
   }
 
   return data.prompt_template;
@@ -124,7 +132,7 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   // Step 3 — LangChain RAG chain
   const llm = new LMStudioChat();
 
-  const promptTemplate = await getRagPromptTemplate();
+  const promptTemplate = await getRagPromptTemplate(moduleId);
 
   const prompt = ChatPromptTemplate.fromMessages([
   ["system", promptTemplate]

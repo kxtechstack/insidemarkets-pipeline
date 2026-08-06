@@ -114,10 +114,10 @@ app.post('/run', async (req, res) => {
   const fetchSource = source || 'Exa'; // default to Exa if caller doesn't send one
 
   // CHANGED: acquireLock now takes (clientId, submoduleId) — matches updated queueManager.js
-  const lockAcquired = await acquireLock(clientId, submoduleId);
-  if (!lockAcquired) {
-    return res.status(409).json({ error: 'A pipeline is already running for this client/submodule. Please wait for it to finish.' });
-  }
+  //const lockAcquired = await acquireLock(clientId, submoduleId);
+  //if (!lockAcquired) {
+  //  return res.status(409).json({ error: 'A pipeline is already running for this client/submodule. Please wait for it to finish.' });
+  //}
 
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   res.json({ jobId, status: 'started' });
@@ -575,8 +575,8 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     await setStatus(jobId, { status: 'failed', error: error.message });
     await failJobTracking(jobId, currentStage, error.message); // CHANGED: was 'unknown', now the real stage
   } finally {
-    // CHANGED: releaseLock now takes (clientId, submoduleId) — matches updated queueManager.js
-    await releaseLock(clientId, submoduleId);
+    // TEMP: releaseLock disabled since acquireLock is also disabled in /run above
+    // await releaseLock(clientId, submoduleId);
     console.log(`Lock released for client: ${clientId}, submodule: ${submoduleId}`);
   }
 };
