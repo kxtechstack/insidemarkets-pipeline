@@ -861,8 +861,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     signalInsert.business_impact = classification.business_impact;
   }
 
+  const targetSignalsTable = moduleId === FORWARD_OUTLOOK_MODULE_ID ? 'trend_signals' : 'policy_signals';
+
   const { data: newSignal, error: signalError } = await supabase
-    .from('policy_signals')
+    .from(targetSignalsTable)
     .insert(signalInsert)
     .select()
     .single();

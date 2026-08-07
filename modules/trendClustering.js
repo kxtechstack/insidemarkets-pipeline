@@ -811,7 +811,7 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
     if (articleIds.length === 0) return null;
 
     const { data: signals, error } = await supabase
-      .from('policy_signals')
+      .from('trend_signals')
       .select('signal_title, summary, signal_type, organization')
       .in('id', articleIds);
 
@@ -917,7 +917,7 @@ const calculateTrendRing = async (trendId) => {
 
   const signalIds = members.map(m => m.signal_id);
   const { data: signals, error: signalsError } = await supabase
-    .from('policy_signals')
+    .from('trend_signals')
     .select('id, horizon_estimate')
     .in('id', signalIds);
 
