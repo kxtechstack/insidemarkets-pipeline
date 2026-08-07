@@ -20,7 +20,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
+const { callLLM } = require('./llmClient');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrant = new QdrantClient({
@@ -28,9 +28,6 @@ const qdrant = new QdrantClient({
   apiKey: process.env.QDRANT_API_KEY,
   checkCompatibility: false,
 });
-
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
-const LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'llama-3.2-3b-instruct';
 
 const CUSTOM_COLLECTION = process.env.CUSTOM_SOURCE_QDRANT_COLLECTION || 'custom_source_content';
 const VECTOR_SIZE = Number(process.env.EMBEDDING_VECTOR_SIZE) || 384;
@@ -92,23 +89,10 @@ const synthesizeContent = async (title, rawText) => {
     .replace(/{text}/g, truncated);
 
   try {
-    const response = await axios.post(LM_STUDIO_URL, {
-      model: LM_STUDIO_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 1800,
-    }, {
-      timeout: 180000,
-      headers: {
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
-      },
-    });
-
-    let synthesized = response.data.choices[0].message.content.trim();
+    let synthesized = await callLLM([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], { temperature: 0.1, max_tokens: 1800, timeout: 180000 });
 
     // Strip common preamble/closing patterns the model sometimes adds
     // despite instructions, as a safety net.

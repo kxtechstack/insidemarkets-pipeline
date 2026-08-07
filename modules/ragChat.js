@@ -1,6 +1,6 @@
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
-const axios = require('axios');
+const { callLLM } = require('./llmClient');
 const { ChatPromptTemplate } = require('@langchain/core/prompts');
 const { StringOutputParser } = require('@langchain/core/output_parsers');
 const { RunnableSequence } = require('@langchain/core/runnables');
@@ -54,13 +54,13 @@ const embedText = async (text) => {
 };
 
 // ── LangChain wrapper for LM Studio ─────────────────────────────────────────
-class LMStudioChat extends BaseChatModel {
+class GroqChat extends BaseChatModel {
   constructor() {
     super({});
   }
 
   _llmType() {
-    return 'lmstudio';
+    return 'groq';
   }
 
   async _generate(messages) {
@@ -69,20 +69,8 @@ class LMStudioChat extends BaseChatModel {
       content: m.content,
     }));
 
-    const response = await axios.post(process.env.LM_STUDIO_URL, {
-      model: process.env.LM_STUDIO_MODEL,
-      messages: formatted,
-      temperature: 0.1,
-      max_tokens: 500,
-    }, {
-      timeout: 180000,
-      headers: {
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
-      },
-    });
+    const content = await callLLM(formatted, { temperature: 0.1, max_tokens: 500, timeout: 180000 });
 
-    const content = response.data.choices[0].message.content.trim();
     return {
       generations: [{ message: new AIMessage(content), text: content }],
     };
@@ -130,7 +118,7 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     .join('\n\n');
 
   // Step 3 — LangChain RAG chain
-  const llm = new LMStudioChat();
+  const llm = new GroqChat();
 
   const promptTemplate = await getRagPromptTemplate(moduleId);
 

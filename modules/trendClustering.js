@@ -1,10 +1,7 @@
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
-
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
-const LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'llama-3.2-3b-instruct';
+const { callLLM } = require('./llmClient');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrant = new QdrantClient({
@@ -850,23 +847,10 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
       .replace('{client_context}', contextText)
       .replace('{signals_text}', signalsText);
 
-    const response = await axios.post(LM_STUDIO_URL, {
-      model: LM_STUDIO_MODEL,
-      messages: [
-        { role: 'system', content: 'You only respond with valid JSON, nothing else.' },
-        { role: 'user', content: finalPrompt },
-      ],
-      temperature: 0.4,
-      max_tokens: 600, // bumped from the old writeup-only 500 — response now also carries the name
-    }, {
-      timeout: 150000,
-      headers: {
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
-      },
-    });
-
-    rawContent = response.data.choices[0].message.content.trim();
+    rawContent = await callLLM([
+      { role: 'system', content: 'You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: finalPrompt },
+    ], { temperature: 0.4, max_tokens: 600, timeout: 150000 });
     const parsed = repairAndParseJson(rawContent);
 
     let result = {

@@ -1,5 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
-const axios = require('axios');
+const { callLLM } = require('./llmClient');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -92,29 +92,9 @@ ${signalContext}
   let highlightText;
 
   try {
-    const response = await axios.post(
-      process.env.LM_STUDIO_URL,
-      {
-        model: process.env.LM_STUDIO_MODEL,
-        messages: [
-          {
-            role: 'user',
-            content: finalPrompt
-          }
-        ],
-        temperature: 0.2,
-        max_tokens: 300
-      },
-      {
-        timeout: 100000,
-        headers: {
-          "Content-Type": "application/json",
-          "ngrok-skip-browser-warning": "true"
-        }
-      }
-    );
-
-    highlightText = response.data.choices[0].message.content.trim();
+    highlightText = await callLLM([
+      { role: 'user', content: finalPrompt }
+    ], { temperature: 0.2, max_tokens: 300, timeout: 100000 });
 
   } catch (err) {
     console.error('Highlight generation failed:', err.message);

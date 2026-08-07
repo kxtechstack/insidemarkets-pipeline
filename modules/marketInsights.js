@@ -1,5 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
-const axios = require('axios');
+const { callLLM } = require('./llmClient');
 
 const { pipeline } = require('@xenova/transformers');
 
@@ -26,8 +26,6 @@ const cosineSimilarity = (a, b) => {
 
 const CARD_SIMILARITY_THRESHOLD = 0.45;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
-const LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'llama-3.2-3b-instruct';
 const getDimensionName = async (submoduleId) => {
   const { data } = await supabase
     .schema('admin')
@@ -157,20 +155,11 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
   .replace(/{existing_card}/g, existingText)
   .replace(/{new_article}/g, newArticleText);
 
-  const response = await axios.post(LM_STUDIO_URL, {
-    model: LM_STUDIO_MODEL,
-    messages: [
-      { role: 'system', content: 'You only respond with valid JSON, nothing else.' },
-      { role: 'user', content: finalPrompt },
-    ],
-    temperature: 0.4,
-    max_tokens: 600,
-  }, {
-    timeout: 90000,
-    headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
-  });
+  const raw = await callLLM([
+    { role: 'system', content: 'You only respond with valid JSON, nothing else.' },
+    { role: 'user', content: finalPrompt },
+  ], { temperature: 0.4, max_tokens: 600, timeout: 90000 });
 
-  const raw = response.data.choices[0].message.content.trim();
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
   const parsed = repairAndParseJson(raw);
 

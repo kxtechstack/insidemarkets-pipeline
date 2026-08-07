@@ -66,9 +66,7 @@ const qdrant = new QdrantClient({
   timeout: 30000, // NEW — was hitting 10s default timeout on cold connections
 });
 
-const LM_STUDIO_URL = process.env.LM_STUDIO_URL || 'http://localhost:1234/v1/chat/completions';
-console.log("LM_STUDIO_URL =", LM_STUDIO_URL);
-const LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'llama-3.2-3b-instruct';
+const { callLLM } = require('./llmClient');
 
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 const VECTOR_SIZE = Number(process.env.EMBEDDING_VECTOR_SIZE) || 384;
@@ -482,23 +480,10 @@ const synthesizeContent = async (article, classification) => {
       .replace(/{title}/g, article.title || '')
       .replace(/{text}/g, cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
 
-    const response = await axios.post(LM_STUDIO_URL, {
-      model: LM_STUDIO_MODEL,
-      messages: [
-        { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.3,
-      max_tokens: 1500,
-    }, {
-      timeout: 180000,
-      headers: {
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
-      },
-    });
-
-    const synthesized = response.data.choices[0].message.content.trim();
+    const synthesized = await callLLM([
+      { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
+      { role: 'user', content: userPrompt },
+    ], { temperature: 0.3, max_tokens: 1500, timeout: 180000 });
     const lines = synthesized.split('\n').filter(l => l.trim() !== '');
     const titleLine = lines[0].replace(/^Title:\s*/i, '').trim();
     const bodyText = lines.slice(1).join('\n').trim();
@@ -517,23 +502,10 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
   const prompt = fillPromptTemplate(promptTemplate, industry, article.title, article.text, clientContext, monitoringScope);
 
   try {
-    const response = await axios.post(LM_STUDIO_URL, {
-      model: LM_STUDIO_MODEL,
-      messages: [
-        { role: 'system', content: 'You are a strict, precise classification assistant. You only respond with valid JSON, nothing else.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 2000,
-    }, {
-      timeout: 180000,
-      headers: {
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true',
-      },
-    });
-
-    const rawContent = response.data.choices[0].message.content.trim();
+    const rawContent = await callLLM([
+      { role: 'system', content: 'You are a strict, precise classification assistant. You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0.1, max_tokens: 2000, timeout: 180000 });
     let cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
     // NEW: find the first balanced {...} object by counting braces,
