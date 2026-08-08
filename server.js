@@ -238,6 +238,21 @@ app.get('/similar/:signalId', async (req, res) => {
   }
 });
 
+// Similar market insight cards route -- module-specific equivalent of
+// /similar/:signalId, but for Market Dynamics cards (which are bundles
+// of multiple articles, not single articles) using centroid similarity.
+app.get('/similar-insight/:insightId', async (req, res) => {
+  try {
+    const { insightId } = req.params;
+    const { findSimilarInsights } = require('./modules/marketInsights');
+    const similar = await findSimilarInsights(insightId);
+    return res.json({ similar });
+  } catch (err) {
+    console.error('[SimilarInsight] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ============================================
 // MAIN PIPELINE FUNCTION

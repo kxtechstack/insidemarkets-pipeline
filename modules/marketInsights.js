@@ -3,6 +3,17 @@ const { callLLM } = require('./llmClient');
 
 const { pipeline } = require('@xenova/transformers');
 
+
+const { QdrantClient } = require('@qdrant/js-client-rest');
+
+const qdrantClient = new QdrantClient({
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
+  checkCompatibility: false,
+});
+
+const INSIGHT_CENTROID_COLLECTION = process.env.INSIGHT_CENTROID_QDRANT_COLLECTION || 'market_insights_centroids';
+
 let embedderPromise = null;
 const getEmbedder = () => {
   if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
@@ -26,6 +37,226 @@ const cosineSimilarity = (a, b) => {
 
 const CARD_SIMILARITY_THRESHOLD = 0.45;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+const setupInsightCentroidCollection = async () => {
+  const collections = await qdrantClient.getCollections();
+  const exists = collections.collections.some(c => c.name === INSIGHT_CENTROID_COLLECTION);
+
+  if (!exists) {
+    await qdrantClient.createCollection(INSIGHT_CENTROID_COLLECTION, {
+      vectors: { size: 384, distance: 'Cosine' },
+    });
+    console.log(`[MarketInsights] Created Qdrant collection '${INSIGHT_CENTROID_COLLECTION}'`);
+  }
+
+  const indexFields = ['insight_id', 'module_id', 'client_id', 'industry'];
+  for (const field of indexFields) {
+    try {
+      await qdrantClient.createPayloadIndex(INSIGHT_CENTROID_COLLECTION, {
+        field_name: field,
+        field_schema: 'keyword',
+      });
+    } catch (err) {
+      if (!err.message.includes('already exists')) {
+        console.log(`[MarketInsights] Index note for '${field}': ${err.message}`);
+      }
+    }
+  }
+};
+
+// ── Compute and store a card's centroid ──────────────────────────────────────
+// Mirrors updateTrendCentroid() in trendClustering.js. Called whenever a
+// card is created or enriched (a new article joins it). Averages the
+// embeddings of every article currently linked to this card via
+// market_insight_members, and upserts that average vector as the card's
+// centroid in market_insights_centroids.
+const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
+
+const updateInsightCentroid = async (insightId) => {
+  // Step 1 — get the card's own metadata (client_id, module_id, industry,
+  // existing centroid_point_id if any)
+  const { data: insight, error } = await supabase
+    .from('market_insights')
+    .select('client_id, module_id, centroid_point_id')
+    .eq('id', insightId)
+    .single();
+
+  if (error || !insight) {
+    console.log(`  [Centroid] Could not load insight ${insightId}: ${error?.message}`);
+    return;
+  }
+
+  // market_insights has no industry column — look it up from the client record
+  const { data: clientRow, error: clientError } = await supabase
+    .schema('admin')
+    .from('clients')
+    .select('industry')
+    .eq('id', insight.client_id)
+    .single();
+
+  if (clientError || !clientRow) {
+    console.log(`  [Centroid] Could not resolve industry for client ${insight.client_id}: ${clientError?.message}`);
+    return;
+  }
+
+  const industry = clientRow.industry;
+
+  // Step 2 — get every article_id linked to this card
+  const { data: members, error: membersError } = await supabase
+    .from('market_insight_members')
+    .select('article_id')
+    .eq('insight_id', insightId);
+
+  if (membersError || !members || members.length === 0) {
+    console.log(`  [Centroid] No members found for insight ${insightId}`);
+    return;
+  }
+
+  const articleIds = members.map(m => m.article_id);
+
+  // Step 3 — pull those articles' chunk vectors from the main collection
+  const points = await qdrantClient.scroll(POLICY_COLLECTION, {
+    filter: {
+      must: [{ key: 'article_id', match: { any: articleIds } }],
+    },
+    with_vector: true,
+    with_payload: false,
+    limit: 500,
+  });
+
+  if (!points.points || points.points.length === 0) {
+    console.log(`  [Centroid] No vectors found in Qdrant for insight ${insightId}`);
+    return;
+  }
+
+  // Step 4 — average all chunk vectors into one centroid
+  const vectors = points.points.map(p => p.vector);
+  const dim = vectors[0].length;
+  const centroid = new Array(dim).fill(0);
+
+  for (const vec of vectors) {
+    for (let i = 0; i < dim; i++) centroid[i] += vec[i];
+  }
+  for (let i = 0; i < dim; i++) centroid[i] /= vectors.length;
+
+  // Step 5 — reuse the existing centroid point ID if this card already has
+  // one, otherwise generate a new one and save it back onto the card row
+  const { v4: uuidv4 } = require('uuid');
+  const centroidPointId = insight.centroid_point_id || uuidv4();
+
+  await qdrantClient.upsert(INSIGHT_CENTROID_COLLECTION, {
+    points: [{
+      id: centroidPointId,
+      vector: centroid,
+      payload: {
+        insight_id: insightId,
+        module_id: insight.module_id,
+        client_id: insight.client_id,
+        industry,
+      },
+    }],
+  });
+
+  if (!insight.centroid_point_id) {
+    await supabase
+      .from('market_insights')
+      .update({ centroid_point_id: centroidPointId })
+      .eq('id', insightId);
+  }
+
+  console.log(`  [Centroid] Updated centroid for insight ${insightId}`);
+};
+
+// ── Find similar market insight cards ────────────────────────────────────────
+// Mirrors findSimilarTrends() in trendClustering.js. Given one card's ID,
+// finds its centroid and searches for other cards whose centroids are
+// semantically close — used for the "Similar Market Movements" section
+// on a card's detail view in the frontend.
+const SIMILAR_INSIGHTS_LIMIT = 3; // how many related cards to surface per card
+
+const findSimilarInsights = async (insightId) => {
+  // Step 1 — get this card's own metadata + centroid point ID
+  const { data: insight, error } = await supabase
+    .from('market_insights')
+    .select('client_id, module_id, centroid_point_id')
+    .eq('id', insightId)
+    .single();
+
+  if (error || !insight || !insight.centroid_point_id) {
+    console.log(`  [SimilarInsights] No centroid found for insight ${insightId}, skipping`);
+    return [];
+  }
+
+  // industry isn't stored on market_insights — same lookup as updateInsightCentroid
+  const { data: clientRow, error: clientError } = await supabase
+    .schema('admin')
+    .from('clients')
+    .select('industry')
+    .eq('id', insight.client_id)
+    .single();
+
+  if (clientError || !clientRow) {
+    console.log(`  [SimilarInsights] Could not resolve industry for client ${insight.client_id}`);
+    return [];
+  }
+  const industry = clientRow.industry;
+
+  // Step 2 — fetch that centroid's actual vector from Qdrant
+  const points = await qdrantClient.retrieve(INSIGHT_CENTROID_COLLECTION, {
+    ids: [insight.centroid_point_id],
+    with_vector: true,
+  });
+
+  if (!points || points.length === 0) {
+    console.log(`  [SimilarInsights] Centroid vector not found in Qdrant for insight ${insightId}`);
+    return [];
+  }
+
+  const ownVector = points[0].vector;
+
+  // Step 3 — search for other centroids close to this one, excluding itself
+  const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
+    vector: ownVector,
+    filter: {
+      must: [
+        { key: 'module_id', match: { value: insight.module_id } },
+        { key: 'client_id', match: { value: insight.client_id } },
+        { key: 'industry', match: { value: industry } },
+      ],
+    },
+    limit: SIMILAR_INSIGHTS_LIMIT + 1, // +1 since it'll match itself first
+    with_payload: true,
+  });
+
+  const otherInsightIds = searchResult
+    .filter(r => r.payload.insight_id !== insightId)
+    .slice(0, SIMILAR_INSIGHTS_LIMIT)
+    .map(r => ({ insight_id: r.payload.insight_id, score: r.score }));
+
+  if (otherInsightIds.length === 0) {
+    console.log(`  [SimilarInsights] No similar insights found for ${insightId}`);
+    return [];
+  }
+
+  // Step 4 — get the actual titles for those card IDs
+  const { data: relatedInsights } = await supabase
+    .from('market_insights')
+    .select('id, title')
+    .in('id', otherInsightIds.map(t => t.insight_id));
+
+  const titleById = {};
+  (relatedInsights || []).forEach(t => { titleById[t.id] = t.title; });
+
+  const results = otherInsightIds.map(t => ({
+    insight_id: t.insight_id,
+    title: titleById[t.insight_id] || 'Untitled Insight',
+    score: t.score,
+  }));
+
+  console.log(`  [SimilarInsights] Insight ${insightId} — found ${results.length} similar insight(s)`);
+  return results;
+};
+
 const getDimensionName = async (submoduleId) => {
   const { data } = await supabase
     .schema('admin')
@@ -196,6 +427,7 @@ const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, 
       .eq('id', existing.id);
 
     await supabase.from('market_insight_members').insert({ insight_id: existing.id, article_id: articleId });
+    await updateInsightCentroid(existing.id);
     console.log(`  [MarketDynamics] Enriched existing card "${writeup.title}" (now ${existing.signal_count + 1} signals)`);
     return { status: 'enriched', insightId: existing.id };
   }
@@ -226,8 +458,9 @@ const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, 
   }
 
   await supabase.from('market_insight_members').insert({ insight_id: newInsight.id, article_id: articleId });
+  await updateInsightCentroid(newInsight.id);
   console.log(`  [MarketDynamics] Created new card "${writeup.title}"`);
   return { status: 'created', insightId: newInsight.id };
 };
 
-module.exports = { findExistingInsight, generateInsightWriteup, enrichOrCreateInsight };
+module.exports = { findExistingInsight, generateInsightWriteup, enrichOrCreateInsight, setupInsightCentroidCollection, updateInsightCentroid, findSimilarInsights };
