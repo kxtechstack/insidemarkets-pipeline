@@ -1,10 +1,7 @@
 //queuemngr.js
-const { Redis } = require('@upstash/redis');
+const Redis = require('ioredis');
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const redis = new Redis(process.env.REDIS_URL);
 
 // Sort articles by publishedDate - newest first
 const sortByNewest = (articles) => {
@@ -67,7 +64,7 @@ const readBatch = async (queueKey, startIndex, batchSize = 10) => {
 
 // Save job status
 const setStatus = async (jobId, statusData) => {
-  await redis.set(`status:${jobId}`, JSON.stringify(statusData), { ex: 86400 });
+  await redis.set(`status:${jobId}`, JSON.stringify(statusData), 'EX', 86400);
 };
 
 // Get job status
@@ -85,7 +82,7 @@ const DEFAULT_LOCK_TTL_SECONDS = 3600;
 // Try to acquire a lock for this client+submodule. Returns true if acquired, false if already locked.
 const acquireLock = async (clientId, submoduleId, ttlSeconds = DEFAULT_LOCK_TTL_SECONDS) => {
   const lockKey = `lock:pipeline:${clientId}:${submoduleId}`;
-  const result = await redis.set(lockKey, '1', { nx: true, ex: ttlSeconds });
+  const result = await redis.set(lockKey, '1', 'EX', ttlSeconds, 'NX');
   return result !== null;
 };
 
