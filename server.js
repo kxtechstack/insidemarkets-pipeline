@@ -253,6 +253,21 @@ app.get('/similar-insight/:insightId', async (req, res) => {
   }
 });
 
+app.get('/market-dynamics/scorecard/:clientId', async (req, res) => {
+  try {
+    const { data, error } = await supabaseClient
+      .from('market_dimension_scorecard')
+      .select('*')
+      .eq('client_id', req.params.clientId)
+      .eq('module_id', MARKET_DYNAMICS_MODULE_ID);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ scorecard: data });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ============================================
 // MAIN PIPELINE FUNCTION
