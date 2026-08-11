@@ -314,7 +314,10 @@ const formatScopeForPrompt = (enabledSignals) => {
 // (hallucinated or drifted), mark irrelevant instead of storing it silently
 // under an unmonitored signal.
 const applyMonitoringScopeValidation = (classification, enabledSignals) => {
-  if (enabledSignals.length === 0) return classification;
+  if (enabledSignals.length === 0) {
+    console.log(`  [MonitoringScope] Client has 0 enabled signals — marking irrelevant`);
+    return { ...classification, is_relevant: false, reason: 'No signals enabled in client monitoring scope' };
+  }
 
   const match = enabledSignals[classification.signal_number - 1];
 
@@ -323,7 +326,7 @@ const applyMonitoringScopeValidation = (classification, enabledSignals) => {
     return { ...classification, is_relevant: false, reason: 'Signal not in client monitoring scope' };
   }
 
-  return { ...classification, submodule_id: match.submodule_id, signal_id: match.signal_id };
+  return { ...classification, signal_id: match.signal_id };
 };
 
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
