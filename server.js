@@ -17,7 +17,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
-
+const { startStaleJobWatcher } = require('./modules/jobRecovery');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -650,4 +650,5 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
+  startStaleJobWatcher(5);
 });
