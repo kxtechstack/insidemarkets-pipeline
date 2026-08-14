@@ -326,7 +326,7 @@ const applyMonitoringScopeValidation = (classification, enabledSignals) => {
     return { ...classification, is_relevant: false, reason: 'Signal not in client monitoring scope' };
   }
 
-  return { ...classification, signal_id: match.signal_id };
+  return { ...classification, signal_id: match.signal_id, submodule_id: match.submodule_id };
 };
 
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
