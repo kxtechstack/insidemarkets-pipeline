@@ -29,11 +29,24 @@ const startJobTracking = async (jobId, clientId, promptText, submoduleId) => {
   // admin console's "Last Active" column reflects real pipeline activity
   // instead of the old placeholder dates. .schema('admin') is required
   // here because clients lives in the admin schema, not public.
-  await supabase
+  // TEMP DEBUG: logging error/data explicitly -- this update was landing
+  // with no visible error even when it silently didn't update anything,
+  // most likely an RLS policy on admin.clients blocking it. This log will
+  // confirm whether that's the actual cause.
+  const { data: lastActiveData, error: lastActiveError } = await supabase
     .schema('admin')
     .from('clients')
     .update({ last_active: new Date().toISOString() })
-    .eq('id', clientId);
+    .eq('id', clientId)
+    .select();
+
+  if (lastActiveError) {
+    console.log('[JobStatusTracker] FAILED to update last_active:', lastActiveError.message, lastActiveError);
+  } else if (!lastActiveData || lastActiveData.length === 0) {
+    console.log('[JobStatusTracker] last_active update ran with NO ERROR but matched 0 rows for clientId:', clientId, '-- likely blocked by RLS policy or wrong clientId');
+  } else {
+    console.log('[JobStatusTracker] last_active updated successfully for clientId:', clientId, lastActiveData);
+  }
 };
 
 // Update progress as the job moves through stages
