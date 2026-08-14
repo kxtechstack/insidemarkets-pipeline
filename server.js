@@ -90,17 +90,21 @@ app.post('/admin/invite-user', async (req, res) => {
 
 app.post('/admin/delete-user', async (req, res) => {
   const { userId, id, email } = req.body;
-  const targetId = userId || id;
-  if (!targetId && !email) {
+  const providedId = userId || id;
+  if (!providedId && !email) {
     return res.status(400).json({ error: 'userId or email is required' });
   }
   try {
-    let authId = targetId;
-    if (!authId && email) {
+    let authId = null;
+    // Always resolve the CURRENT auth ID by email first — cached IDs can go stale
+    if (email) {
       const { data: listData, error: listErr } = await supabaseClient.auth.admin.listUsers();
       if (listErr) throw listErr;
       const match = listData.users.find(u => u.email?.toLowerCase() === String(email).toLowerCase());
       if (match) authId = match.id;
+    }
+    if (!authId && providedId) {
+      authId = providedId;
     }
     if (authId) {
       const { error: delErr } = await supabaseClient.auth.admin.deleteUser(authId);
@@ -113,7 +117,7 @@ app.post('/admin/delete-user', async (req, res) => {
       .schema('admin')
       .from('client_users')
       .delete()
-      .or(`id.eq.${authId || ''},email.eq.${(email || '').toLowerCase()}`);
+      .or(`id.eq.${authId || providedId || ''},email.eq.${(email || '').toLowerCase()}`);
     if (cuErr) {
       console.error('[DeleteUser] client_users delete error:', cuErr.message);
     }
