@@ -88,6 +88,42 @@ app.post('/admin/invite-user', async (req, res) => {
   }
 });
 
+app.post('/admin/delete-user', async (req, res) => {
+  const { userId, id, email } = req.body;
+  const targetId = userId || id;
+  if (!targetId && !email) {
+    return res.status(400).json({ error: 'userId or email is required' });
+  }
+  try {
+    let authId = targetId;
+    if (!authId && email) {
+      const { data: listData, error: listErr } = await supabaseClient.auth.admin.listUsers();
+      if (listErr) throw listErr;
+      const match = listData.users.find(u => u.email?.toLowerCase() === String(email).toLowerCase());
+      if (match) authId = match.id;
+    }
+    if (authId) {
+      const { error: delErr } = await supabaseClient.auth.admin.deleteUser(authId);
+      if (delErr) {
+        console.error('[DeleteUser] Supabase auth delete error:', delErr.message);
+        return res.status(400).json({ error: delErr.message });
+      }
+    }
+    const { error: cuErr } = await supabaseClient
+      .schema('admin')
+      .from('client_users')
+      .delete()
+      .or(`id.eq.${authId || ''},email.eq.${(email || '').toLowerCase()}`);
+    if (cuErr) {
+      console.error('[DeleteUser] client_users delete error:', cuErr.message);
+    }
+    return res.json({ success: true, message: 'User deleted', userId: authId });
+  } catch (err) {
+    console.error('[DeleteUser] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/ask', async (req, res) => {
   try {
     const { question, clientId, industry, moduleId } = req.body; // CHANGED: added moduleId
