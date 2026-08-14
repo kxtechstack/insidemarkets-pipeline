@@ -14,7 +14,6 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const TABLE_NAME = 'pipeline_job_status';
 
 // Create the initial row when a job starts
-// Create the initial row when a job starts
 const startJobTracking = async (jobId, clientId, promptText, submoduleId) => {
   await supabase.from(TABLE_NAME).insert({
     job_id: jobId,
@@ -24,6 +23,17 @@ const startJobTracking = async (jobId, clientId, promptText, submoduleId) => {
     status: 'running',
     current_stage: 'fetching',
   });
+
+  // NEW: mark this client as "active" the moment a pipeline run starts.
+  // admin.clients.last_active gets stamped with the current time so the
+  // admin console's "Last Active" column reflects real pipeline activity
+  // instead of the old placeholder dates. .schema('admin') is required
+  // here because clients lives in the admin schema, not public.
+  await supabase
+    .schema('admin')
+    .from('clients')
+    .update({ last_active: new Date().toISOString() })
+    .eq('id', clientId);
 };
 
 // Update progress as the job moves through stages
