@@ -42,6 +42,7 @@ const callLLM = async (messages, options = {}) => {
         messages,
         temperature,
         max_tokens,
+        reasoning_effort: 'low',
       }, {
         timeout,
         headers: {
