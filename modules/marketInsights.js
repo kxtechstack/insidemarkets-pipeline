@@ -35,7 +35,7 @@ const cosineSimilarity = (a, b) => {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-const CARD_SIMILARITY_THRESHOLD = 0.45;
+const CARD_SIMILARITY_THRESHOLD = 0.65;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
@@ -330,37 +330,47 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-// Step 1 — find the most similar EXISTING card for this signal, if any
-// crosses the similarity threshold. Uses content similarity, not just
-// "does any card exist for this signal" — so unrelated companies/topics
-// under the same signal get their own separate cards.
-const findExistingInsight = async (clientId, signalId, articleText) => {
-  const { data: candidates } = await supabase
-    .from('market_insights')
-    .select('*')
-    .eq('client_id', clientId)
-    .eq('signal_id', signalId);
+// Step 1 — find the most similar EXISTING card, if any crosses the
+// similarity threshold. CHANGED: now compares against each card's
+// STABLE stored centroid in market_insights_centroids via one Qdrant
+// search, instead of re-embedding title+summary live for every
+// candidate every time (title/summary text shifts on every rewrite,
+// which made scores unstable). Also no longer hard-filtered to the
+// same signal_id — searches by submodule instead, so two articles
+// about the same real event classified under slightly different
+// signals can still find each other.
+const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding) => {
+  const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
+    vector: articleEmbedding,
+    filter: {
+      must: [
+        { key: 'client_id', match: { value: clientId } },
+        { key: 'module_id', match: { value: moduleId } },
+        { key: 'submodule_id', match: { value: submoduleId } },
+      ],
+    },
+    limit: 1,
+    with_payload: true,
+  });
 
-  if (!candidates || candidates.length === 0) return null;
+  const bestMatch = searchResult[0];
 
-  const newEmbedding = await embedText((articleText || '').slice(0, 1000));
-
-  let bestMatch = null;
-  let bestScore = 0;
-
-  for (const card of candidates) {
-    const cardText = `${card.title} ${card.summary}`.slice(0, 1000);
-    const cardEmbedding = await embedText(cardText);
-    const score = cosineSimilarity(newEmbedding, cardEmbedding);
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = card;
-    }
+  if (!bestMatch) {
+    console.log(`  [CardMatch] No existing cards to compare against yet`);
+    return null;
   }
 
-  console.log(`  [CardMatch] Best match score: ${bestScore.toFixed(3)} (threshold: ${CARD_SIMILARITY_THRESHOLD})`);
+  console.log(`  [CardMatch] Best match score: ${bestMatch.score.toFixed(3)} (threshold: ${CARD_SIMILARITY_THRESHOLD})`);
 
-  return bestScore >= CARD_SIMILARITY_THRESHOLD ? bestMatch : null;
+  if (bestMatch.score < CARD_SIMILARITY_THRESHOLD) return null;
+
+  const { data: card } = await supabase
+    .from('market_insights')
+    .select('*')
+    .eq('id', bestMatch.payload.insight_id)
+    .single();
+
+  return card || null;
 };
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
@@ -405,7 +415,8 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
 
 // Step 3 — the main entry point. Called once per relevant Market Dynamics article.
 const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
-  const existing = await findExistingInsight(clientId, signalId, articleText);
+  const articleEmbedding = await embedText((articleText || '').slice(0, 1000));
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);
