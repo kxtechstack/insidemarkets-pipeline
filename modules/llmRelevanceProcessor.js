@@ -488,7 +488,7 @@ const synthesizeContent = async (article, classification) => {
       { role: 'user', content: userPrompt },
     ], { temperature: 0.3, max_tokens: 1500, timeout: 180000 });
     const lines = synthesized.split('\n').filter(l => l.trim() !== '');
-    const titleLine = lines[0].replace(/^Title:\s*/i, '').trim();
+    const titleLine = lines[0].replace(/^\*{0,2}Title:\s*/i, '').replace(/\*{0,2}\s*$/, '').trim();
     const bodyText = lines.slice(1).join('\n').trim();
     console.log(`  [Synthesize] Title: "${titleLine}" | Body: ${bodyText.length} chars`);
     return { title: titleLine, body: bodyText };
