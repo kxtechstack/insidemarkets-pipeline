@@ -77,7 +77,7 @@ const updateInsightCentroid = async (insightId) => {
   // existing centroid_point_id if any)
   const { data: insight, error } = await supabase
     .from('market_insights')
-    .select('client_id, module_id, centroid_point_id')
+    .select('client_id, module_id, submodule_id, centroid_point_id')
     .eq('id', insightId)
     .single();
 
@@ -151,6 +151,7 @@ const updateInsightCentroid = async (insightId) => {
       payload: {
         insight_id: insightId,
         module_id: insight.module_id,
+        submodule_id: insight.submodule_id,
         client_id: insight.client_id,
         industry,
       },
@@ -178,7 +179,7 @@ const findSimilarInsights = async (insightId) => {
   // Step 1 — get this card's own metadata + centroid point ID
   const { data: insight, error } = await supabase
     .from('market_insights')
-    .select('client_id, module_id, centroid_point_id')
+    .select('client_id, module_id, submodule_id, centroid_point_id')
     .eq('id', insightId)
     .single();
 
