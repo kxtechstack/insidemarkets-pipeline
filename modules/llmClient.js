@@ -50,7 +50,11 @@ const callLLM = async (messages, options = {}) => {
         },
       });
 
-      return response.data.choices[0].message.content.trim();
+      const content = response.data.choices[0].message.content;
+      if (!content || content.trim() === '') {
+        console.log(`  [llmClient] WARNING: Empty response. finish_reason=${response.data.choices[0].finish_reason}, full response:`, JSON.stringify(response.data));
+      }
+      return (content || '').trim();
 
     } catch (err) {
       const status = err.response?.status;
@@ -65,6 +69,9 @@ const callLLM = async (messages, options = {}) => {
         await sleep(waitMs);
         continue;
       }
+
+      // NEW LINE — logs Groq's actual error message instead of just the status code
+      console.log(`  [llmClient] Request failed. status=${status}, url=${LLM_API_URL}, model=${LLM_MODEL}, response=`, JSON.stringify(err.response?.data));
 
       throw err;
     }
