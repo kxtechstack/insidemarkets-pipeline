@@ -168,6 +168,31 @@ const updateInsightCentroid = async (insightId) => {
   console.log(`  [Centroid] Updated centroid for insight ${insightId}`);
 };
 
+// ── Delete a card's centroid ──────────────────────────────────────────────
+// Call this any time a market_insights row is deleted (test cleanup, admin
+// action, future dedup fixes, etc.) so Qdrant never drifts out of sync with
+// Supabase again. Mirrors updateInsightCentroid's lookup pattern, but for
+// removal instead of upsert. IMPORTANT: call this BEFORE deleting the
+// market_insights row, since it needs to read centroid_point_id from it.
+const deleteInsightCentroid = async (insightId) => {
+  const { data: insight, error } = await supabase
+    .from('market_insights')
+    .select('centroid_point_id')
+    .eq('id', insightId)
+    .single();
+
+  if (error || !insight || !insight.centroid_point_id) {
+    console.log(`  [Centroid] No centroid to delete for insight ${insightId}`);
+    return;
+  }
+
+  await qdrantClient.delete(INSIGHT_CENTROID_COLLECTION, {
+    points: [insight.centroid_point_id],
+  });
+
+  console.log(`  [Centroid] Deleted centroid for insight ${insightId}`);
+};
+
 // ── Find similar market insight cards ────────────────────────────────────────
 // Mirrors findSimilarTrends() in trendClustering.js. Given one card's ID,
 // finds its centroid and searches for other cards whose centroids are
@@ -476,4 +501,4 @@ const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, 
   return { status: 'created', insightId: newInsight.id };
 };
 
-module.exports = { findExistingInsight, generateInsightWriteup, enrichOrCreateInsight, setupInsightCentroidCollection, updateInsightCentroid, findSimilarInsights };
+module.exports = { findExistingInsight, generateInsightWriteup, enrichOrCreateInsight, setupInsightCentroidCollection, updateInsightCentroid, findSimilarInsights, deleteInsightCentroid };
