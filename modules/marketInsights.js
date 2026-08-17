@@ -49,7 +49,7 @@ const setupInsightCentroidCollection = async () => {
     console.log(`[MarketInsights] Created Qdrant collection '${INSIGHT_CENTROID_COLLECTION}'`);
   }
 
-  const indexFields = ['insight_id', 'module_id', 'client_id', 'industry'];
+  const indexFields = ['insight_id', 'module_id', 'client_id', 'industry', 'submodule_id'];
   for (const field of indexFields) {
     try {
       await qdrantClient.createPayloadIndex(INSIGHT_CENTROID_COLLECTION, {
@@ -415,6 +415,7 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
 
 // Step 3 — the main entry point. Called once per relevant Market Dynamics article.
 const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
+  await setupInsightCentroidCollection(); // NEW — ensures submodule_id index exists before we search on it
   const articleEmbedding = await embedText((articleText || '').slice(0, 1000));
   const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
 
