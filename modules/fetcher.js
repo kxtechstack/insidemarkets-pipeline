@@ -32,7 +32,7 @@ const fetchFromTavily = async (promptText) => {
       api_key: process.env.TAVILY_API_KEY,
       query: promptText,
       topic: 'news',
-      max_results: 5,
+      max_results: 20,
       days: 90,
       include_answer: false,
       include_raw_content: false
@@ -80,7 +80,7 @@ const fetchFromParallel = async (promptText) => {
     body: JSON.stringify({
       objective: promptText,
       search_queries: [promptText],
-      max_results: 5,
+      max_results: 20,
       excerpts: { max_chars_per_result: 5000 },
       source_policy: { start_date: ninetyDaysAgoDateOnly }
     })
