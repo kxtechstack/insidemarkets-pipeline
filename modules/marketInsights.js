@@ -401,6 +401,15 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
 // existingCard is null on first creation.
+// Strips markdown bold and a leaked "Title:" prefix the model sometimes
+// includes inside the JSON value itself (seen with gpt-oss-20b).
+const cleanText = (text) => {
+  if (!text) return text;
+  return text
+    .replace(/^\*+/, '').replace(/\*+$/, '')  // strip leading/trailing *'s
+    .replace(/^title:\s*/i, '')                // strip leaked "Title:" prefix
+    .trim();
+};
 const generateInsightWriteup = async (existingCard, newArticleText, industry) => {
   const { data: promptRow, error } = await supabase
     .from('prompts')
@@ -431,10 +440,10 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
   const parsed = repairAndParseJson(raw);
 
   return {
-    title: parsed.title,
-    summary: parsed.summary,
-    short_summary: parsed.short_summary,
-    business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
+    title: cleanText(parsed.title),
+    summary: cleanText(parsed.summary),
+    short_summary: cleanText(parsed.short_summary),
+    business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact.map(cleanText) : [],
     country: parsed.country || existingCard?.country || 'Global',
   };
 };
