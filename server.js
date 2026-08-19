@@ -142,19 +142,23 @@ app.post('/run', async (req, res) => {
 app.post('/schedules', async (req, res) => {
   const { clientId, submoduleId, source, frequency, scheduleTime, isActive } = req.body;
 
-  if (!clientId || !submoduleId || !scheduleTime) {
-    return res.status(400).json({ error: 'clientId, submoduleId, and scheduleTime are required' });
+  if (!clientId || !submoduleId) {
+    return res.status(400).json({ error: 'clientId and submoduleId are required' });
+  }
+
+  const updatePayload = {
+    source: source || 'Exa',
+    frequency: frequency || 'daily',
+    is_active: isActive !== false,
+  };
+  if (scheduleTime) {
+    updatePayload.schedule_time = scheduleTime;
   }
 
   const { data, error } = await supabaseClient
     .schema('admin')
     .from('prompts')
-    .update({
-      source: source || 'Exa',
-      frequency: frequency || 'daily',
-      schedule_time: scheduleTime,
-      is_active: isActive !== false,
-    })
+    .update(updatePayload)
     .eq('client_id', clientId)
     .eq('submodule_id', submoduleId)
     .select();
@@ -420,13 +424,17 @@ app.post('/custom-source/run/:sourceId', async (req, res) => {
 });
 
 // Retry failed articles (manual trigger — the automatic sweep lives in jobRecovery.js)
+// CHANGED: now accepts optional submoduleId in the request body -- when the
+// frontend's per-submodule "Retry Failed" button sends it, only that
+// submodule's failed articles are retried instead of the whole client's.
 app.post('/retry-failed/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
-    res.json({ message: 'Retry started', clientId });
+    const { submoduleId } = req.body || {};
+    res.json({ message: 'Retry started', clientId, submoduleId: submoduleId || 'all' });
 
-    const result = await retryFailedArticles(clientId);
-    console.log(`[Retry] Manual retry for client ${clientId}: attempted ${result.attempted}, succeeded ${result.succeeded}`);
+    const result = await retryFailedArticles(clientId, submoduleId || null);
+    console.log(`[Retry] Manual retry for client ${clientId}${submoduleId ? `, submodule ${submoduleId}` : ''}: attempted ${result.attempted}, succeeded ${result.succeeded}`);
 
   } catch (err) {
     console.error(`[Retry] Error for client ${clientId}:`, err.message);
@@ -467,12 +475,50 @@ app.post('/admin/users-last-signin', async (req, res) => {
   }
 });
 
+app.post('/schedules/client/:clientId', async (req, res) => {
+  const { clientId } = req.params;
+  const { source, frequency, scheduleTime, isActive } = req.body;
+
+  if (!scheduleTime) {
+    return res.status(400).json({ error: 'scheduleTime is required' });
+  }
+
+  const { data, error } = await supabaseClient
+    .schema('admin')
+    .from('prompts')
+    .update({
+      source: source || 'Exa',
+      frequency: frequency || 'daily',
+      schedule_time: scheduleTime,
+      is_active: isActive !== false,
+    })
+    .eq('client_id', clientId)
+    .select();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ updatedCount: data.length, schedule: data });
+});
+
+app.get('/schedules/client/:clientId', async (req, res) => {
+  const { data, error } = await supabaseClient
+    .schema('admin')
+    .from('prompts')
+    .select('schedule_time, is_active')
+    .eq('client_id', req.params.clientId)
+    .not('schedule_time', 'is', null)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ schedule: data || null });
+});
+
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
-  startFailedArticleWatcher(15);
+  startFailedArticleWatcher(60); // every 1h, capped at 30min per sweep
   startScheduler();
 });

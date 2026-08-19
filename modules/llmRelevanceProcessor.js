@@ -1044,13 +1044,28 @@ const getModuleIdForSubmodule = async (submoduleId) => {
 // Same logic that used to live inline inside the /retry-failed/:clientId
 // route in server.js — now callable from anywhere (manual route AND
 // the automatic background sweep in jobRecovery.js).
-const retryFailedArticles = async (clientId) => {
-  const { data: failedArticles, error } = await supabase
+// CHANGED: added optional submoduleId. When provided, only retries failed
+// articles for that specific submodule (used by the frontend's per-submodule
+// "Retry Failed" button). When omitted, retries all of the client's failed
+// articles across every submodule (used by the automatic background sweep).
+// CHANGED: added optional deadlineTs (a Date.now()-style timestamp). When
+// provided, the loop checks the clock before starting each article and
+// stops early once the deadline passes -- used by the automatic 24h sweep
+// to cap itself at 30 minutes even if not everything got retried. Manual
+// clicks (no deadline passed) are unaffected and always run to completion.
+const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = null) => {
+  let query = supabase
     .from('article_processing_log')
     .select('*')
     .eq('client_id', clientId)
     .eq('status', 'failed')
     .lt('retry_count', 3);
+
+  if (submoduleId) {
+    query = query.eq('submodule_id', submoduleId);
+  }
+
+  const { data: failedArticles, error } = await query;
 
   if (error) {
     console.log(`[RetryFailed] Error fetching failed articles for client ${clientId}: ${error.message}`);
@@ -1062,8 +1077,15 @@ const retryFailedArticles = async (clientId) => {
   }
 
   let succeeded = 0;
+  let stoppedEarly = false;
 
   for (const record of failedArticles) {
+    if (deadlineTs && Date.now() > deadlineTs) {
+      console.log(`[RetryFailed] Time budget exceeded for client ${clientId}, stopping early (${failedArticles.length - succeeded} article(s) left for next sweep)`);
+      stoppedEarly = true;
+      break;
+    }
+
     try {
       if (!record.raw_content) {
         await supabase
@@ -1110,7 +1132,7 @@ const retryFailedArticles = async (clientId) => {
     }
   }
 
-  return { attempted: failedArticles.length, succeeded };
+  return { attempted: failedArticles.length, succeeded, stoppedEarly };
 };
 
 module.exports = {

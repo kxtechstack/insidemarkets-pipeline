@@ -19,9 +19,10 @@ const checkAndRunSchedules = async () => {
   const { data: schedules, error } = await supabase
     .schema('admin')
     .from('prompts')
-    .select('*')
+    .select('*, clients:client_id ( industry )')
     .eq('is_active', true)
-    .eq('schedule_time', currentTime);
+    .eq('schedule_time', currentTime)
+    .eq('status', 'Running');
 
   if (error) {
     console.error('[Scheduler] Error fetching schedules:', error.message);
@@ -34,8 +35,9 @@ const checkAndRunSchedules = async () => {
 
   for (const s of schedules) {
     if (s.frequency?.toLowerCase() !== 'daily') continue;
-    console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST`);
-    triggerPipelineRun(s.client_id, s.prompt_text, s.industry, s.module_id, s.submodule_id, s.source);
+    const industry = s.clients?.industry || 'Unknown';
+    console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST, industry: ${industry}`);
+    triggerPipelineRun(s.client_id, s.prompt_text, industry, s.module_id, s.submodule_id, s.source);
   }
 };
 

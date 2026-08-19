@@ -87,7 +87,15 @@ const detectStaleJobs = async () => {
  * turns "silently rate-limited article, saved but stuck" into "picked up
  * automatically a few minutes later" — no manual /retry-failed call needed.
  */
-const sweepFailedArticles = async () => {
+// CHANGED: now enforces a hard time budget (default 30 minutes) across the
+// WHOLE sweep, not per client. A single deadline is computed once at the
+// start and passed down to every retryFailedArticles() call; once it
+// passes, no new client is started and any in-progress client's article
+// loop stops at its next check. Whatever's left over just waits for the
+// next scheduled sweep (24h later) rather than blocking indefinitely.
+const sweepFailedArticles = async (maxDurationMs = 30 * 60 * 1000) => {
+  const deadlineTs = Date.now() + maxDurationMs;
+
   const { data: failedRows, error } = await supabase
     .from('article_processing_log')
     .select('client_id')
@@ -106,19 +114,26 @@ const sweepFailedArticles = async () => {
   // De-duplicate client_ids -- the query above returns one row per article
   const clientIds = [...new Set(failedRows.map(r => r.client_id))];
 
-  console.log(`[JobRecovery] Found failed articles for ${clientIds.length} client(s), retrying...`);
+  console.log(`[JobRecovery] Found failed articles for ${clientIds.length} client(s), retrying (budget: ${maxDurationMs / 60000}min)...`);
 
   let totalAttempted = 0;
   let totalSucceeded = 0;
+  let clientsProcessed = 0;
 
   for (const clientId of clientIds) {
-    const result = await retryFailedArticles(clientId);
+    if (Date.now() > deadlineTs) {
+      console.log(`[JobRecovery] Sweep time budget exceeded, stopping before client ${clientId} (${clientIds.length - clientsProcessed} client(s) left for next sweep)`);
+      break;
+    }
+
+    const result = await retryFailedArticles(clientId, null, deadlineTs);
     totalAttempted += result.attempted;
     totalSucceeded += result.succeeded;
-    console.log(`  [sweep] client ${clientId}: attempted ${result.attempted}, succeeded ${result.succeeded}`);
+    clientsProcessed++;
+    console.log(`  [sweep] client ${clientId}: attempted ${result.attempted}, succeeded ${result.succeeded}${result.stoppedEarly ? ' (stopped early — time budget)' : ''}`);
   }
 
-  return { clientsFound: clientIds.length, totalAttempted, totalSucceeded };
+  return { clientsFound: clientIds.length, clientsProcessed, totalAttempted, totalSucceeded };
 };
 
 // ── Periodic background check ────────────────────────────────────────────────
@@ -141,8 +156,11 @@ const startStaleJobWatcher = (intervalMinutes = 5) => {
 // right after a fresh deploy there's no reason to assume there are failed
 // articles waiting, and we want the first sweep to wait a full interval
 // so any rate-limit burst has time to clear before we retry.
-const startFailedArticleWatcher = (intervalMinutes = 15) => {
-  console.log(`[JobRecovery] Starting failed-article watcher (sweeps every ${intervalMinutes}min)`);
+// CHANGED: default interval is now 24 hours (was 15 minutes), and each
+// sweep caps itself at 30 minutes via sweepFailedArticles()'s own budget --
+// see there for details. Still deliberately not run immediately on startup.
+const startFailedArticleWatcher = (intervalMinutes = 24 * 60) => {
+  console.log(`[JobRecovery] Starting failed-article watcher (sweeps every ${intervalMinutes / 60}hr, capped at 30min per sweep)`);
 
   setInterval(() => {
     sweepFailedArticles();
