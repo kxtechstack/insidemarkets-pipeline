@@ -14,6 +14,7 @@ const getCurrentISTTime = () =>
 // triggerPipelineRun that the manual "Run now" button uses.
 const checkAndRunSchedules = async () => {
   const currentTime = getCurrentISTTime();
+  console.log(`[Scheduler] Tick — checking for schedule_time = '${currentTime}'`);
 
   const { data: schedules, error } = await supabase
     .schema('admin')
@@ -27,13 +28,12 @@ const checkAndRunSchedules = async () => {
     return;
   }
 
+  console.log(`[Scheduler] Found ${schedules ? schedules.length : 0} matching schedule(s)`);
+
   if (!schedules || schedules.length === 0) return;
 
   for (const s of schedules) {
-    // Only 'daily' is handled for now — extend this switch when
-    // Hourly/Weekly/Monthly/Once are wired up on the frontend.
     if (s.frequency !== 'daily') continue;
-
     console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST`);
     triggerPipelineRun(s.client_id, s.prompt_text, s.industry, s.module_id, s.submodule_id, s.source);
   }
