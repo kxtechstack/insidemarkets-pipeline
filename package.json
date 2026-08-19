@@ -27,6 +27,7 @@
     "fuse.js": "^7.4.2",
     "ioredis": "^6.0.0",
     "langchain": "^1.5.2",
+    "node-cron": "^4.6.0",
     "parallel-web": "^1.1.0",
     "unstructured-client": "^0.31.0",
     "uuid": "^14.0.0"
