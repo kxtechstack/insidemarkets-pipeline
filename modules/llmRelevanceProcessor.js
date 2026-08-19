@@ -1011,6 +1011,96 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
   return { relevant: totalRelevant, irrelevant: totalIrrelevant };
 }
 
+// NEW: moved here from server.js so both the manual /retry-failed route
+// and the automatic background sweep (jobRecovery.js) can use it.
+const getModuleIdForSubmodule = async (submoduleId) => {
+  const { data, error } = await supabase
+    .schema('admin')
+    .from('submodules')
+    .select('module_id')
+    .eq('id', submoduleId)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Could not find module_id for submodule_id: ${submoduleId}`);
+  }
+  return data.module_id;
+};
+
+// NEW: Retries all failed articles for one client (retry_count < 3).
+// Same logic that used to live inline inside the /retry-failed/:clientId
+// route in server.js — now callable from anywhere (manual route AND
+// the automatic background sweep in jobRecovery.js).
+const retryFailedArticles = async (clientId) => {
+  const { data: failedArticles, error } = await supabase
+    .from('article_processing_log')
+    .select('*')
+    .eq('client_id', clientId)
+    .eq('status', 'failed')
+    .lt('retry_count', 3);
+
+  if (error) {
+    console.log(`[RetryFailed] Error fetching failed articles for client ${clientId}: ${error.message}`);
+    return { attempted: 0, succeeded: 0 };
+  }
+
+  if (!failedArticles || failedArticles.length === 0) {
+    return { attempted: 0, succeeded: 0 };
+  }
+
+  let succeeded = 0;
+
+  for (const record of failedArticles) {
+    try {
+      if (!record.raw_content) {
+        await supabase
+          .from('article_processing_log')
+          .update({ status: 'permanently_failed', error_message: 'No raw content saved for retry' })
+          .eq('id', record.id);
+        continue;
+      }
+
+      const article = JSON.parse(record.raw_content);
+
+      const { data: job } = await supabase
+        .from('pipeline_job_status')
+        .select('*')
+        .eq('job_id', record.job_id)
+        .single();
+
+      const industry = job?.industry || 'General';
+      const moduleId = await getModuleIdForSubmodule(record.submodule_id);
+
+      await supabase
+        .from('article_processing_log')
+        .update({ retry_count: record.retry_count + 1 })
+        .eq('id', record.id);
+
+      const result = await processArticlesForRelevance(
+        [article], clientId, industry, record.job_id, moduleId, record.submodule_id
+      );
+
+      if (result.relevant > 0) {
+        await supabase
+          .from('article_processing_log')
+          .update({ status: 'completed', error_message: null })
+          .eq('id', record.id);
+        succeeded++;
+      } else if (record.retry_count + 1 >= 3) {
+        await supabase
+          .from('article_processing_log')
+          .update({ status: 'permanently_failed' })
+          .eq('id', record.id);
+      }
+
+    } catch (err) {
+      console.error(`[RetryFailed] Failed for ${record.article_url}:`, err.message);
+    }
+  }
+
+  return { attempted: failedArticles.length, succeeded };
+};
+
 module.exports = {
   processArticlesForRelevance,
   processQueueInBatches,
@@ -1024,6 +1114,8 @@ module.exports = {
   applySectorsToAvoidOverride,             // TEMP: exported for Gemini comparison script
   applyCriticalRequiresCompetitorOverride, // TEMP: exported for Gemini comparison script
   applySignalCategoryValidation, // TEMP: exported for testing
+  getModuleIdForSubmodule, // NEW: exported for retryFailedArticles + server.js
+  retryFailedArticles,     // NEW: exported for server.js and jobRecovery.js
   FORWARD_OUTLOOK_MODULE_ID,
   MARKET_DYNAMICS_MODULE_ID,
 };

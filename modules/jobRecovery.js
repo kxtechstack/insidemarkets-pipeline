@@ -18,6 +18,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { releaseLock } = require('./queueManager');
+const { retryFailedArticles } = require('./llmRelevanceProcessor');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -78,6 +79,48 @@ const detectStaleJobs = async () => {
   return { found: staleJobs.length, marked: staleJobs.length };
 };
 
+// ── Sweep and retry failed articles across all clients ──────────────────────
+/**
+ * Finds every distinct client_id in article_processing_log that has at
+ * least one row with status='failed' and retry_count < 3, and retries
+ * each client's failed articles via retryFailedArticles(). This is what
+ * turns "silently rate-limited article, saved but stuck" into "picked up
+ * automatically a few minutes later" — no manual /retry-failed call needed.
+ */
+const sweepFailedArticles = async () => {
+  const { data: failedRows, error } = await supabase
+    .from('article_processing_log')
+    .select('client_id')
+    .eq('status', 'failed')
+    .lt('retry_count', 3);
+
+  if (error) {
+    console.log('[JobRecovery] Error checking for failed articles:', error.message);
+    return { clientsFound: 0, totalAttempted: 0, totalSucceeded: 0 };
+  }
+
+  if (!failedRows || failedRows.length === 0) {
+    return { clientsFound: 0, totalAttempted: 0, totalSucceeded: 0 };
+  }
+
+  // De-duplicate client_ids -- the query above returns one row per article
+  const clientIds = [...new Set(failedRows.map(r => r.client_id))];
+
+  console.log(`[JobRecovery] Found failed articles for ${clientIds.length} client(s), retrying...`);
+
+  let totalAttempted = 0;
+  let totalSucceeded = 0;
+
+  for (const clientId of clientIds) {
+    const result = await retryFailedArticles(clientId);
+    totalAttempted += result.attempted;
+    totalSucceeded += result.succeeded;
+    console.log(`  [sweep] client ${clientId}: attempted ${result.attempted}, succeeded ${result.succeeded}`);
+  }
+
+  return { clientsFound: clientIds.length, totalAttempted, totalSucceeded };
+};
+
 // ── Periodic background check ────────────────────────────────────────────────
 /**
  * Runs detectStaleJobs() once immediately (catches anything left over
@@ -93,7 +136,22 @@ const startStaleJobWatcher = (intervalMinutes = 5) => {
   }, intervalMinutes * 60 * 1000);
 };
 
+// NEW: Runs sweepFailedArticles() on a repeating interval -- deliberately
+// NOT run immediately on startup (unlike the stale job watcher), since
+// right after a fresh deploy there's no reason to assume there are failed
+// articles waiting, and we want the first sweep to wait a full interval
+// so any rate-limit burst has time to clear before we retry.
+const startFailedArticleWatcher = (intervalMinutes = 15) => {
+  console.log(`[JobRecovery] Starting failed-article watcher (sweeps every ${intervalMinutes}min)`);
+
+  setInterval(() => {
+    sweepFailedArticles();
+  }, intervalMinutes * 60 * 1000);
+};
+
 module.exports = {
   detectStaleJobs,
   startStaleJobWatcher,
+  sweepFailedArticles,
+  startFailedArticleWatcher,
 };

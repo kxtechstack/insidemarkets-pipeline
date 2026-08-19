@@ -12,14 +12,14 @@ const { removeSameTopicArticles } = require('./modules/topicDedup');
 const { filterLowQualityArticles } = require('./modules/qualityFilter');
 const { pushToProcessedQueue } = require('./modules/processedQueue');
 const { startJobTracking, updateJobStage, completeJobTracking, markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
-const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
+const { processQueueInBatches, retryFailedArticles, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
 const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
-const { startStaleJobWatcher } = require('./modules/jobRecovery');
+const { startStaleJobWatcher, startFailedArticleWatcher } = require('./modules/jobRecovery');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -33,22 +33,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// CHANGED: New helper — looks up which module a submodule belongs to.
-// Needed anywhere we only have a submoduleId (like /retry-failed) but
-// need the moduleId too (e.g. to pick the right relevance prompt).
-const getModuleIdForSubmodule = async (submoduleId) => {
-  const { data, error } = await supabaseClient
-    .schema('admin')
-    .from('submodules')
-    .select('module_id')
-    .eq('id', submoduleId)
-    .single();
-
-  if (error || !data) {
-    throw new Error(`Could not find module_id for submodule_id: ${submoduleId}`);
-  }
-  return data.module_id;
-};
 app.post('/admin/invite-user', async (req, res) => {
   const { email, clientId, firstName, lastName, designation } = req.body;
 
@@ -439,85 +423,17 @@ app.post('/custom-source/run/:sourceId', async (req, res) => {
   }
 });
 
-// Retry failed articles
-// CHANGED: now looks up moduleId from the submodule (via admin.submodules),
-// since article_processing_log only stores submodule_id, not module_id.
+// Retry failed articles (manual trigger — the automatic sweep lives in jobRecovery.js)
 app.post('/retry-failed/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
+    res.json({ message: 'Retry started', clientId });
 
-    // Get all failed articles with retry count less than 3
-    const { data: failedArticles, error } = await supabaseClient
-      .from('article_processing_log')
-      .select('*')
-      .eq('client_id', clientId)
-      .eq('status', 'failed')
-      .lt('retry_count', 3);
-
-    if (error) return res.status(500).json({ error: error.message });
-    if (!failedArticles || failedArticles.length === 0) {
-      return res.json({ message: 'No failed articles to retry', count: 0 });
-    }
-
-    res.json({ message: `Retrying ${failedArticles.length} articles`, count: failedArticles.length });
-
-    // Process each failed article
-    for (const record of failedArticles) {
-      try {
-        if (!record.raw_content) {
-          await supabaseClient
-            .from('article_processing_log')
-            .update({ status: 'permanently_failed', error_message: 'No raw content saved for retry' })
-            .eq('id', record.id);
-          continue;
-        }
-
-        const article = JSON.parse(record.raw_content);
-
-        // Get industry from pipeline_job_status
-        const { data: job } = await supabaseClient
-          .from('pipeline_job_status')
-          .select('*')
-          .eq('job_id', record.job_id)
-          .single();
-
-        const industry = job?.industry || 'General';
-
-        // CHANGED: derive moduleId from the submodule since we only have submodule_id here
-        const moduleId = await getModuleIdForSubmodule(record.submodule_id);
-
-        // Update retry count
-        await supabaseClient
-          .from('article_processing_log')
-          .update({ retry_count: record.retry_count + 1 })
-          .eq('id', record.id);
-
-        // Re-run LLM
-        const { processArticlesForRelevance } = require('./modules/llmRelevanceProcessor');
-        const result = await processArticlesForRelevance(
-          [article], clientId, industry, record.job_id, moduleId, record.submodule_id // CHANGED: added moduleId
-        );
-
-        // Update status based on result
-        if (result.relevant > 0) {
-          await supabaseClient
-            .from('article_processing_log')
-            .update({ status: 'completed', error_message: null })
-            .eq('id', record.id);
-        } else if (record.retry_count + 1 >= 3) {
-          await supabaseClient
-            .from('article_processing_log')
-            .update({ status: 'permanently_failed' })
-            .eq('id', record.id);
-        }
-
-      } catch (err) {
-        console.error(`[Retry] Failed for ${record.article_url}:`, err.message);
-      }
-    }
+    const result = await retryFailedArticles(clientId);
+    console.log(`[Retry] Manual retry for client ${clientId}: attempted ${result.attempted}, succeeded ${result.succeeded}`);
 
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error(`[Retry] Error for client ${clientId}:`, err.message);
   }
 });
 
@@ -561,5 +477,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
+  startFailedArticleWatcher(15);
   startScheduler();
 });
