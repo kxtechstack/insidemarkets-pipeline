@@ -18,7 +18,7 @@ const checkAndRunSchedules = async () => {
 
   const { data: schedules, error } = await supabase
     .schema('admin')
-    .from('client_schedules')
+    .from('prompts')
     .select('*')
     .eq('is_active', true)
     .eq('schedule_time', currentTime);
@@ -40,7 +40,7 @@ const checkAndRunSchedules = async () => {
 };
 
 const startScheduler = () => {
-  console.log('[Scheduler] Cron started — checking client_schedules every minute (Asia/Kolkata)');
+  console.log('[Scheduler] Cron started — checking admin.prompts every minute (Asia/Kolkata)');
   cron.schedule('* * * * *', checkAndRunSchedules, { timezone: 'Asia/Kolkata' });
 };
 

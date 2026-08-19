@@ -140,38 +140,34 @@ app.post('/run', async (req, res) => {
 });
 
 app.post('/schedules', async (req, res) => {
-  const { clientId, submoduleId, moduleId, source, promptText, industry, frequency, scheduleTime, isActive } = req.body;
+  const { clientId, submoduleId, source, frequency, scheduleTime, isActive } = req.body;
 
-  if (!clientId || !submoduleId || !moduleId || !promptText || !industry || !scheduleTime) {
-    return res.status(400).json({ error: 'clientId, submoduleId, moduleId, promptText, industry, and scheduleTime are required' });
+  if (!clientId || !submoduleId || !scheduleTime) {
+    return res.status(400).json({ error: 'clientId, submoduleId, and scheduleTime are required' });
   }
 
   const { data, error } = await supabaseClient
     .schema('admin')
-    .from('client_schedules')
-    .upsert({
-      client_id: clientId,
-      submodule_id: submoduleId,
-      module_id: moduleId,
+    .from('prompts')
+    .update({
       source: source || 'Exa',
-      prompt_text: promptText,
-      industry,
       frequency: frequency || 'daily',
       schedule_time: scheduleTime,
       is_active: isActive !== false,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'client_id,submodule_id' })
+    })
+    .eq('client_id', clientId)
+    .eq('submodule_id', submoduleId)
     .select();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ schedule: data[0] });
+  res.json({ schedule: data[0] || null });
 });
 
 app.get('/schedules/:clientId/:submoduleId', async (req, res) => {
   const { data, error } = await supabaseClient
     .schema('admin')
-    .from('client_schedules')
-    .select('*')
+    .from('prompts')
+    .select('source, frequency, schedule_time, is_active')
     .eq('client_id', req.params.clientId)
     .eq('submodule_id', req.params.submoduleId)
     .maybeSingle();
