@@ -45,8 +45,12 @@ const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Log each article's processing result to Supabase ────────────────────────
-const logArticle = async (jobId, clientId, article, status, errorMessage = null, submoduleId = null) => {
-  await supabase.from('article_processing_log').insert({
+// CHANGED: now accepts an optional existingLogId. When provided (i.e. this
+// call is a RETRY of an article that already has a log row), UPDATE that
+// row instead of INSERTing a new one -- avoids accumulating a duplicate
+// row in article_processing_log every time an article gets retried.
+const logArticle = async (jobId, clientId, article, status, errorMessage = null, submoduleId = null, existingLogId = null) => {
+  const payload = {
     job_id: jobId,
     client_id: clientId,
     submodule_id: submoduleId,
@@ -56,7 +60,13 @@ const logArticle = async (jobId, clientId, article, status, errorMessage = null,
     error_message: errorMessage,
     raw_content: status === 'failed' ? JSON.stringify(article) : null,
     processed_at: new Date().toISOString(),
-  });
+  };
+
+  if (existingLogId) {
+    await supabase.from('article_processing_log').update(payload).eq('id', existingLogId);
+  } else {
+    await supabase.from('article_processing_log').insert(payload);
+  }
 };
 
 const qdrant = new QdrantClient({
@@ -892,7 +902,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 // and gets passed down into storeRelevantArticle for tagging.
 // CHANGED (client context): fetches client context once per batch, only for
 // modules in MODULES_NEEDING_CLIENT_CONTEXT, and passes it into classifyArticle.
-const processArticlesForRelevance = async (articles, clientId, industry, jobId, moduleId, submoduleId) => {
+// CHANGED: added optional existingLogId -- only meaningful when articles
+// is a single-element array from a retry. Passed through to logArticle so
+// the retry updates its original row instead of creating a new one.
+const processArticlesForRelevance = async (articles, clientId, industry, jobId, moduleId, submoduleId, existingLogId = null) => {
   if (!articles || articles.length === 0) return { relevant: 0, irrelevant: 0 };
 
   await setupPolicyCollection();
@@ -937,7 +950,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
     }
 
     if (classification.technical_failure) {
-      await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId);
+      await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
       irrelevantCount++;
       console.log(`  [!] FAILED | ${classification.reason}`);
     } else if (classification.is_relevant) {
@@ -950,7 +963,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         moduleId,
         submoduleId
       );
-      await logArticle(jobId, clientId, article, 'completed', null, submoduleId);
+      await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
       relevantCount++;
 
       if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
@@ -963,7 +976,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         );
       }
     } else {
-      await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId);
+      await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
       irrelevantCount++;
       console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
@@ -1078,16 +1091,14 @@ const retryFailedArticles = async (clientId) => {
         .eq('id', record.id);
 
       const result = await processArticlesForRelevance(
-        [article], clientId, industry, record.job_id, moduleId, record.submodule_id
+        [article], clientId, industry, record.job_id, moduleId, record.submodule_id, record.id
       );
 
       if (result.relevant > 0) {
-        await supabase
-          .from('article_processing_log')
-          .update({ status: 'completed', error_message: null })
-          .eq('id', record.id);
         succeeded++;
       } else if (record.retry_count + 1 >= 3) {
+        // logArticle already wrote 'failed' or 'skipped' for this attempt;
+        // permanently_failed only applies once retries are exhausted.
         await supabase
           .from('article_processing_log')
           .update({ status: 'permanently_failed' })
