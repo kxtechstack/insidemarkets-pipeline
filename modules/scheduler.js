@@ -33,7 +33,7 @@ const checkAndRunSchedules = async () => {
   if (!schedules || schedules.length === 0) return;
 
   for (const s of schedules) {
-    if (s.frequency !== 'daily') continue;
+    if (s.frequency?.toLowerCase() !== 'daily') continue;
     console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST`);
     triggerPipelineRun(s.client_id, s.prompt_text, s.industry, s.module_id, s.submodule_id, s.source);
   }
