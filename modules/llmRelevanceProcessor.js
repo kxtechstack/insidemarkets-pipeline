@@ -1062,13 +1062,14 @@ const retryFailedArticles = async (clientId) => {
 
       const article = JSON.parse(record.raw_content);
 
-      const { data: job } = await supabase
-        .from('pipeline_job_status')
-        .select('*')
-        .eq('job_id', record.job_id)
+      const { data: clientRow } = await supabase
+        .schema('admin')
+        .from('clients')
+        .select('industry')
+        .eq('id', clientId)
         .single();
 
-      const industry = job?.industry || 'General';
+      const industry = clientRow?.industry || 'General';
       const moduleId = await getModuleIdForSubmodule(record.submodule_id);
 
       await supabase
