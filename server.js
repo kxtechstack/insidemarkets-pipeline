@@ -475,6 +475,37 @@ app.post('/admin/users-last-signin', async (req, res) => {
   }
 });
 
+// NEW: Returns the count of retryable failed articles for a client, optionally
+// scoped to one submodule. Used by the frontend to decide whether to show
+// the "Retry Failed" button at all -- no point showing it if count is 0.
+app.get('/failed-count/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { submoduleId } = req.query;
+
+    let query = supabaseClient
+      .from('article_processing_log')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_id', clientId)
+      .eq('status', 'failed')
+      .lt('retry_count', 3);
+
+    if (submoduleId) {
+      query = query.eq('submodule_id', submoduleId);
+    }
+
+    const { count, error } = await query;
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ count: count || 0 });
+
+  } catch (err) {
+    console.error('[FailedCount] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/schedules/client/:clientId', async (req, res) => {
   const { clientId } = req.params;
   const { source, frequency, scheduleTime, isActive } = req.body;
