@@ -1122,9 +1122,22 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
       const industry = clientRow?.industry || 'General';
       const moduleId = await getModuleIdForSubmodule(record.submodule_id);
 
+      // NEW: mark this row as actively retrying, and bump processed_at to now,
+      // BEFORE processing it. This is what lets the frontend show a live
+      // "Retrying..." spinner -- its existing 5s poll of article_processing_log
+      // picks this up whether the retry was triggered by the manual button or
+      // by the automatic hourly sweep in jobRecovery.js (both call this same
+      // function). Bumping processed_at matters because the frontend's log
+      // fetch is scoped to "today" -- without this, retrying an article that
+      // originally failed on an earlier day would stay invisible even while
+      // actively being retried right now.
       await supabase
         .from('article_processing_log')
-        .update({ retry_count: record.retry_count + 1 })
+        .update({
+          retry_count: record.retry_count + 1,
+          status: 'retrying',
+          processed_at: new Date().toISOString(),
+        })
         .eq('id', record.id);
 
       const result = await processArticlesForRelevance(
@@ -1144,6 +1157,18 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
 
     } catch (err) {
       console.error(`[RetryFailed] Failed for ${record.article_url}:`, err.message);
+      // NEW: if something throws after we marked this row 'retrying' but before
+      // processArticlesForRelevance wrote its own final status, reset it back
+      // to 'failed' so it doesn't get stuck showing "Retrying" forever, and
+      // remains eligible for a future retry attempt.
+      try {
+        await supabase
+          .from('article_processing_log')
+          .update({ status: 'failed', error_message: `Retry error: ${err.message}` })
+          .eq('id', record.id);
+      } catch (resetErr) {
+        console.error(`[RetryFailed] Also failed to reset stuck status for ${record.id}:`, resetErr.message);
+      }
     }
   }
 
