@@ -508,7 +508,7 @@ app.get('/failed-count/:clientId', async (req, res) => {
 
 app.post('/schedules/client/:clientId', async (req, res) => {
   const { clientId } = req.params;
-  const { source, frequency, scheduleTime, isActive } = req.body;
+  const { scheduleTime } = req.body;
 
   if (!scheduleTime) {
     return res.status(400).json({ error: 'scheduleTime is required' });
@@ -517,12 +517,7 @@ app.post('/schedules/client/:clientId', async (req, res) => {
   const { data, error } = await supabaseClient
     .schema('admin')
     .from('prompts')
-    .update({
-      source: source || 'Exa',
-      frequency: frequency || 'daily',
-      schedule_time: scheduleTime,
-      is_active: isActive !== false,
-    })
+    .update({ schedule_time: scheduleTime })
     .eq('client_id', clientId)
     .select();
 

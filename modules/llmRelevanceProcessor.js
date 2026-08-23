@@ -936,49 +936,64 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
-    let classification = await classifyArticle(
-      promptTemplate, industry, article, clientContext, moduleId,
-      moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
-    );
-    classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
-    classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
-    classification = applySectorValidation(classification);
-
-    if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
-      classification = applyMonitoringScopeValidation(classification, enabledSignals);
-      classification = applySignalCategoryValidation(classification);
-    }
-
-    if (classification.technical_failure) {
-      await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
-      irrelevantCount++;
-      console.log(`  [!] FAILED | ${classification.reason}`);
-    } else if (classification.is_relevant) {
-      const chunkCount = await storeRelevantArticle(
-        article,
-        classification,
-        clientId,
-        industry,
-        jobId,
-        moduleId,
-        submoduleId
+    try {
+      let classification = await classifyArticle(
+        promptTemplate, industry, article, clientContext, moduleId,
+        moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
       );
-      await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
-      relevantCount++;
+      classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
+      classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
+      classification = applySectorValidation(classification);
 
-      if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
-        console.log(
-          `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
-        );
-      } else {
-        console.log(
-          `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
-        );
+      if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+        classification = applyMonitoringScopeValidation(classification, enabledSignals);
+        classification = applySignalCategoryValidation(classification);
       }
-    } else {
-      await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
+
+      if (classification.technical_failure) {
+        await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
+        irrelevantCount++;
+        console.log(`  [!] FAILED | ${classification.reason}`);
+      } else if (classification.is_relevant) {
+        const chunkCount = await storeRelevantArticle(
+          article,
+          classification,
+          clientId,
+          industry,
+          jobId,
+          moduleId,
+          submoduleId
+        );
+        await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
+        relevantCount++;
+
+        if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+          console.log(
+            `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
+          );
+        } else {
+          console.log(
+            `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
+          );
+        }
+      } else {
+        await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
+        irrelevantCount++;
+        console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
+      }
+    } catch (articleErr) {
+      // NEW: catches anything that throws mid-processing (e.g. storeRelevantArticle's
+      // embedding/Qdrant/Supabase calls) so this article always gets logged instead of
+      // silently vanishing and killing the rest of the batch (previously, an uncaught
+      // error here propagated up to processQueueInBatches and aborted every remaining
+      // article in the batch without logging any of them).
+      console.error(`  [!] Unhandled error processing "${article.title}": ${articleErr.message}`);
+      try {
+        await logArticle(jobId, clientId, article, 'failed', `Unhandled error: ${articleErr.message}`, submoduleId, existingLogId);
+      } catch (logErr) {
+        console.error(`  [!] Also failed to log the error for "${article.title}": ${logErr.message}`);
+      }
       irrelevantCount++;
-      console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
     }
 
     await refreshLock(clientId, submoduleId);
