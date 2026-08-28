@@ -357,6 +357,7 @@ const matchSignalToTrend = async (signalId, signalEmbedding, moduleId, clientId,
         business_impact: refreshed.business_impact,
         impact: refreshed.impact,
         sector: refreshed.sector,
+        last_updated_at: new Date().toISOString(),
       };
 
       if (shouldRenameToo) {
@@ -983,6 +984,117 @@ const calculateTrendDotSize = async (trendId) => {
   return dotSize;
 };
 
+// Posture vocabulary is fixed by design (per Forward_Outlook_Trend_Logic doc) —
+// never generated freeform, always one of these four.
+const POSTURE_BANDS = [
+  { min: 0.70, posture: 'Act Now' },
+  { min: 0.45, posture: 'Prepare' },
+  { min: 0.20, posture: 'Monitor' },
+  { min: -Infinity, posture: 'Dismiss' },
+];
+
+// Margin required to cross a band boundary before a posture change is even
+// considered — prevents flicker from a score sitting right on a threshold.
+const POSTURE_CHANGE_MARGIN = 0.05;
+
+// Minimum number of weekly scoring cycles a trend must hold its current
+// posture before it's allowed to move again (in either direction).
+const MIN_PERIODS_BEFORE_POSTURE_CHANGE = 2;
+
+const RING_URGENCY = { near_term: 1.0, mid_term: 0.5, long_term: 0.0 };
+const IMPACT_URGENCY = { High: 1.0, Medium: 0.5, Low: 0.0 };
+
+const scoreToPostureBand = (score) => {
+  for (const band of POSTURE_BANDS) {
+    if (score >= band.min) return band.posture;
+  }
+  return 'Dismiss';
+};
+
+// Returns the numeric urgency score a candidate posture would need to
+// clear the CURRENT posture's band boundary by POSTURE_CHANGE_MARGIN,
+// in whichever direction the candidate lies. Used to decide if a raw
+// score change is a real, decisive move or just noise near a boundary.
+const clearsBoundaryWithMargin = (score, currentPosture) => {
+  const currentBandIndex = POSTURE_BANDS.findIndex(b => b.posture === currentPosture);
+  if (currentBandIndex === -1) return true; // no prior posture (first time) — no margin check needed
+
+  const currentBand = POSTURE_BANDS[currentBandIndex];
+  const bandAbove = POSTURE_BANDS[currentBandIndex - 1]; // stricter/higher urgency band, if any
+  const bandBelow = POSTURE_BANDS[currentBandIndex + 1]; // looser/lower urgency band, if any
+
+  // Moving up into a higher-urgency band: score must clear the CURRENT
+  // band's own lower boundary by the margin, from above.
+  if (bandAbove && score >= currentBand.min + POSTURE_CHANGE_MARGIN) return true;
+  // Moving down into a lower-urgency band: score must fall below the
+  // current band's lower boundary by the margin.
+  if (bandBelow && score < currentBand.min - POSTURE_CHANGE_MARGIN) return true;
+
+  return false; // still within margin of the current band's boundary — treat as no real change
+};
+
+/**
+ * Computes a trend's posture (Act Now / Prepare / Monitor / Dismiss) from
+ * its current ring, impact, and dot size — then applies hysteresis so the
+ * posture can only actually change if the new score clears a band boundary
+ * by a real margin AND the trend has held its current posture for at least
+ * MIN_PERIODS_BEFORE_POSTURE_CHANGE weekly cycles. Otherwise the previous
+ * posture is kept and periods_in_posture just increments.
+ *
+ * Mirrors calculateTrendRing/calculateTrendDotSize in shape, but unlike
+ * those, posture needs to read+write trend_clusters' own stored state
+ * (posture, posture_score, periods_in_posture) to enforce stability —
+ * so this one has to load the trend row itself, not just its signals.
+ */
+const calculateTrendPosture = async (trendId, ring, dotSize) => {
+  const { data: trend, error } = await supabase
+    .from('trend_clusters')
+    .select('impact, posture, posture_score, periods_in_posture')
+    .eq('id', trendId)
+    .single();
+
+  if (error || !trend) {
+    console.log(`  [Posture] Could not load trend ${trendId} for posture calculation`);
+    return null;
+  }
+
+  const ringUrgency = RING_URGENCY[ring] ?? 0.5;
+  const impactUrgency = IMPACT_URGENCY[trend.impact] ?? 0.5;
+  const dotSizeUrgency = Math.min(dotSize, MAX_DOT_SIZE) / MAX_DOT_SIZE;
+
+  const rawScore = (0.4 * ringUrgency) + (0.4 * impactUrgency) + (0.2 * dotSizeUrgency);
+  const candidatePosture = scoreToPostureBand(rawScore);
+
+  const currentPosture = trend.posture;
+  const periodsInPosture = trend.periods_in_posture || 0;
+
+  // First time this trend gets a posture — just set it, no hysteresis
+  // needed since there's nothing to be stable relative to yet.
+  if (!currentPosture) {
+    console.log(`  [Posture] Trend ${trendId} — first posture assigned: ${candidatePosture} (score: ${rawScore.toFixed(3)})`);
+    return { posture: candidatePosture, postureScore: rawScore, periodsInPosture: 1 };
+  }
+
+  // No change candidate — just keep incrementing the dwell counter.
+  if (candidatePosture === currentPosture) {
+    return { posture: currentPosture, postureScore: rawScore, periodsInPosture: periodsInPosture + 1 };
+  }
+
+  // Candidate differs from current — only allow the change if BOTH the
+  // minimum dwell time has passed AND the score clears the boundary by
+  // a real margin, not just barely.
+  const dwellSatisfied = periodsInPosture >= MIN_PERIODS_BEFORE_POSTURE_CHANGE;
+  const marginSatisfied = clearsBoundaryWithMargin(rawScore, currentPosture);
+
+  if (dwellSatisfied && marginSatisfied) {
+    console.log(`  [Posture] Trend ${trendId} — posture changed: ${currentPosture} -> ${candidatePosture} (score: ${rawScore.toFixed(3)}, held previous posture for ${periodsInPosture} period(s))`);
+    return { posture: candidatePosture, postureScore: rawScore, periodsInPosture: 1 };
+  }
+
+  console.log(`  [Posture] Trend ${trendId} — change blocked (candidate: ${candidatePosture}, current: ${currentPosture}, dwell: ${periodsInPosture}/${MIN_PERIODS_BEFORE_POSTURE_CHANGE}, margin ok: ${marginSatisfied}) — keeping ${currentPosture}`);
+  return { posture: currentPosture, postureScore: rawScore, periodsInPosture: periodsInPosture + 1 };
+};
+
 const SIMILAR_TRENDS_LIMIT = 3; // how many related trends to surface per card
 
 /**
@@ -1100,21 +1212,25 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
       continue;
     }
 
+    const postureResult = await calculateTrendPosture(trend.id, ring, dotSize);
+    const posture = postureResult?.posture || 'Monitor';
+
     // Update the live trend record with fresh values
     await supabase
       .from('trend_clusters')
       .update({
         ring,
         dot_size: dotSize,
+        posture,
+        posture_score: postureResult?.postureScore ?? null,
+        periods_in_posture: postureResult?.periodsInPosture ?? 1,
         similar_trends: similarTrends,
-        last_updated_at: new Date().toISOString(),
       })
       .eq('id', trend.id);
 
-    // Freeze this week's state into trend_snapshots — matches the
-    // existing schema: write_up (jsonb) holds summary/business_impact/
-    // impact together; posture is NOT NULL but unused for Forward
-    // Outlook right now, so we store a placeholder until that's designed.
+    // Freeze this week's state into trend_snapshots — write_up (jsonb)
+    // holds summary/business_impact/impact together; posture now comes
+    // from calculateTrendPosture instead of the old 'N/A' placeholder.
     const { error: snapshotError } = await supabase.from('trend_snapshots').insert({
       trend_id: trend.id,
       module_id: moduleId,
@@ -1125,7 +1241,7 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
       sector: trend.sector || 'Unknown',
       ring,
       dot_size: dotSize,
-      posture: 'N/A',
+      posture,
       similar_trends: similarTrends,
       write_up: {
         summary: trend.summary,
@@ -1143,4 +1259,4 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
 };
 
 
-  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, runWeeklyScoring, findSimilarTrends, updateTrendCentroid };
+  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid };
