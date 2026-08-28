@@ -69,7 +69,7 @@ class GroqChat extends BaseChatModel {
       content: m.content,
     }));
 
-    const content = await callLLM(formatted, { temperature: 0.1, max_tokens: 500, timeout: 180000 });
+    const content = await callLLM(formatted, { temperature: 0.1, max_tokens: 1200, timeout: 180000 });
 
     return {
       generations: [{ message: new AIMessage(content), text: content }],
@@ -151,9 +151,9 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   .trim();
 
 
-  // Step 4 — parse the CITED_SOURCES line the model outputs on its own final line,
+  // Step 4 — parse the CITED_SOURCES line from the START of the response (immune to truncation),
   // strip it from the visible answer, and use it to filter sources accurately.
-  const citedMatch = cleanedAnswer.match(/CITED_SOURCES:\s*(none|[\d,\s]+)\s*$/i);
+  const citedMatch = cleanedAnswer.match(/^CITED_SOURCES:\s*(none|[\d,\s]+)\s*\n+/i);
 
   let citedIndices = new Set();
   if (citedMatch && citedMatch[1].toLowerCase() !== 'none') {
@@ -162,8 +162,8 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     );
   }
 
-  // Strip the CITED_SOURCES line (and any trailing whitespace before it) from what the user sees
-  cleanedAnswer = cleanedAnswer.replace(/CITED_SOURCES:\s*(none|[\d,\s]+)\s*$/i, '').trim();
+  // Strip the CITED_SOURCES line from what the user sees
+  cleanedAnswer = cleanedAnswer.replace(/^CITED_SOURCES:\s*(none|[\d,\s]+)\s*\n+/i, '').trim();
 
   const NO_ANSWER_PATTERNS = [
     /don'?t have enough information/i,
@@ -179,7 +179,6 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   }])).values()];
 
   return { answer: cleanedAnswer, sources };
-
 };
 
 module.exports = { askQuestion };
