@@ -89,7 +89,7 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
 
   const searchResults = await qdrant.search(POLICY_COLLECTION, {
     vector: questionVector,
-    limit: 5,
+    limit: 15,
     filter: {
       must: [
         { key: 'client_id', match: { value: clientId } },
@@ -99,7 +99,7 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     },
     with_payload: true,
   });
-    const filteredResults = searchResults.filter(r => r.score >= 0.50);
+    const filteredResults = searchResults.filter(r => r.score >= 0.20);
 
 
   console.log('[RAG] Retrieved chunks:');
@@ -151,8 +151,30 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   .trim();
 
 
-  // Step 4 — deduplicate sources
-  const sources = [...new Map(filteredResults.map(r => [r.payload.url, {
+  // Step 4 — only keep sources the LLM actually cited by [n] number in its answer.
+  // filteredResults[i] corresponds to citation marker [i+1] in the context we built above.
+  const citedIndices = new Set(
+    [...cleanedAnswer.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1], 10))
+  );
+
+  const NO_ANSWER_PATTERNS = [
+    /don'?t have enough information/i,
+    /no relevant (policy )?information/i,
+    /cannot answer/i,
+    /unable to answer/i,
+  ];
+  const isNoAnswer = NO_ANSWER_PATTERNS.some(p => p.test(cleanedAnswer));
+
+  let citedResults;
+  if (isNoAnswer) {
+    citedResults = []; // model said it couldn't answer — show no sources, even if some cleared the score filter
+  } else if (citedIndices.size > 0) {
+    citedResults = filteredResults.filter((_, i) => citedIndices.has(i + 1));
+  } else {
+    citedResults = filteredResults; // model gave a real answer but didn't cite — fall back to showing all retrieved (safer than showing none)
+  }
+
+  const sources = [...new Map(citedResults.map(r => [r.payload.url, {
     title: r.payload.title,
     url: r.payload.url,
   }])).values()];
