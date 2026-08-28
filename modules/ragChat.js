@@ -151,28 +151,27 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   .trim();
 
 
-  // Step 4 — only keep sources the LLM actually cited by [n] number in its answer.
-  // filteredResults[i] corresponds to citation marker [i+1] in the context we built above.
-  const citedIndices = new Set(
-    [...cleanedAnswer.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1], 10))
-  );
+  // Step 4 — parse the CITED_SOURCES line the model outputs on its own final line,
+  // strip it from the visible answer, and use it to filter sources accurately.
+  const citedMatch = cleanedAnswer.match(/CITED_SOURCES:\s*(none|[\d,\s]+)\s*$/i);
+
+  let citedIndices = new Set();
+  if (citedMatch && citedMatch[1].toLowerCase() !== 'none') {
+    citedIndices = new Set(
+      citedMatch[1].split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+    );
+  }
+
+  // Strip the CITED_SOURCES line (and any trailing whitespace before it) from what the user sees
+  cleanedAnswer = cleanedAnswer.replace(/CITED_SOURCES:\s*(none|[\d,\s]+)\s*$/i, '').trim();
 
   const NO_ANSWER_PATTERNS = [
     /don'?t have enough information/i,
     /no relevant (policy )?information/i,
-    /cannot answer/i,
-    /unable to answer/i,
   ];
   const isNoAnswer = NO_ANSWER_PATTERNS.some(p => p.test(cleanedAnswer));
 
-  let citedResults;
-  if (isNoAnswer) {
-    citedResults = []; // model said it couldn't answer — show no sources, even if some cleared the score filter
-  } else if (citedIndices.size > 0) {
-    citedResults = filteredResults.filter((_, i) => citedIndices.has(i + 1));
-  } else {
-    citedResults = filteredResults; // model gave a real answer but didn't cite — fall back to showing all retrieved (safer than showing none)
-  }
+  const citedResults = isNoAnswer ? [] : filteredResults.filter((_, i) => citedIndices.has(i + 1));
 
   const sources = [...new Map(citedResults.map(r => [r.payload.url, {
     title: r.payload.title,
