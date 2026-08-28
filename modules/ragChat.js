@@ -147,6 +147,10 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
   .replace(/\*(.*?)\*/g, '$1')
   .replace(/#{1,6}\s/g, '')
   .replace(/^\s*[-*]\s/gm, '• ')
+  .replace(/<br\s*\/?>/gi, '\n')
+  .replace(/^\|?-{3,}(\|-{3,})*\|?\s*$/gm, '')
+  .replace(/^\s*\|\s*/gm, '• ')
+  .replace(/\s*\|\s*/g, '  —  ')
   .replace(/\n{3,}/g, '\n\n')
   .trim();
 
