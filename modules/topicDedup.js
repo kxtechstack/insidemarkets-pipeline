@@ -25,15 +25,13 @@
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 const { v4: uuidv4 } = require('uuid');
-const { callLLM } = require('./llmClient');
 
 const QDRANT_URL = process.env.QDRANT_URL;
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 
 const DEDUP_COLLECTION = 'dedup_titles';
 const VECTOR_SIZE = 384; // all-MiniLM-L6-v2 output size
-const SIMILARITY_THRESHOLD = 0.78; // cosine similarity >= this -> definite duplicate, no LLM check needed
-const GRAY_ZONE_LOW = 0.55; // below this -> definite not-duplicate, no LLM check needed
+const SIMILARITY_THRESHOLD = 0.78; // cosine similarity >= this -> treat as duplicate
 const RECENCY_WINDOW_DAYS = 60;
 
 const qdrant = new QdrantClient({
@@ -55,26 +53,6 @@ const embedText = async (text) => {
   const embedder = await getEmbedder();
   const output = await embedder(text, { pooling: 'mean', normalize: true });
   return Array.from(output.data); // Float32Array -> plain array
-};
-
-// Gray-zone tiebreaker — only called when embedding score is ambiguous (between
-// GRAY_ZONE_LOW and SIMILARITY_THRESHOLD). Asks the LLM if two headlines are
-// literally the same story.
-const checkSameStoryViaLLM = async (titleA, titleB) => {
-  try {
-    const answer = await callLLM([
-      { role: 'system', content: 'You are a strict, precise classification assistant. You only respond with one word: yes or no.' },
-      {
-        role: 'user',
-        content: `Are these two news headlines describing the exact same specific event/story (not just the same general topic or company)? Answer with only one word: yes or no.\n\nHeadline A: "${titleA}"\nHeadline B: "${titleB}"`,
-      },
-    ], { temperature: 0, max_tokens: 20, timeout: 30000 });
-
-    return answer.trim().toLowerCase().startsWith('yes');
-  } catch (err) {
-    console.log(`[TopicDedup] LLM gray-zone check failed, defaulting to keep: ${err.message}`);
-    return false;
-  }
 };
 
 // Strip trailing source attribution ("| BeautyMatter", "- The Economic Times",
@@ -194,20 +172,9 @@ const removeSameTopicArticles = async (articles, clientId, moduleId) => {
       continue; // drop — same topic already seen in this module
     }
 
-    if (topMatch && topMatch.score >= GRAY_ZONE_LOW) {
-      const isDupByLLM = await checkSameStoryViaLLM(article.title, topMatch.payload.title);
-      if (isDupByLLM) {
-        console.log(
-          `[DUPLICATE-LLM] module=${moduleId} score=${topMatch.score.toFixed(3)} | "${article.title}" ~ "${topMatch.payload.title}"`
-        );
-        continue;
-      }
+    if (topMatch) {
       console.log(
-        `[no match-LLM] module=${moduleId} score=${topMatch.score.toFixed(3)} | "${article.title}" vs "${topMatch.payload.title}"`
-      );
-    } else if (topMatch) {
-      console.log(
-        `[no match] module=${moduleId} best score=${topMatch.score.toFixed(3)} (below ${GRAY_ZONE_LOW}) | "${article.title}" vs "${topMatch.payload.title}"`
+        `[no match] module=${moduleId} best score=${topMatch.score.toFixed(3)} (below ${SIMILARITY_THRESHOLD}) | "${article.title}" vs "${topMatch.payload.title}"`
       );
     }
 
