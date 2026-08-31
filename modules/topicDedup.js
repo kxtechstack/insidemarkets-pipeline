@@ -31,7 +31,7 @@ const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 
 const DEDUP_COLLECTION = 'dedup_titles';
 const VECTOR_SIZE = 384; // all-MiniLM-L6-v2 output size
-const SIMILARITY_THRESHOLD = 0.78; // cosine similarity >= this -> treat as duplicate
+const SIMILARITY_THRESHOLD = 0.70; // cosine similarity >= this -> treat as duplicate
 const RECENCY_WINDOW_DAYS = 60;
 
 const qdrant = new QdrantClient({
@@ -55,11 +55,20 @@ const embedText = async (text) => {
   return Array.from(output.data); // Float32Array -> plain array
 };
 
+// Strip trailing source attribution ("| BeautyMatter", "- The Economic Times",
+// "» startuporiginals.in") before embedding — it was adding noise that dragged
+// similarity scores down for genuine duplicates.
+const stripSourceSuffix = (title) => {
+  return title
+    .split(/\s[|｜»]\s|\s-\s(?=[A-Z][\w\s.&]*$)/)[0]
+    .trim();
+};
+
 // Build the text used for dedup embedding: title + a short snippet of body content.
 const SNIPPET_LENGTH = 400;
 
 const buildEmbeddingText = (article) => {
-  const title = article.title || '';
+  const title = stripSourceSuffix(article.title || '');
   let snippet = '';
 
   if (article.text) {
