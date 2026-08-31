@@ -35,7 +35,7 @@ const checkSameStoryViaLLM = async (titleA, titleB) => {
         role: 'user',
         content: `Are these two news headlines describing the exact same specific event/story (not just the same general topic or company)? Answer with only one word: yes or no.\n\nHeadline A: "${titleA}"\nHeadline B: "${titleB}"`,
       },
-    ], { temperature: 0, max_tokens: 5, timeout: 30000 });
+    ], { temperature: 0, max_tokens: 20, timeout: 30000 });
     return answer.trim().toLowerCase().startsWith('yes');
   } catch (err) {
     console.log(`   [LLM check failed: ${err.message}, defaulting to not-dup]`);
