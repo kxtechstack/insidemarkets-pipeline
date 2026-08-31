@@ -88,6 +88,140 @@ const testCases = [
     b: 'KKR acquires Japanese beauty and lifestyle group Ci Flavors - Premium Beauty News',
     expected: false,
   },
+
+  // ── additional cases — different modules/topics, not just beauty funding ───
+
+  // Regulatory/policy — same rule, different outlets
+  {
+    a: 'RBI tightens norms for digital lending apps, mandates disclosure of all fees',
+    b: 'India central bank imposes new digital lending disclosure rules - Reuters',
+    expected: true,
+  },
+  {
+    a: 'EU finalizes AI Act enforcement timeline for high-risk systems',
+    b: 'European Union sets deadlines for AI Act compliance | TechCrunch',
+    expected: true,
+  },
+  {
+    a: 'FTC opens antitrust probe into cloud computing pricing practices',
+    b: 'US regulator investigates cloud pricing over antitrust concerns - Bloomberg',
+    expected: true,
+  },
+  {
+    a: 'SEBI proposes stricter disclosure norms for related-party transactions',
+    b: 'RBI tightens norms for digital lending apps, mandates disclosure of all fees',
+    expected: false,
+    note: 'different regulator, different topic — should NOT match',
+  },
+
+  // M&A — same deal worded very differently (harder cases, similar to Asaya)
+  {
+    a: 'Nestle to sell bottled water brands to private equity firm for $4.3 billion',
+    b: 'Nestle divests water business in $4.3B deal with One Rock Capital - WSJ',
+    expected: true,
+  },
+  {
+    a: 'Adobe abandons $20 billion Figma acquisition after regulatory pushback',
+    b: 'Adobe, Figma call off merger amid antitrust scrutiny | The Verge',
+    expected: true,
+  },
+  {
+    a: 'Adobe abandons $20 billion Figma acquisition after regulatory pushback',
+    b: 'Figma reports record Q3 revenue growth, plans IPO in 2026',
+    expected: false,
+    note: 'same companies, unrelated stories — should NOT match',
+  },
+
+  // Leadership changes — same event, different framing
+  {
+    a: 'Starbucks CEO Laxman Narasimhan steps down, Brian Niccol to take over',
+    b: 'Starbucks names Chipotle chief Brian Niccol as new CEO - CNBC',
+    expected: true,
+  },
+  {
+    a: 'Starbucks CEO Laxman Narasimhan steps down, Brian Niccol to take over',
+    b: 'Starbucks Q3 same-store sales decline for third straight quarter',
+    expected: false,
+    note: 'same company, different story — should NOT match',
+  },
+
+  // Product launches — same launch, different angle
+  {
+    a: 'OpenAI launches GPT-5 with major reasoning and coding upgrades',
+    b: 'OpenAI unveils GPT-5, its most capable model yet | Ars Technica',
+    expected: true,
+  },
+  {
+    a: 'OpenAI launches GPT-5 with major reasoning and coding upgrades',
+    b: 'Anthropic releases Claude Opus 5 with extended context window',
+    expected: false,
+    note: 'different companies, similar topic — should NOT match',
+  },
+
+  // Layoffs — same round, different numbers reported (like the Asaya currency issue)
+  {
+    a: 'Amazon to cut 14,000 corporate jobs as part of restructuring',
+    b: 'Amazon layoffs hit corporate workforce, about 14,000 roles affected - NYT',
+    expected: true,
+  },
+  {
+    a: 'Amazon to cut 14,000 corporate jobs as part of restructuring',
+    b: 'Amazon layoffs to affect roughly 10% of corporate staff, sources say',
+    expected: true,
+    note: 'same event, different reported numbers — hard case like Asaya',
+  },
+
+  // Near-identical titles, trivial rewording (should be easy passes)
+  {
+    a: 'Tesla recalls 1.8 million vehicles over door handle defect',
+    b: 'Tesla issues recall for 1.8M vehicles due to door handle issue',
+    expected: true,
+  },
+  {
+    a: 'Tesla recalls 1.8 million vehicles over door handle defect',
+    b: "Tesla's Cybertruck production ramps up at Texas Gigafactory",
+    expected: false,
+  },
+
+  // Numbers-only difference, same story, different currency (like Asaya but simpler)
+  {
+    a: 'Zepto raises $350 million in Series G funding round',
+    b: 'Zepto secures ₹2,900 crore in fresh funding led by Motilal Oswal',
+    expected: true,
+    note: 'same round, different currency — hard case like Asaya',
+  },
+  {
+    a: 'Zepto raises $350 million in Series G funding round',
+    b: 'Blinkit expands dark store network to 15 new cities',
+    expected: false,
+  },
+
+  // Follow-up/update articles about the same underlying story (ambiguous — judgment call)
+  {
+    a: 'Boeing 737 MAX grounded after mid-air door plug incident',
+    b: 'FAA grounds Boeing 737 MAX fleet following door plug blowout - AP',
+    expected: true,
+  },
+  {
+    a: 'Boeing 737 MAX grounded after mid-air door plug incident',
+    b: 'Boeing shares fall 8% as investigation into MAX incident widens',
+    expected: false,
+    note: 'follow-up market reaction story, not the same event report — should NOT match',
+  },
+
+  // Same company, same broad topic, different quarters/events (should NOT match)
+  {
+    a: 'Reliance Jio crosses 500 million subscribers in India',
+    b: 'Reliance Jio launches new 5G plans starting at Rs 199',
+    expected: false,
+  },
+
+  // Completely unrelated pair, sanity check
+  {
+    a: 'Paris 2026 Olympics organizers unveil new stadium design',
+    b: 'Coca-Cola launches limited edition mango flavor in Southeast Asia',
+    expected: false,
+  },
 ];
 
 let embedder;
