@@ -15,7 +15,7 @@
  */
 
 const { pipeline } = require('@xenova/transformers');
-const { callLLM } = require('./llmClient');
+const { callLLM } = require('./modules/llmClient');
 
 const SIMILARITY_THRESHOLD = 0.78; // keep in sync with topicDedup.js
 const GRAY_ZONE_LOW = 0.55;        // keep in sync with topicDedup.js
