@@ -1,23 +1,46 @@
 /**
  * test-dedup.js
  * ==============
- * Standalone test — no Qdrant, no server needed.
- * Re-embeds real title pairs pulled from your production logs and checks
- * whether stripSourceSuffix() + the new SIMILARITY_THRESHOLD correctly
- * classify them as DUPLICATE or NOT DUPLICATE.
+ * Standalone test — no Qdrant needed, but DOES call the real LLM via
+ * llmClient.js for gray-zone pairs, so it must run inside the container
+ * where GROQ_API_KEY / GROQ_MODEL are available.
  *
- * Run:  node test-dedup.js
+ * Re-embeds real title pairs from your production logs and checks whether
+ * stripSourceSuffix() + SIMILARITY_THRESHOLD + GRAY_ZONE_LOW + the LLM
+ * tiebreaker correctly classify them as DUPLICATE or NOT DUPLICATE —
+ * mirrors the actual logic in topicDedup.js exactly.
+ *
+ * Run:  docker exec -it app-test-app-1 node test-dedup.js
+ * (run from inside the container, e.g. modules/ folder, so ./llmClient resolves)
  */
 
 const { pipeline } = require('@xenova/transformers');
+const { callLLM } = require('./llmClient');
 
-const SIMILARITY_THRESHOLD = 0.75; // keep in sync with topicDedup.js
+const SIMILARITY_THRESHOLD = 0.78; // keep in sync with topicDedup.js
+const GRAY_ZONE_LOW = 0.55;        // keep in sync with topicDedup.js
 
-// ── Same function you're adding to topicDedup.js — paste it here too ────────
+// ── Same functions as topicDedup.js — kept in sync manually ─────────────────
 const stripSourceSuffix = (title) => {
   return title
     .split(/\s[|｜»]\s|\s-\s(?=[A-Z][\w\s.&]*$)/)[0]
     .trim();
+};
+
+const checkSameStoryViaLLM = async (titleA, titleB) => {
+  try {
+    const answer = await callLLM([
+      { role: 'system', content: 'You are a strict, precise classification assistant. You only respond with one word: yes or no.' },
+      {
+        role: 'user',
+        content: `Are these two news headlines describing the exact same specific event/story (not just the same general topic or company)? Answer with only one word: yes or no.\n\nHeadline A: "${titleA}"\nHeadline B: "${titleB}"`,
+      },
+    ], { temperature: 0, max_tokens: 5, timeout: 30000 });
+    return answer.trim().toLowerCase().startsWith('yes');
+  } catch (err) {
+    console.log(`   [LLM check failed: ${err.message}, defaulting to not-dup]`);
+    return false;
+  }
 };
 
 // ── Test cases pulled straight from your logs ────────────────────────────────
@@ -113,18 +136,30 @@ const run = async () => {
     const [vecA, vecB] = await Promise.all([embed(cleanA), embed(cleanB)]);
     const score = cosineSim(vecA, vecB);
 
-    const predictedDuplicate = score >= SIMILARITY_THRESHOLD;
+    let predictedDuplicate;
+    let path;
+    if (score >= SIMILARITY_THRESHOLD) {
+      predictedDuplicate = true;
+      path = 'embedding-only';
+    } else if (score >= GRAY_ZONE_LOW) {
+      predictedDuplicate = await checkSameStoryViaLLM(cleanA, cleanB);
+      path = 'LLM-tiebreak';
+    } else {
+      predictedDuplicate = false;
+      path = 'embedding-only';
+    }
+
     const correct = predictedDuplicate === expected;
     correct ? pass++ : fail++;
 
-    console.log(`${correct ? '✅ PASS' : '❌ FAIL'}  score=${score.toFixed(3)}  expected=${expected ? 'DUPLICATE' : 'not dup'}  got=${predictedDuplicate ? 'DUPLICATE' : 'not dup'}`);
+    console.log(`${correct ? '✅ PASS' : '❌ FAIL'}  score=${score.toFixed(3)} [${path}]  expected=${expected ? 'DUPLICATE' : 'not dup'}  got=${predictedDuplicate ? 'DUPLICATE' : 'not dup'}`);
     console.log(`   A: "${cleanA}"`);
     console.log(`   B: "${cleanB}"`);
     if (note) console.log(`   note: ${note}`);
     console.log('');
   }
 
-  console.log(`\n${pass}/${pass + fail} passed, ${fail} failed. Threshold = ${SIMILARITY_THRESHOLD}`);
+  console.log(`\n${pass}/${pass + fail} passed, ${fail} failed. Threshold = ${SIMILARITY_THRESHOLD}, Gray zone from ${GRAY_ZONE_LOW}`);
 };
 
 run();
