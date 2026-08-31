@@ -222,6 +222,21 @@ const testCases = [
     b: 'Coca-Cola launches limited edition mango flavor in Southeast Asia',
     expected: false,
   },
+
+  // ── real case flagged by Govind, from market_dynamics_signals ──────────────
+  // Both published 2026-07-22, same underlying piece about VC activity in beauty
+  {
+    a: 'Venture Capital Persists in Beauty Despite a Shift Toward Debt Financing',
+    b: 'Venture Capital Persists in Beauty, Even as DTC Brands Shift Toward Debt',
+    expected: true,
+    note: 'Govind-flagged real duplicate — same date, near-identical title',
+  },
+  {
+    a: 'Venture Capital Persists in Beauty Despite a Shift Toward Debt Financing',
+    b: 'Sixpence Secures 2 Billion Won Seed Round',
+    expected: false,
+    note: 'unrelated signal bundled on the same card — sanity check, should NOT match',
+  },
 ];
 
 let embedder;
