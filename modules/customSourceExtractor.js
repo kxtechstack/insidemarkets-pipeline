@@ -12,6 +12,8 @@
 const cheerio = require('cheerio');
 const { UnstructuredClient } = require('unstructured-client');
 const { createClient } = require('@supabase/supabase-js');
+const FirecrawlApp = require('@mendable/firecrawl-js').default;
+const firecrawl = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY });
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -33,37 +35,43 @@ const extractFromText = async (source) => {
 };
 
 // ---------- WEBSITE ----------
-// Fetch the page HTML, strip out non-content elements, return visible text.
 const extractFromWebsite = async (source) => {
   const url = source.url_or_path;
   if (!url) throw new Error('No url_or_path set for this website source');
 
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch website: ${response.status} ${response.statusText}`);
+    if (!response.ok) throw new Error(`status ${response.status}`);
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    $('script, style, nav, header, footer, iframe, noscript, svg').remove();
+
+    const pageTitle = $('title').text().trim() || source.source_name;
+    const bodyText = $('body').text().replace(/\s{2,}/g, ' ').trim();
+
+    if (!bodyText || bodyText.length < 50) throw new Error('little or no readable text');
+
+    return { title: pageTitle, text: bodyText };
+
+  } catch (fetchErr) {
+    console.log(`[CustomSourceExtractor] Plain fetch failed for ${url} (${fetchErr.message}), trying Firecrawl fallback`);
+
+    const result = await firecrawl.scrapeUrl(url, { formats: ['markdown'] });
+
+    if (!result.success || !result.markdown || result.markdown.length < 50) {
+      throw new Error(`Failed to fetch website via both plain fetch and Firecrawl: ${fetchErr.message}`);
+    }
+
+    return { title: result.metadata?.title || source.source_name, text: result.markdown };
   }
-
-  const html = await response.text();
-  const $ = cheerio.load(html);
-
-  // Strip elements that are never real content
-  $('script, style, nav, header, footer, iframe, noscript, svg').remove();
-
-  const pageTitle = $('title').text().trim() || source.source_name;
-  const bodyText = $('body').text().replace(/\s{2,}/g, ' ').trim();
-
-  if (!bodyText || bodyText.length < 50) {
-    throw new Error('Website returned little or no readable text (page may require JavaScript)');
-  }
-
-  return { title: pageTitle, text: bodyText };
 };
 
 // ---------- FILE (PDF, Word, Excel, etc. via link OR upload) ----------

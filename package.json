@@ -13,6 +13,7 @@
   "type": "commonjs",
   "dependencies": {
     "@langchain/core": "^1.2.1",
+    "@mendable/firecrawl-js": "^4.38.0",
     "@qdrant/js-client-rest": "^1.18.0",
     "@supabase/supabase-js": "^2.108.1",
     "@tavily/core": "^0.7.6",
