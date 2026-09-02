@@ -65,7 +65,8 @@ const extractFromWebsite = async (source) => {
     console.log(`[CustomSourceExtractor] Plain fetch failed for ${url} (${fetchErr.message}), trying Firecrawl fallback`);
 
     const result = await firecrawl.scrapeUrl(url, { formats: ['markdown'] });
-
+    console.log('[Firecrawl DEBUG]', JSON.stringify(result));
+    
     if (!result.success || !result.markdown || result.markdown.length < 50) {
       throw new Error(`Failed to fetch website via both plain fetch and Firecrawl: ${fetchErr.message}`);
     }
