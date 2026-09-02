@@ -186,6 +186,7 @@ const removeSameTopicArticles = async (articles, clientId, moduleId) => {
       : Date.now();
 
     await qdrant.upsert(DEDUP_COLLECTION, {
+      wait: true,
       points: [
         {
           id: uuidv4(),
