@@ -30,19 +30,19 @@ const articles = [
     title: "Fed's 2026 Stress Test Shows Banks Well Capitalized Despite Severe Scenario",
     text: "The Federal Reserve released results of its annual stress test on Wednesday, finding that the 32 largest US banks would remain well capitalized even under a severe hypothetical recession. The aggregate capital decline was smaller than in 2025, driven by higher net interest income across the sector.",
     url: "https://example-outlet-a.com/fed-stress-test-2026",
-    publishedDate: "2026-06-25",
+    publishedDate: "2026-08-25",
   },
   {
     title: "Large Banks Pass Federal Reserve Stress Test With Room to Spare",
     text: "All 32 banks subject to this year's Federal Reserve stress test cleared the bar comfortably, regulators said Wednesday. The projected drop in capital ratios was less severe than last year's exercise, a result analysts attributed to stronger net interest income.",
     url: "https://example-outlet-b.com/banks-pass-stress-test",
-    publishedDate: "2026-06-25",
+    publishedDate: "2026-08-25",
   },
   {
     title: "Banking Sector Resilience Confirmed in Latest Fed Capital Review",
     text: "In its yearly capital adequacy review, the Federal Reserve concluded that major US banks could withstand a severe economic downturn. This year's projected capital decline was smaller than 2025's, largely thanks to improved net interest margins.",
     url: "https://example-outlet-c.com/banking-resilience-fed-review",
-    publishedDate: "2026-06-26",
+    publishedDate: "2026-08-26",
   },
 
   // ---- Cluster DUP-B: Consumer fraud survey (2 versions) ----
@@ -64,13 +64,13 @@ const articles = [
     title: "Regulators Propose Changes to GSIB Surcharge Calculation",
     text: "Federal banking regulators unveiled a proposal Tuesday to revise how the GSIB surcharge is calculated for the largest global banks, aiming to reduce volatility in year-over-year capital requirements.",
     url: "https://example-outlet-b.com/gsib-surcharge-proposal",
-    publishedDate: "2026-06-30",
+    publishedDate: "2026-08-27",
   },
   {
     title: "New Rule Proposed for Calculating Global Systemically Important Bank Surcharges",
     text: "US regulators on Tuesday proposed a rule change to the methodology used for setting capital surcharges on globally systemically important banks, intended to smooth out swings in requirements from year to year.",
     url: "https://example-outlet-c.com/gsib-surcharge-methodology",
-    publishedDate: "2026-06-30",
+    publishedDate: "2026-08-27",
   },
 
   // ---- 33 distinct, unrelated articles ----
