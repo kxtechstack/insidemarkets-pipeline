@@ -984,6 +984,39 @@ const calculateTrendDotSize = async (trendId) => {
   return dotSize;
 };
 
+/**
+ * Computes a trend's confidence score — a recency-weighted evidence
+ * score, separate from dot_size. Each signal's weight decays with age
+ * (same decay curve as calculateTrendRing: full weight today, half
+ * weight at 30 days old), so trends with more RECENT signals score
+ * higher than trends with the same signal count but older signals.
+ * This does NOT affect dot_size or radar node sizing — confidence_score
+ * is its own independent field.
+ */
+const calculateTrendConfidenceScore = async (trendId) => {
+  const { data: members, error } = await supabase
+    .from('trend_membership')
+    .select('signal_id, joined_at')
+    .eq('trend_id', trendId);
+
+  if (error || !members || members.length === 0) {
+    console.log(`  [Scoring] Could not fetch members for trend ${trendId}, skipping confidence score`);
+    return null;
+  }
+
+  const now = Date.now();
+  let weightedScore = 0;
+
+  for (const member of members) {
+    if (!member.joined_at) continue;
+    const daysAgo = Math.max(0, (now - new Date(member.joined_at).getTime()) / (1000 * 60 * 60 * 24));
+    weightedScore += 1 / (1 + daysAgo / 30);
+  }
+
+  const rounded = Math.round(weightedScore * 10) / 10;
+  console.log(`  [Scoring] Trend ${trendId} confidence score: ${rounded}`);
+  return rounded;
+};
 // Posture vocabulary is fixed by design (per Forward_Outlook_Trend_Logic doc) —
 // never generated freeform, always one of these four.
 const POSTURE_BANDS = [
@@ -1206,6 +1239,7 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
     const ring = await calculateTrendRing(trend.id);
     const dotSize = await calculateTrendDotSize(trend.id);
     const similarTrends = await findSimilarTrends(trend.id, moduleId, clientId, industry);
+    const confidenceScore = await calculateTrendConfidenceScore(trend.id);
 
     if (!ring || dotSize === null) {
       console.log(`  [WeeklyScoring] Skipping trend ${trend.id} — missing ring or dot size`);
@@ -1221,6 +1255,7 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
       .update({
         ring,
         dot_size: dotSize,
+        confidence_score: confidenceScore,
         posture,
         posture_score: postureResult?.postureScore ?? null,
         periods_in_posture: postureResult?.periodsInPosture ?? 1,
@@ -1241,6 +1276,7 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
       sector: trend.sector || 'Unknown',
       ring,
       dot_size: dotSize,
+      confidence_score: confidenceScore,
       posture,
       similar_trends: similarTrends,
       write_up: {
@@ -1259,4 +1295,4 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
 };
 
 
-  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid };
+  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid, calculateTrendConfidenceScore };
