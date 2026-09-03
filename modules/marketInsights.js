@@ -35,7 +35,7 @@ const cosineSimilarity = (a, b) => {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-const CARD_SIMILARITY_THRESHOLD = 0.70;
+const CARD_SIMILARITY_THRESHOLD = 0.68;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
