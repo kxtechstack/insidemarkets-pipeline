@@ -1,13 +1,9 @@
-// Standalone simulation of enrichOrCreateInsight's matching logic.
-// No Supabase/Qdrant — in-memory cards, real embeddings, real cosine sim.
-// UPDATED: now also runs the real confirmSameEvent gray-zone LLM check,
-// same as marketInsights.js, using the real callLLM from ./llmClient.
+// Standalone simulation matching CURRENT marketInsights.js:
+// plain 0.70 threshold, no gray-zone LLM check.
 
 const { pipeline } = require('@xenova/transformers');
-const { callLLM } = require('./llmClient'); // same file marketInsights.js uses
 
 const CARD_SIMILARITY_THRESHOLD = 0.70;
-const CARD_SIMILARITY_CONFIRM_ZONE = 0.80;
 
 let embedderPromise = null;
 const getEmbedder = () => {
@@ -38,17 +34,6 @@ const mean = (vectors) => {
   return out;
 };
 
-// Same function as in marketInsights.js
-const confirmSameEvent = async (existingCardText, newArticleText) => {
-  const raw = await callLLM([
-    { role: 'system', content: 'You only respond with "yes" or "no", nothing else.' },
-    { role: 'user', content: `Do these describe the SAME specific company/event, or just a similar type of event?\n\nEXISTING CARD:\n${existingCardText}\n\nNEW ARTICLE:\n${newArticleText.slice(0, 800)}\n\nAnswer "yes" only if it is the same company and same specific event.` },
-  ], { temperature: 0, max_tokens: 5, timeout: 30000 });
-
-  return raw.trim().toLowerCase().startsWith('yes');
-};
-
-// ── Test signals ─────────────────────────────────────────────────────────
 const signals = [
   { group: 'A-remedy', submodule: 'Investment Activity', title: 'LVMH Repositions Beauty Portfolio as Luxury Demand Wanes', text: 'Remedy, a dermatologist-developed skin care brand, announced a $20 million Series A funding round led by L Catterton, a private equity firm affiliated with LVMH. The capital will support product development, clinical research, and inventory expansion across DTC, Amazon, and Target channels.' },
   { group: 'A-remedy', submodule: 'Investment Activity', title: 'L Catterton Secures $20 Million to Propel Dermatologist-Led Skincare', text: 'L Catterton has led a $20 million Series A investment into Remedy, a dermatologist-founded skincare brand, to accelerate clinical research and retail distribution.' },
@@ -99,40 +84,21 @@ const ordered = seed.map(i => shuffled[i]);
       if (!best || score > best.score) best = { card, score };
     }
 
-    let doMerge = false;
-    let grayZoneNote = '';
-
     if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
-      if (best.score < CARD_SIMILARITY_CONFIRM_ZONE) {
-        // gray zone — ask the LLM, same as the real code now does
-        const existingCardText = `Title: ${best.card.members[0].title}\nSummary: ${best.card.members[0].text}`;
-        const sameEvent = await confirmSameEvent(existingCardText, sig.text);
-        if (sameEvent) {
-          doMerge = true;
-          grayZoneNote = ' [gray-zone LLM: SAME event -> merged]';
-        } else {
-          grayZoneNote = ' [gray-zone LLM: DIFFERENT event -> new card]';
-        }
-      } else {
-        doMerge = true; // clearly above confirm zone, no LLM check needed
-      }
-    }
-
-    if (doMerge) {
-      best.card.members.push({ title: sig.title, group: sig.group, text: sig.text, vec });
+      best.card.members.push({ title: sig.title, group: sig.group, vec });
       best.card.centroid = mean(best.card.members.map(m => m.vec));
-      log.push({ title: sig.title, group: sig.group, action: 'MERGED', cardId: best.card.id, score: best.score, note: grayZoneNote });
+      log.push({ title: sig.title, group: sig.group, action: 'MERGED', cardId: best.card.id, score: best.score });
     } else {
-      const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, text: sig.text, vec }], centroid: vec };
+      const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, vec }], centroid: vec };
       bucket.push(card);
-      log.push({ title: sig.title, group: sig.group, action: 'NEW CARD', cardId: card.id, score: best ? best.score : null, note: grayZoneNote });
+      log.push({ title: sig.title, group: sig.group, action: 'NEW CARD', cardId: card.id, score: best ? best.score : null });
     }
   }
 
-  console.log('\n=== DECISION LOG (order signals were processed) ===\n');
+  console.log('\n=== DECISION LOG ===\n');
   for (const l of log) {
     const scoreStr = l.score !== null ? l.score.toFixed(3) : '  —  ';
-    console.log(`[score ${scoreStr}] ${l.action.padEnd(9)} card#${l.cardId}  "${l.title}"  (real group: ${l.group})${l.note}`);
+    console.log(`[score ${scoreStr}] ${l.action.padEnd(9)} card#${l.cardId}  "${l.title}"  (real group: ${l.group})`);
   }
 
   console.log('\n=== FINAL CARDS ===\n');
@@ -140,7 +106,7 @@ const ordered = seed.map(i => shuffled[i]);
     console.log(`--- ${submodule} ---`);
     for (const card of cards) {
       const groups = new Set(card.members.map(m => m.group));
-      const mixed = groups.size > 1 ? '  ⚠ MIXED GROUPS — likely wrong merge' : '';
+      const mixed = groups.size > 1 ? '  ⚠ MIXED GROUPS' : '';
       console.log(`  Card #${card.id} (${card.members.length} signal${card.members.length > 1 ? 's' : ''})${mixed}`);
       for (const m of card.members) console.log(`     - [${m.group}] ${m.title}`);
     }
