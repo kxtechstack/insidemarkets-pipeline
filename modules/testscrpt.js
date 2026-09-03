@@ -1,204 +1,118 @@
-// Stress test with ~100 signals, matching CURRENT marketInsights.js logic:
-// plain 0.70 threshold, no gray-zone LLM check.
-// Signals are generated from templates across 4 submodules:
-//   - duplicate clusters (2-3 articles about the SAME real event) -> SHOULD merge
-//   - singleton events (same template shape, different company) -> should NOT merge with each other
-// This specifically stress-tests whether same-sentence-structure-different-company
-// cases produce false merges at volume.
+// test-fixes.js
+require('dotenv').config(); // adjust if your env loading differs
 
+const { findExistingInsight } = require('./marketInsights');
+const { removeSameTopicArticles } = require('./topicDedup');
+const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 
-const CARD_SIMILARITY_THRESHOLD = 0.70;
+const qdrant = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY });
 
 let embedderPromise = null;
-const getEmbedder = () => {
-  if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-  return embedderPromise;
-};
 const embedText = async (text) => {
-  const embedder = await getEmbedder();
+  if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  const embedder = await embedderPromise;
   const output = await embedder(text, { pooling: 'mean', normalize: true });
   return Array.from(output.data);
 };
 
-const cosineSimilarity = (a, b) => {
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+// ── Real IDs from your actual run's logs ────────────────────────────────────
+const CLIENT_ID = '0e4d0b7c-b2ed-4a7e-b898-4accd66cd4ac';       // Vellure Cosmetics Group
+const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';       // Market Dynamics
+const SUBMODULE_ID = '89304c37-09d1-4d85-b6a6-78e3d234b94f';    // Technology Adoption Signals
+const MEGA_CARD_ID = '2291ae67-1af3-4593-a0e0-e960619e6031';    // the over-merged card
+
+async function testOrgCheck() {
+  console.log('\n========== TEST 1: Org-overlap gate ==========\n');
+
+  // Reuse an embedding close to the mega-card's own topic ("AI in beauty").
+  // We fetch one real article's synthesized text that's already a member of
+  // this card, so the embedding is guaranteed to score high on similarity —
+  // that isolates the ORG CHECK as the only variable being tested.
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  const { data: signals } = await supabase
+    .from('market_dynamics_signals')
+    .select('article_id, organization, signal_title')
+    .eq('insight_id', MEGA_CARD_ID)
+    .limit(1);
+
+  if (!signals || signals.length === 0) {
+    console.log('Could not find any signal for the mega card — check MEGA_CARD_ID.');
+    return;
   }
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-};
 
-const mean = (vectors) => {
-  const dim = vectors[0].length;
-  const out = new Array(dim).fill(0);
-  for (const v of vectors) for (let i = 0; i < dim; i++) out[i] += v[i];
-  for (let i = 0; i < dim; i++) out[i] /= vectors.length;
-  return out;
-};
+  const { data: fullArticle } = await supabase
+    .from('policy_articles_full')
+    .select('full_text')
+    .eq('article_id', signals[0].article_id)
+    .single();
 
-// ── Seeded RNG so results are reproducible run to run ────────────────────
-let seedState = 42;
-const rand = () => {
-  seedState = (seedState * 1103515245 + 12345) & 0x7fffffff;
-  return seedState / 0x7fffffff;
-};
-const pick = (arr) => arr[Math.floor(rand() * arr.length)];
-const shuffleArr = (arr) => {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-};
+  const sampleText = fullArticle?.full_text || signals[0].signal_title;
+  const realOrg = signals[0].organization;
+  console.log(`Using real article from this card. Its actual organization: "${realOrg}"\n`);
 
-const companies = [
-  'Remedy', 'Dolce Glow', 'Inglot', 'Merit', 'Saltair', 'Be Clinical', 'CiFLAVORS', 'Diamond Wipes',
-  'Hello Klean', 'Rael', 'Phitku', 'Yepoda', 'Tarte Cosmetics', 'Beekman 1802', 'Ulta Beauty',
-  'Noli', 'Cosmecca Korea', 'DOUGLAS Group', 'COSMAX', 'AmorePacific', 'Grupo Boticário', 'Natura&Co',
-  'L\u2019Or\u00e9al', 'Sephora', 'LVMH', 'Estee Lauder', 'Shiseido', 'Kao Corp', 'Coty', 'Revlon',
-  'Glossier', 'Fenty Beauty', 'Rare Beauty', 'Kylie Cosmetics', 'Charlotte Tilbury', 'Drunk Elephant',
-  'Youth To The People', 'Summer Fridays', 'Tower 28', 'Merit Beauty', 'Ilia Beauty', 'Kosas',
-  'Vacation Inc', 'Topicals', 'Non Gender Specific', 'Pattern Beauty', 'K18 Hair', 'Olaplex',
-  'Living Proof', 'Function of Beauty', 'Prose', 'Curology', 'Nutrafol', 'Ouai Haircare',
-];
+  const embedding = await embedText(sampleText.slice(0, 4000));
 
-const investors = ['L Catterton', 'CAVU Consumer Partners', 'TSG Consumer Partners', 'Avallon', 'KKR', 'River Associates', 'General Atlantic', 'Advent International'];
+  console.log(`--- Case A: same organization ("${realOrg}") — should MATCH the existing card ---`);
+  const resultSameOrg = await findExistingInsight(CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, realOrg);
+  console.log(resultSameOrg
+    ? `RESULT: Matched card "${resultSameOrg.title}" (id: ${resultSameOrg.id}) ✅`
+    : `RESULT: No match returned ❌ (expected a match here)`);
 
-const investmentTemplates = [
-  (c, i, amt) => `${c} closed a $${amt} million Series A led by ${i}. The capital will fund inventory, retail distribution, product innovation and team expansion.`,
-  (c, i, amt) => `${i} has led a $${amt} million investment into ${c}, aiming to accelerate clinical research and retail distribution.`,
-  (c, i, amt) => `${c} raised $${amt} million in growth funding backed by ${i}, reshaping product, supply, and go-to-market strategy.`,
-];
-
-const aiTemplates = [
-  (c) => `${c} is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.`,
-  (c) => `${c}'s new AI-powered tool accelerates R&D timelines, turning weeks of research into minutes.`,
-  (c) => `${c} partners with an AI vendor to build conversational try-on and product discovery tools for consumers.`,
-];
-
-const corporateTemplates = [
-  (c1, c2) => `${c1} announced a strategic partnership with ${c2} to strengthen distribution across North America and Europe.`,
-  (c1, c2) => `${c1} completed its acquisition of ${c2}, consolidating manufacturing capacity and expanding its supply chain footprint.`,
-  (c1, c2) => `${c1} and ${c2} are merging operations to create a combined entity focused on sustainable beauty manufacturing.`,
-];
-
-const regTemplates = [
-  (c) => `Regulators issued new labeling requirements for cosmetic ingredients, directly affecting ${c}'s product line across EU markets.`,
-  (c) => `A new import compliance rule will require ${c} and other manufacturers to update packaging disclosures within 90 days.`,
-  (c) => `${c} confirmed it is adjusting its supply chain to comply with updated chemical safety regulations in key export markets.`,
-];
-
-const usedCompanies = shuffleArr(companies);
-let companyIdx = 0;
-const nextCompany = () => usedCompanies[companyIdx++ % usedCompanies.length];
-
-const signals = [];
-
-// ── 15 duplicate clusters (2-3 articles each about the SAME event) — should MERGE ──
-for (let k = 0; k < 15; k++) {
-  const submodule = k % 2 === 0 ? 'Investment Activity' : 'AI Adoption';
-  const company = nextCompany();
-  const clusterSize = 2 + (k % 2); // alternates 2 or 3
-  if (submodule === 'Investment Activity') {
-    const investor = pick(investors);
-    const amt = 5 + Math.floor(rand() * 45);
-    for (let v = 0; v < clusterSize; v++) {
-      const text = investmentTemplates[v % investmentTemplates.length](company, investor, amt);
-      signals.push({ group: `DUP-${k}-${company}`, submodule, title: text.slice(0, 60), text });
-    }
-  } else {
-    for (let v = 0; v < clusterSize; v++) {
-      const text = aiTemplates[v % aiTemplates.length](company);
-      signals.push({ group: `DUP-${k}-${company}`, submodule, title: text.slice(0, 60), text });
-    }
-  }
+  console.log(`\n--- Case B: different organization ("Totally Unrelated Corp") — should NOT match, should create new ---`);
+  const resultDiffOrg = await findExistingInsight(CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, 'Totally Unrelated Corp');
+  console.log(resultDiffOrg
+    ? `RESULT: Matched card "${resultDiffOrg.title}" ❌ (should NOT have matched — org check failed)`
+    : `RESULT: No match — will create a new card ✅ (org check worked)`);
 }
 
-// ── ~65 singleton events — same template SHAPE but different company/facts — should NOT merge with each other ──
-const singletonSubmodules = ['Investment Activity', 'AI Adoption', 'Corporate Activity', 'Regulatory & Compliance'];
-for (let s = 0; s < 65; s++) {
-  const submodule = singletonSubmodules[s % singletonSubmodules.length];
-  const company = nextCompany();
-  let text;
-  if (submodule === 'Investment Activity') {
-    const investor = pick(investors);
-    const amt = 3 + Math.floor(rand() * 60);
-    text = investmentTemplates[Math.floor(rand() * investmentTemplates.length)](company, investor, amt);
-  } else if (submodule === 'AI Adoption') {
-    text = aiTemplates[Math.floor(rand() * aiTemplates.length)](company);
-  } else if (submodule === 'Corporate Activity') {
-    const company2 = nextCompany();
-    text = corporateTemplates[Math.floor(rand() * corporateTemplates.length)](company, company2);
-  } else {
-    text = regTemplates[Math.floor(rand() * regTemplates.length)](company);
-  }
-  signals.push({ group: `SINGLE-${s}-${company}`, submodule, title: text.slice(0, 60), text });
+async function testExactTitleDedup() {
+  console.log('\n========== TEST 2: Exact-title duplicate catch ==========\n');
+
+  // Use throwaway IDs so this never touches your real client's dedup pool
+  const TEST_CLIENT = 'test-dedup-client-safe-to-delete';
+  const TEST_MODULE = 'test-dedup-module-safe-to-delete';
+
+  // The exact two Noli articles from your real run that slipped through
+  const articles = [
+    {
+      title: 'Noli Uses Ai to Beat the Beauty Jungle and Find Your Perfect Match | Accenture',
+      text: 'Noli is an AI-powered beauty matchmaking platform that helps consumers find personalized skincare and cosmetics recommendations based on their unique skin profile, preferences, and needs, using machine learning models trained on dermatological data.',
+      url: 'https://example.com/noli-1',
+      publishedDate: '2026-06-27T00:00:00.000Z',
+    },
+    {
+      title: 'Noli Uses Ai to Beat the Beauty Jungle and Find Your Perfect Match | Accenture',
+      text: 'A completely different scraped snippet from a mirrored copy of this same press release, with different site navigation boilerplate, related article links, and a slightly different lede paragraph than the original source page had.',
+      url: 'https://example.com/noli-2-mirror',
+      publishedDate: '2026-06-27T00:00:00.000Z',
+    },
+  ];
+
+  console.log('Running both identical-title articles through removeSameTopicArticles()...\n');
+  const result = await removeSameTopicArticles(articles, TEST_CLIENT, TEST_MODULE);
+
+  console.log(`\nRESULT: ${result.length} unique article(s) out of ${articles.length} input`);
+  console.log(result.length === 1
+    ? 'PASS ✅ — the duplicate was correctly caught this time.'
+    : 'FAIL ❌ — both articles still passed through as unique.');
+
+  // Cleanup: remove the test points so this doesn't leave junk in your dedup_titles collection
+  console.log('\nCleaning up test data from dedup_titles...');
+  await qdrant.delete('dedup_titles', {
+    filter: { must: [{ key: 'client_id', match: { value: TEST_CLIENT } }] },
+  });
+  console.log('Cleanup done.');
 }
-
-const ordered = shuffleArr(signals); // simulate real-world arrival order
-
-console.log(`Total signals to process: ${ordered.length}\n`);
 
 (async () => {
-  const cardsBySubmodule = {};
-  let nextCardId = 1;
-  const log = [];
-
-  for (const sig of ordered) {
-    const vec = await embedText(sig.text.slice(0, 4000));
-    const bucket = (cardsBySubmodule[sig.submodule] ||= []);
-
-    let best = null;
-    for (const card of bucket) {
-      const score = cosineSimilarity(vec, card.centroid);
-      if (!best || score > best.score) best = { card, score };
-    }
-
-    if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
-      best.card.members.push({ title: sig.title, group: sig.group, vec });
-      best.card.centroid = mean(best.card.members.map(m => m.vec));
-      log.push({ title: sig.title, group: sig.group, action: 'MERGED', cardId: best.card.id, score: best.score });
-    } else {
-      const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, vec }], centroid: vec };
-      bucket.push(card);
-      log.push({ title: sig.title, group: sig.group, action: 'NEW CARD', cardId: card.id, score: best ? best.score : null });
-    }
+  try {
+    await testOrgCheck();
+    await testExactTitleDedup();
+  } catch (err) {
+    console.error('\nTest script error:', err);
   }
-
-  console.log('=== DECISION LOG ===\n');
-  for (const l of log) {
-    const scoreStr = l.score !== null ? l.score.toFixed(3) : '  —  ';
-    console.log(`[score ${scoreStr}] ${l.action.padEnd(9)} card#${l.cardId}  "${l.title}"  (group: ${l.group})`);
-  }
-
-  console.log('\n=== FINAL CARDS ===\n');
-  let totalCards = 0;
-  let mixedCards = 0;
-  let singleSignalCards = 0;
-  let maxCardSize = 0;
-
-  for (const [submodule, cards] of Object.entries(cardsBySubmodule)) {
-    console.log(`--- ${submodule} (${cards.length} cards) ---`);
-    for (const card of cards) {
-      totalCards++;
-      const groups = new Set(card.members.map(m => m.group.split('-').slice(0, 2).join('-'))); // group by cluster prefix, ignore company suffix
-      const mixed = groups.size > 1 ? '  ⚠ MIXED' : '';
-      if (groups.size > 1) mixedCards++;
-      if (card.members.length === 1) singleSignalCards++;
-      if (card.members.length > maxCardSize) maxCardSize = card.members.length;
-      console.log(`  Card #${card.id} (${card.members.length} signal${card.members.length > 1 ? 's' : ''})${mixed}`);
-      for (const m of card.members) console.log(`     - [${m.group}] ${m.title}`);
-    }
-  }
-
-  console.log('\n=== SUMMARY ===');
-  console.log(`Total signals processed: ${ordered.length}`);
-  console.log(`Total cards created: ${totalCards}`);
-  console.log(`Cards with MIXED (wrongly merged) groups: ${mixedCards}`);
-  console.log(`Single-signal cards: ${singleSignalCards}`);
-  console.log(`Largest card size: ${maxCardSize}`);
+  process.exit(0);
 })();
