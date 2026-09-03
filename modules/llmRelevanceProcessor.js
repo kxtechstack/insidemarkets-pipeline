@@ -835,8 +835,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
         classification.signal_id,
         articleId,
         contentToChunk,
-        industry,
-        classification.organization
+        industry
       );
 
       if (signalRow && result.insightId) {
