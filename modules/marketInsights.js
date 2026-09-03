@@ -365,7 +365,7 @@ const calculateRelevanceLevel = (signalCount) => {
 // same signal_id — searches by submodule instead, so two articles
 // about the same real event classified under slightly different
 // signals can still find each other.
-const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding) => {
+const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding, organization) => {
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: articleEmbedding,
     filter: {
@@ -381,27 +381,57 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
 
   const bestMatch = searchResult[0];
 
-  if (!bestMatch) {
+  if (bestMatch) {
+    const { count: memberCount } = await supabase
+      .from('market_insight_members')
+      .select('*', { count: 'exact', head: true })
+      .eq('insight_id', bestMatch.payload.insight_id);
+
+    console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
+
+    if (bestMatch.score >= CARD_SIMILARITY_THRESHOLD) {
+      const { data: card } = await supabase
+        .from('market_insights')
+        .select('*')
+        .eq('id', bestMatch.payload.insight_id)
+        .single();
+      if (card) return card;
+    }
+  } else {
     console.log(`  [CardMatch] No existing cards to compare against yet`);
-    return null;
   }
 
-  const { count: memberCount } = await supabase
-    .from('market_insight_members')
-    .select('*', { count: 'exact', head: true })
-    .eq('insight_id', bestMatch.payload.insight_id);
+  // Embedding match didn't clear the threshold — fall back to an exact
+  // organization match within scope. Guarantees the SAME company's
+  // signals always land on one card even when phrasing varies enough
+  // to dodge the embedding threshold.
+  if (organization && organization !== 'Unknown') {
+    const { data: orgSignal } = await supabase
+      .from('market_dynamics_signals')
+      .select('insight_id')
+      .eq('client_id', clientId)
+      .eq('module_id', moduleId)
+      .eq('submodule_id', submoduleId)
+      .eq('organization', organization)
+      .not('insight_id', 'is', null)
+      .order('published_date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-  console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
+    if (orgSignal && orgSignal.insight_id) {
+      const { data: card } = await supabase
+        .from('market_insights')
+        .select('*')
+        .eq('id', orgSignal.insight_id)
+        .single();
+      if (card) {
+        console.log(`  [CardMatch] No embedding match, but found org match for "${organization}" -> card ${card.id}`);
+        return card;
+      }
+    }
+  }
 
-  if (bestMatch.score < CARD_SIMILARITY_THRESHOLD) return null;
-
-  const { data: card } = await supabase
-    .from('market_insights')
-    .select('*')
-    .eq('id', bestMatch.payload.insight_id)
-    .single();
-
-  return card || null;
+  return null;
 };
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
@@ -463,10 +493,10 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
 };
 
 // Step 3 — the main entry point. Called once per relevant Market Dynamics article.
-const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
+const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, organization) => {
   await setupInsightCentroidCollection(); // NEW — ensures submodule_id index exists before we search on it
   const articleEmbedding = await embedText((articleText || '').slice(0, 4000));
-  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding, organization);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);
