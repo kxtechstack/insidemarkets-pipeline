@@ -36,7 +36,6 @@ const cosineSimilarity = (a, b) => {
 };
 
 const CARD_SIMILARITY_THRESHOLD = 0.70;
-const CARD_SIMILARITY_CONFIRM_ZONE = 0.80;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const setupInsightCentroidCollection = async () => {
@@ -357,15 +356,6 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-const confirmSameEvent = async (existingCard, newArticleText) => {
-  const raw = await callLLM([
-    { role: 'system', content: 'You only respond with "yes" or "no", nothing else.' },
-    { role: 'user', content: `Do these describe the SAME specific company/event, or just a similar type of event?\n\nEXISTING CARD:\nTitle: ${existingCard.title}\nSummary: ${existingCard.summary}\n\nNEW ARTICLE:\n${newArticleText.slice(0, 800)}\n\nAnswer "yes" only if it is the same company and same specific event.` },
-  ], { temperature: 0, max_tokens: 5, timeout: 30000 });
-
-  return raw.trim().toLowerCase().startsWith('yes');
-};
-
 // Step 1 — find the most similar EXISTING card, if any crosses the
 // similarity threshold. CHANGED: now compares against each card's
 // STABLE stored centroid in market_insights_centroids via one Qdrant
@@ -375,7 +365,7 @@ const confirmSameEvent = async (existingCard, newArticleText) => {
 // same signal_id — searches by submodule instead, so two articles
 // about the same real event classified under slightly different
 // signals can still find each other.
-const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding, articleText) => {
+const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbedding) => {
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: articleEmbedding,
     filter: {
@@ -411,18 +401,7 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
     .eq('id', bestMatch.payload.insight_id)
     .single();
 
-  if (!card) return null;
-
-  if (bestMatch.score < CARD_SIMILARITY_CONFIRM_ZONE) {
-    const sameEvent = await confirmSameEvent(card, articleText);
-    if (!sameEvent) {
-      console.log(`  [CardMatch] Gray-zone score ${bestMatch.score.toFixed(3)} — LLM confirmed different event, creating new card instead`);
-      return null;
-    }
-    console.log(`  [CardMatch] Gray-zone score ${bestMatch.score.toFixed(3)} — LLM confirmed same event, merging`);
-  }
-
-  return card;
+  return card || null;
 };
 
 // Step 2 — ask the LLM to write (or rewrite) the card.
@@ -477,8 +456,8 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
 // Step 3 — the main entry point. Called once per relevant Market Dynamics article.
 const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry) => {
   await setupInsightCentroidCollection(); // NEW — ensures submodule_id index exists before we search on it
-  const articleEmbedding = await embedText((articleText || '').slice(0, 1000));
-  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding, articleText);
+  const articleEmbedding = await embedText((articleText || '').slice(0, 4000));
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, articleEmbedding);
 
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);
