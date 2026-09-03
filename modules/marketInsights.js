@@ -427,8 +427,17 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
     throw new Error(`Could not load market_dynamics_writeup_v1 prompt: ${error?.message}`);
   }
 
+  let companiesCovered = [];
+  if (existingCard) {
+    const { data: memberSignals } = await supabase
+      .from('market_dynamics_signals')
+      .select('organization')
+      .eq('insight_id', existingCard.id);
+    companiesCovered = [...new Set((memberSignals || []).map(s => s.organization).filter(Boolean))];
+  }
+
   const existingText = existingCard
-    ? `EXISTING CARD:\nTitle: ${existingCard.title}\nSummary: ${existingCard.summary}`
+    ? `EXISTING CARD:\nTitle: ${existingCard.title}\nSummary: ${existingCard.summary}\nCompanies already covered by this card so far: ${companiesCovered.join(', ') || 'unknown'}`
     : 'EXISTING CARD: none — this is the first signal for this topic.';
 
   const finalPrompt = promptRow.prompt_template
