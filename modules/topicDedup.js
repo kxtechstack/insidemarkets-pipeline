@@ -58,6 +58,11 @@ const embedText = async (text) => {
 // Strip trailing source attribution ("| BeautyMatter", "- The Economic Times",
 // "» startuporiginals.in") before embedding — it was adding noise that dragged
 // similarity scores down for genuine duplicates.
+const stripSourceSuffix = (title) => {
+  return title
+    .split(/\s[|｜»]\s|\s-\s(?=[A-Z][\w\s.&]*$)/)[0]
+    .trim();
+};
 
 const normalizeTitle = (title) =>
   stripSourceSuffix(title)

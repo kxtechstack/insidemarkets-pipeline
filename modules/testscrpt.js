@@ -1,11 +1,13 @@
-// test-fixes.js
-require('dotenv').config(); // adjust if your env loading differs
+// test-fixes-scale.js
+require('dotenv').config();
 
-const { findExistingInsight } = require('./marketInsights');
-const { removeSameTopicArticles } = require('./topicDedup');
+const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
+const { v4: uuidv4 } = require('uuid');
+const { enrichOrCreateInsight, findExistingInsight, deleteInsightCentroid } = require('./marketInsights');
 
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrant = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY });
 
 let embedderPromise = null;
@@ -16,103 +18,183 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-// ── Real IDs from your actual run's logs ────────────────────────────────────
-const CLIENT_ID = '0e4d0b7c-b2ed-4a7e-b898-4accd66cd4ac';       // Vellure Cosmetics Group
-const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';       // Market Dynamics
-const SUBMODULE_ID = '89304c37-09d1-4d85-b6a6-78e3d234b94f';    // Technology Adoption Signals
-const MEGA_CARD_ID = '2291ae67-1af3-4593-a0e0-e960619e6031';    // the over-merged card
+// ── Isolated test identity — never touches real client data ────────────────
+const TEST_CLIENT_ID = uuidv4();
+const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8'; // real Market Dynamics module (global taxonomy, safe to reuse)
+const SUBMODULE_ID = '89304c37-09d1-4d85-b6a6-78e3d234b94f'; // real Technology Adoption Signals submodule
+const INDUSTRY = 'Cosmetics & Beauty';
 
-async function testOrgCheck() {
-  console.log('\n========== TEST 1: Org-overlap gate ==========\n');
+// ── 5 event types × 3 orgs = 15 ground-truth clusters ───────────────────────
+const EVENT_TYPES = [
+  { id: 'ai_partnership', base: (org) => `${org} announces a strategic partnership with a major AI company to bring generative AI tools into its product development and marketing workflows.` },
+  { id: 'funding_round', base: (org) => `${org} closes a new funding round led by venture investors to accelerate its beauty technology platform and expand into new markets.` },
+  { id: 'store_rollout', base: (org) => `${org} rolls out an AI-powered skin diagnostic tool across thousands of its retail stores after a successful pilot program.` },
+  { id: 'sustainable_packaging', base: (org) => `${org} unveils a new sustainable packaging initiative aiming to eliminate single-use plastic across its core product lines by 2030.` },
+  { id: 'new_factory', base: (org) => `${org} opens a new manufacturing facility dedicated to producing its skincare and color cosmetics lines with reduced water usage.` },
+];
 
-  // Reuse an embedding close to the mega-card's own topic ("AI in beauty").
-  // We fetch one real article's synthesized text that's already a member of
-  // this card, so the embedding is guaranteed to score high on similarity —
-  // that isolates the ORG CHECK as the only variable being tested.
-  const { createClient } = require('@supabase/supabase-js');
-  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const ORGS = ["L'Oréal", 'Estée Lauder', 'Shiseido'];
 
-  const { data: signals } = await supabase
-    .from('market_dynamics_signals')
-    .select('article_id, organization, signal_title')
-    .eq('insight_id', MEGA_CARD_ID)
-    .limit(1);
+// Paraphrase templates — same underlying event, different wording, to
+// simulate different publishers covering the same story.
+const VARIANT_WRAPPERS = [
+  (t) => t,
+  (t) => `In a major industry move, ${t}`,
+  (t) => `${t} Analysts say this signals a broader shift in the sector.`,
+  (t) => `Breaking: ${t}`,
+  (t) => `${t} The company says this is part of a multi-year strategic roadmap.`,
+  (t) => `Industry sources confirm that ${t}`,
+];
 
-  if (!signals || signals.length === 0) {
-    console.log('Could not find any signal for the mega card — check MEGA_CARD_ID.');
-    return;
-  }
+const results = { correctMatch: [], correctNoMatch: [], wrongMatch: [], missedMatch: [] };
 
-  const { data: fullArticle } = await supabase
-    .from('policy_articles_full')
-    .select('full_text')
-    .eq('article_id', signals[0].article_id)
+async function seedCards() {
+  console.log(`\nSeeding 15 ground-truth cards under test client ${TEST_CLIENT_ID}...\n`);
+
+  // Need one real signal_id from the global signals table (FK requirement)
+  const { data: anySignal } = await supabase
+    .schema('admin')
+    .from('signals')
+    .select('id')
+    .eq('module_id', MODULE_ID)
+    .limit(1)
     .single();
 
-  const sampleText = fullArticle?.full_text || signals[0].signal_title;
-  const realOrg = signals[0].organization;
-  console.log(`Using real article from this card. Its actual organization: "${realOrg}"\n`);
+  if (!anySignal) throw new Error('Could not find any signal row for Market Dynamics module — cannot seed test cards.');
+  const signalId = anySignal.id;
 
-  const embedding = await embedText(sampleText.slice(0, 4000));
+  const seeded = {}; // key: `${eventType}|${org}` -> insightId
 
-  console.log(`--- Case A: same organization ("${realOrg}") — should MATCH the existing card ---`);
-  const resultSameOrg = await findExistingInsight(CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, realOrg);
-  console.log(resultSameOrg
-    ? `RESULT: Matched card "${resultSameOrg.title}" (id: ${resultSameOrg.id}) ✅`
-    : `RESULT: No match returned ❌ (expected a match here)`);
+  for (const eventType of EVENT_TYPES) {
+    for (const org of ORGS) {
+      const text = eventType.base(org);
+      const articleId = uuidv4();
 
-  console.log(`\n--- Case B: different organization ("Totally Unrelated Corp") — should NOT match, should create new ---`);
-  const resultDiffOrg = await findExistingInsight(CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, 'Totally Unrelated Corp');
-  console.log(resultDiffOrg
-    ? `RESULT: Matched card "${resultDiffOrg.title}" ❌ (should NOT have matched — org check failed)`
-    : `RESULT: No match — will create a new card ✅ (org check worked)`);
+      const result = await enrichOrCreateInsight(
+        TEST_CLIENT_ID, MODULE_ID, SUBMODULE_ID, signalId, articleId, text, INDUSTRY, org
+      );
+
+      if (result.status === 'error') {
+        console.log(`  FAILED to seed ${eventType.id}/${org}: ${result.error}`);
+        continue;
+      }
+
+      // enrichOrCreateInsight doesn't write market_dynamics_signals itself —
+      // that's normally done by the caller (storeRelevantArticle). Do it here
+      // so findExistingInsight's org-overlap check has data to check against.
+      await supabase.from('market_dynamics_signals').insert({
+        article_id: articleId,
+        client_id: TEST_CLIENT_ID,
+        module_id: MODULE_ID,
+        submodule_id: SUBMODULE_ID,
+        signal_id: signalId,
+        signal_title: text.slice(0, 80),
+        summary: text,
+        organization: org,
+        category: 'Innovation & Product',
+        country: 'Global',
+        source_url: `https://test.local/${articleId}`,
+        published_date: new Date().toISOString(),
+        insight_id: result.insightId,
+      });
+
+      seeded[`${eventType.id}|${org}`] = result.insightId;
+      console.log(`  Seeded ${eventType.id} / ${org} -> card ${result.insightId}`);
+    }
+  }
+
+  return seeded;
 }
 
-async function testExactTitleDedup() {
-  console.log('\n========== TEST 2: Exact-title duplicate catch ==========\n');
+async function runQueries(seeded) {
+  console.log(`\nRunning ~${EVENT_TYPES.length * ORGS.length * VARIANT_WRAPPERS.length} test queries (read-only, no LLM calls)...\n`);
 
-  // Use throwaway IDs so this never touches your real client's dedup pool
-  const TEST_CLIENT = 'test-dedup-client-safe-to-delete';
-  const TEST_MODULE = 'test-dedup-module-safe-to-delete';
+  for (const eventType of EVENT_TYPES) {
+    for (const org of ORGS) {
+      const expectedCardId = seeded[`${eventType.id}|${org}`];
+      if (!expectedCardId) continue;
 
-  // The exact two Noli articles from your real run that slipped through
-  const articles = [
-    {
-      title: 'Noli Uses Ai to Beat the Beauty Jungle and Find Your Perfect Match | Accenture',
-      text: 'Noli is an AI-powered beauty matchmaking platform that helps consumers find personalized skincare and cosmetics recommendations based on their unique skin profile, preferences, and needs, using machine learning models trained on dermatological data.',
-      url: 'https://example.com/noli-1',
-      publishedDate: '2026-06-27T00:00:00.000Z',
-    },
-    {
-      title: 'Noli Uses Ai to Beat the Beauty Jungle and Find Your Perfect Match | Accenture',
-      text: 'A completely different scraped snippet from a mirrored copy of this same press release, with different site navigation boilerplate, related article links, and a slightly different lede paragraph than the original source page had.',
-      url: 'https://example.com/noli-2-mirror',
-      publishedDate: '2026-06-27T00:00:00.000Z',
-    },
-  ];
+      for (const wrap of VARIANT_WRAPPERS) {
+        const variantText = wrap(eventType.base(org));
+        const embedding = await embedText(variantText.slice(0, 4000));
 
-  console.log('Running both identical-title articles through removeSameTopicArticles()...\n');
-  const result = await removeSameTopicArticles(articles, TEST_CLIENT, TEST_MODULE);
+        // Case: SAME org, SAME topic -> should match expectedCardId
+        const matchSame = await findExistingInsight(TEST_CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, org);
+        logResult('same-org+same-topic', eventType.id, org, org, expectedCardId, matchSame, true);
 
-  console.log(`\nRESULT: ${result.length} unique article(s) out of ${articles.length} input`);
-  console.log(result.length === 1
-    ? 'PASS ✅ — the duplicate was correctly caught this time.'
-    : 'FAIL ❌ — both articles still passed through as unique.');
+        // Case: DIFFERENT org, SAME topic -> should NOT match expectedCardId
+        const otherOrg = ORGS.find(o => o !== org);
+        const matchDiffOrg = await findExistingInsight(TEST_CLIENT_ID, MODULE_ID, SUBMODULE_ID, embedding, otherOrg);
+        logResult('diff-org+same-topic', eventType.id, org, otherOrg, expectedCardId, matchDiffOrg, false);
+      }
+    }
 
-  // Cleanup: remove the test points so this doesn't leave junk in your dedup_titles collection
-  console.log('\nCleaning up test data from dedup_titles...');
-  await qdrant.delete('dedup_titles', {
-    filter: { must: [{ key: 'client_id', match: { value: TEST_CLIENT } }] },
-  });
+    // Case: SAME org, DIFFERENT topic -> should NOT match this org's OTHER event cards
+    const sampleOrg = ORGS[0];
+    const otherEventType = EVENT_TYPES.find(e => e.id !== eventType.id);
+    const crossTopicText = otherEventType.base(sampleOrg);
+    const crossEmbedding = await embedText(crossTopicText.slice(0, 4000));
+    const wrongCardForTopic = seeded[`${eventType.id}|${sampleOrg}`];
+    const matchCrossTopic = await findExistingInsight(TEST_CLIENT_ID, MODULE_ID, SUBMODULE_ID, crossEmbedding, sampleOrg);
+    logResult('same-org+diff-topic', eventType.id, sampleOrg, sampleOrg, wrongCardForTopic, matchCrossTopic, false);
+  }
+}
+
+function logResult(caseType, eventTypeId, articleOrg, queryOrg, expectedCardId, actualCard, shouldMatch) {
+  const matchedExpected = actualCard && actualCard.id === expectedCardId;
+
+  if (shouldMatch && matchedExpected) {
+    results.correctMatch.push({ caseType, eventTypeId, articleOrg, queryOrg });
+  } else if (!shouldMatch && !matchedExpected) {
+    results.correctNoMatch.push({ caseType, eventTypeId, articleOrg, queryOrg });
+  } else if (shouldMatch && !matchedExpected) {
+    results.missedMatch.push({ caseType, eventTypeId, articleOrg, queryOrg, got: actualCard?.id || 'null' });
+  } else {
+    results.wrongMatch.push({ caseType, eventTypeId, articleOrg, queryOrg, expectedCardId, gotCardId: actualCard.id });
+  }
+}
+
+async function cleanup(seeded) {
+  console.log('\nCleaning up all test data...\n');
+  await supabase.from('market_dynamics_signals').delete().eq('client_id', TEST_CLIENT_ID);
+  await supabase.from('market_insight_members').delete().in('insight_id', Object.values(seeded));
+  for (const insightId of Object.values(seeded)) {
+    await deleteInsightCentroid(insightId);
+  }
+  await supabase.from('market_insights').delete().eq('client_id', TEST_CLIENT_ID);
   console.log('Cleanup done.');
 }
 
 (async () => {
+  let seeded = {};
   try {
-    await testOrgCheck();
-    await testExactTitleDedup();
+    seeded = await seedCards();
+    await runQueries(seeded);
+
+    const total = results.correctMatch.length + results.correctNoMatch.length + results.wrongMatch.length + results.missedMatch.length;
+    console.log('\n========== SUMMARY ==========');
+    console.log(`Total queries: ${total}`);
+    console.log(`Correct matches (same org+topic merged correctly): ${results.correctMatch.length}`);
+    console.log(`Correct rejections (diff org / diff topic kept separate): ${results.correctNoMatch.length}`);
+    console.log(`WRONG matches (should NOT have merged): ${results.wrongMatch.length}`);
+    console.log(`MISSED matches (should have merged but didn't): ${results.missedMatch.length}`);
+
+    if (results.wrongMatch.length > 0) {
+      console.log('\n--- Wrong matches (over-merging — the bug we are fixing) ---');
+      console.log(JSON.stringify(results.wrongMatch, null, 2));
+    }
+    if (results.missedMatch.length > 0) {
+      console.log('\n--- Missed matches (under-merging — worth reviewing) ---');
+      console.log(JSON.stringify(results.missedMatch, null, 2));
+    }
+
+    const accuracy = ((results.correctMatch.length + results.correctNoMatch.length) / total * 100).toFixed(1);
+    console.log(`\nOverall accuracy: ${accuracy}%`);
+
   } catch (err) {
     console.error('\nTest script error:', err);
+  } finally {
+    if (Object.keys(seeded).length > 0) await cleanup(seeded);
+    process.exit(0);
   }
-  process.exit(0);
 })();
