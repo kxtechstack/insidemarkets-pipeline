@@ -386,7 +386,12 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, articleEmbed
     return null;
   }
 
-  console.log(`  [CardMatch] Best match score: ${bestMatch.score.toFixed(3)} (threshold: ${CARD_SIMILARITY_THRESHOLD})`);
+  const { count: memberCount } = await supabase
+    .from('market_insight_members')
+    .select('*', { count: 'exact', head: true })
+    .eq('insight_id', bestMatch.payload.insight_id);
+
+  console.log(`  [CardMatch] score=${bestMatch.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${bestMatch.payload.insight_id} existing_members=${memberCount}`);
 
   if (bestMatch.score < CARD_SIMILARITY_THRESHOLD) return null;
 
