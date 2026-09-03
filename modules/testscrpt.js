@@ -35,8 +35,41 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
+const { QdrantClient } = require('@qdrant/js-client-rest');
+const { pipeline } = require('@xenova/transformers');
 const { removeSameTopicArticles } = require('./topicDedup');
 const { enrichOrCreateInsight } = require('./marketInsights');
+
+// ── Mimics the chunk-embed-store step storeRelevantArticle() does in
+// llmRelevanceProcessor.js BEFORE calling enrichOrCreateInsight. Without
+// this, updateInsightCentroid() finds no vectors for the new article_id
+// and every card's centroid stays empty — which is what happened on the
+// first run of this script. This is required for the merge test to mean
+// anything.
+const qdrantTest = new QdrantClient({
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
+  checkCompatibility: false,
+});
+const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
+
+let embedderPromise = null;
+const getEmbedder = () => {
+  if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  return embedderPromise;
+};
+const embedText = async (text) => {
+  const embedder = await getEmbedder();
+  const output = await embedder(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
+};
+
+const storeArticleVectorForCentroid = async (articleId, text) => {
+  const vector = await embedText((text || '').slice(0, 4000));
+  await qdrantTest.upsert(POLICY_COLLECTION, {
+    points: [{ id: uuidv4(), vector, payload: { article_id: articleId } }],
+  });
+};
 
 const CLIENT_ID = process.env.TEST_CLIENT_ID || 'FILL_ME_IN';
 const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8'; // Market Dynamics — fixed, don't change
@@ -120,6 +153,7 @@ const runMarketInsightsTest = async () => {
 
   for (const sig of insightTestSignals) {
     const articleId = uuidv4();
+    await storeArticleVectorForCentroid(articleId, sig.text);
     const result = await enrichOrCreateInsight(
       CLIENT_ID,
       MODULE_ID,
