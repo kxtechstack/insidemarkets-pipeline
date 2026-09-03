@@ -58,11 +58,12 @@ const embedText = async (text) => {
 // Strip trailing source attribution ("| BeautyMatter", "- The Economic Times",
 // "» startuporiginals.in") before embedding — it was adding noise that dragged
 // similarity scores down for genuine duplicates.
-const stripSourceSuffix = (title) => {
-  return title
-    .split(/\s[|｜»]\s|\s-\s(?=[A-Z][\w\s.&]*$)/)[0]
+
+const normalizeTitle = (title) =>
+  stripSourceSuffix(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
     .trim();
-};
 
 // Build the text used for dedup embedding: title + a short snippet of body content.
 const SNIPPET_LENGTH = 400;
@@ -105,6 +106,7 @@ const setupDedupCollection = async () => {
     { name: 'client_id', schema: 'keyword' },
     { name: 'module_id', schema: 'keyword' },
     { name: 'published_date_ts', schema: 'integer' },
+    { name: 'normalized_title', schema: 'keyword' },
   ];
 
   for (const field of indexFields) {
@@ -139,6 +141,27 @@ const removeSameTopicArticles = async (articles, clientId, moduleId) => {
   for (const article of articles) {
     if (!article.title) {
       uniqueArticles.push(article);
+      continue;
+    }
+
+    const normalizedTitle = normalizeTitle(article.title);
+
+    // Exact/near-identical title check — catches syndicated copies whose
+    // scraped body snippets differ enough to dodge the embedding threshold.
+    const exactMatch = await qdrant.scroll(DEDUP_COLLECTION, {
+      filter: {
+        must: [
+          { key: 'client_id', match: { value: clientId } },
+          { key: 'module_id', match: { value: moduleId } },
+          { key: 'normalized_title', match: { value: normalizedTitle } },
+          { key: 'published_date_ts', range: { gte: cutoffTs } },
+        ],
+      },
+      limit: 1,
+    });
+
+    if (exactMatch.points.length > 0) {
+      console.log(`[DUPLICATE-EXACT] module=${moduleId} | "${article.title}" ~ identical title already seen`);
       continue;
     }
 
@@ -195,6 +218,7 @@ const removeSameTopicArticles = async (articles, clientId, moduleId) => {
             client_id: clientId,
             module_id: moduleId,
             title: article.title,
+            normalized_title: normalizedTitle,
             url: article.url,
             published_date_ts: publishedTs,
           },
