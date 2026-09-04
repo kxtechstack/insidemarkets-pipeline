@@ -39,6 +39,36 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 const { removeSameTopicArticles } = require('./topicDedup');
 const { enrichOrCreateInsight } = require('./marketInsights');
+const { createClient } = require('@supabase/supabase-js');
+const supabaseTest = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// Mimics the market_dynamics_signals insert storeRelevantArticle() does
+// BEFORE calling enrichOrCreateInsight, and the insight_id link-back it
+// does AFTER. Without this, findExistingInsight's org-fallback query has
+// nothing to find — no signal rows exist yet from this test's own calls.
+const insertSignalRow = async (articleId, sig) => {
+  const { data } = await supabaseTest
+    .from('market_dynamics_signals')
+    .insert({
+      article_id: articleId,
+      client_id: CLIENT_ID,
+      module_id: MODULE_ID,
+      submodule_id: sig.submoduleId,
+      signal_id: sig.signalId,
+      signal_title: sig.text.slice(0, 60),
+      summary: sig.text.slice(0, 300),
+      organization: sig.organization,
+      source_url: 'https://test.example.com',
+      published_date: new Date().toISOString(),
+    })
+    .select()
+    .single();
+  return data;
+};
+
+const linkSignalToInsight = async (signalRowId, insightId) => {
+  await supabaseTest.from('market_dynamics_signals').update({ insight_id: insightId }).eq('id', signalRowId);
+};
 
 // ── Mimics the chunk-embed-store step storeRelevantArticle() does in
 // llmRelevanceProcessor.js BEFORE calling enrichOrCreateInsight. Without
@@ -127,23 +157,23 @@ const runDedupTest = async () => {
 // "group" here is just OUR bookkeeping label — the real code never sees it.
 const insightTestSignals = [
   // SAMECO-A: same company, different phrasing — should end up as 1 card
-  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID,
+  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Phitku',
     text: 'Phitku closed a $15 million Series A led by KKR. The capital will fund inventory, retail distribution, product innovation and team expansion.' },
-  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID,
+  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Phitku',
     text: 'KKR has led a $15 million investment into Phitku, aiming to accelerate clinical research and retail distribution.' },
 
   // SAMECO-B: same company, three different AI-adoption phrasings — should end up as 1 card
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID,
+  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
     text: "Yepoda's new AI-powered tool accelerates R&D timelines, turning weeks of research into minutes." },
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID,
+  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
     text: 'Yepoda partners with an AI vendor to build conversational try-on and product discovery tools for consumers.' },
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID,
+  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
     text: 'Yepoda is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.' },
 
   // SINGLE-A / SINGLE-B: unrelated events — each must stay on its OWN card
-  { group: 'SINGLE-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID,
+  { group: 'SINGLE-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Glossier',
     text: 'Glossier closed a $57 million Series A led by Advent International. The capital will fund inventory, retail distribution, product innovation and team expansion.' },
-  { group: 'SINGLE-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID,
+  { group: 'SINGLE-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Estee Lauder',
     text: 'Estee Lauder is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.' },
 ];
 
@@ -154,6 +184,7 @@ const runMarketInsightsTest = async () => {
   for (const sig of insightTestSignals) {
     const articleId = uuidv4();
     await storeArticleVectorForCentroid(articleId, sig.text);
+    const signalRow = await insertSignalRow(articleId, sig);
     const result = await enrichOrCreateInsight(
       CLIENT_ID,
       MODULE_ID,
@@ -161,8 +192,12 @@ const runMarketInsightsTest = async () => {
       sig.signalId,
       articleId,
       sig.text,
-      INDUSTRY
+      INDUSTRY,
+      sig.organization
     );
+    if (signalRow && result.insightId) {
+      await linkSignalToInsight(signalRow.id, result.insightId);
+    }
     console.log(`[${sig.group}] -> ${result.status} insightId=${result.insightId}`);
     (resultsByGroup[sig.group] ||= new Set()).add(result.insightId);
   }
