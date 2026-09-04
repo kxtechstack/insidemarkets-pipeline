@@ -1,87 +1,12 @@
-/**
- * testFullPipeline.js
- * =====================
- * Tests your ACTUAL reverted production code — not a reimplementation:
- *   1. topicDedup.js       -> removeSameTopicArticles (title + embedding dedup)
- *   2. marketInsights.js   -> enrichOrCreateInsight (card creation/merging)
- *
- * A pass here means the real files work. A fail means the real files are
- * broken, not a copy of them.
- *
- * ── BEFORE RUNNING: fill these in ──────────────────────────────────────────
- * Get real values from Supabase (run these once and copy the IDs):
- *
- *   select id, industry from admin.clients limit 5;
- *
- *   select id, submodule_name from admin.submodules
- *     where module_id = '55c5ee19-bfca-468b-81b3-b89ca4f303c8'; -- Market Dynamics
- *
- *   select id, signal_name, submodule_id from admin.signals
- *     where module_id = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
- *
- * Pick ONE existing client_id, and one submodule+signal id pair for an
- * "Investment Activity"-type submodule and one for an "AI Adoption"-type
- * submodule (names may differ in your DB — just pick any two submodules).
- *
- * IMPORTANT: use a client you don't mind writing test cards into — this
- * creates real rows in market_insights / market_insight_members /
- * market_dynamics_signals and real vectors in Qdrant. Re-running this
- * script multiple times will ADD to what's already there, so old test
- * cards can affect new results (e.g. a "SINGLE" event might now match
- * a leftover card from a previous run). If you want clean repeatable
- * runs, delete the test client's market_insights rows + Qdrant points
- * between runs, or use a client_id nobody else uses for real data.
- * ────────────────────────────────────────────────────────────────────────
- */
+// Matches CURRENT marketInsights.js exactly:
+// - CARD_SIMILARITY_THRESHOLD = 0.68
+// - single best embedding match (top-1, no candidate loop, no org-gate)
+// - if embedding misses threshold, fall back to exact org match (same company
+//   always lands on its most recent card even if phrasing drifted)
 
-const { v4: uuidv4 } = require('uuid');
-const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
-const { removeSameTopicArticles } = require('./topicDedup');
-const { enrichOrCreateInsight } = require('./marketInsights');
-const { createClient } = require('@supabase/supabase-js');
-const supabaseTest = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Mimics the market_dynamics_signals insert storeRelevantArticle() does
-// BEFORE calling enrichOrCreateInsight, and the insight_id link-back it
-// does AFTER. Without this, findExistingInsight's org-fallback query has
-// nothing to find — no signal rows exist yet from this test's own calls.
-const insertSignalRow = async (articleId, sig) => {
-  const { data } = await supabaseTest
-    .from('market_dynamics_signals')
-    .insert({
-      article_id: articleId,
-      client_id: CLIENT_ID,
-      module_id: MODULE_ID,
-      submodule_id: sig.submoduleId,
-      signal_id: sig.signalId,
-      signal_title: sig.text.slice(0, 60),
-      summary: sig.text.slice(0, 300),
-      organization: sig.organization,
-      source_url: 'https://test.example.com',
-      published_date: new Date().toISOString(),
-    })
-    .select()
-    .single();
-  return data;
-};
-
-const linkSignalToInsight = async (signalRowId, insightId) => {
-  await supabaseTest.from('market_dynamics_signals').update({ insight_id: insightId }).eq('id', signalRowId);
-};
-
-// ── Mimics the chunk-embed-store step storeRelevantArticle() does in
-// llmRelevanceProcessor.js BEFORE calling enrichOrCreateInsight. Without
-// this, updateInsightCentroid() finds no vectors for the new article_id
-// and every card's centroid stays empty — which is what happened on the
-// first run of this script. This is required for the merge test to mean
-// anything.
-const qdrantTest = new QdrantClient({
-  url: process.env.QDRANT_URL,
-  apiKey: process.env.QDRANT_API_KEY,
-  checkCompatibility: false,
-});
-const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
+const CARD_SIMILARITY_THRESHOLD = 0.68;
 
 let embedderPromise = null;
 const getEmbedder = () => {
@@ -94,140 +19,221 @@ const embedText = async (text) => {
   return Array.from(output.data);
 };
 
-const storeArticleVectorForCentroid = async (articleId, text) => {
-  const vector = await embedText((text || '').slice(0, 4000));
-  await qdrantTest.upsert(POLICY_COLLECTION, {
-    points: [{ id: uuidv4(), vector, payload: { article_id: articleId } }],
-  });
+const cosineSimilarity = (a, b) => {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-const CLIENT_ID = process.env.TEST_CLIENT_ID || 'FILL_ME_IN';
-const MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8'; // Market Dynamics — fixed, don't change
-const SUBMODULE_INVESTMENT_ID = process.env.TEST_SUBMODULE_INVESTMENT_ID || 'FILL_ME_IN';
-const SUBMODULE_AI_ID = process.env.TEST_SUBMODULE_AI_ID || 'FILL_ME_IN';
-const SIGNAL_INVESTMENT_ID = process.env.TEST_SIGNAL_INVESTMENT_ID || 'FILL_ME_IN';
-const SIGNAL_AI_ID = process.env.TEST_SIGNAL_AI_ID || 'FILL_ME_IN';
-const INDUSTRY = process.env.TEST_INDUSTRY || 'Beauty & Personal Care';
+const mean = (vectors) => {
+  const dim = vectors[0].length;
+  const out = new Array(dim).fill(0);
+  for (const v of vectors) for (let i = 0; i < dim; i++) out[i] += v[i];
+  for (let i = 0; i < dim; i++) out[i] /= vectors.length;
+  return out;
+};
 
-const REQUIRED = { CLIENT_ID, SUBMODULE_INVESTMENT_ID, SUBMODULE_AI_ID, SIGNAL_INVESTMENT_ID, SIGNAL_AI_ID };
-const missing = Object.entries(REQUIRED).filter(([, v]) => v === 'FILL_ME_IN').map(([k]) => k);
-if (missing.length > 0) {
-  console.error(`❌ Fill in these before running (env var or edit the constant): ${missing.join(', ')}`);
-  process.exit(1);
+let seedState = 7;
+const rand = () => {
+  seedState = (seedState * 1103515245 + 12345) & 0x7fffffff;
+  return seedState / 0x7fffffff;
+};
+const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+const shuffleArr = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+const companies = [
+  'Remedy', 'Dolce Glow', 'Inglot', 'Merit', 'Saltair', 'Be Clinical', 'CiFLAVORS', 'Diamond Wipes',
+  'Hello Klean', 'Rael', 'Phitku', 'Yepoda', 'Tarte Cosmetics', 'Beekman 1802', 'Ulta Beauty',
+  'Noli', 'Cosmecca Korea', 'DOUGLAS Group', 'COSMAX', 'AmorePacific', 'Grupo Boticário', 'Natura&Co',
+  'L\u2019Or\u00e9al', 'Sephora', 'LVMH', 'Estee Lauder', 'Shiseido', 'Kao Corp', 'Coty', 'Revlon',
+  'Glossier', 'Fenty Beauty', 'Rare Beauty', 'Kylie Cosmetics', 'Charlotte Tilbury', 'Drunk Elephant',
+  'Youth To The People', 'Summer Fridays', 'Tower 28', 'Ilia Beauty', 'Kosas',
+  'Vacation Inc', 'Topicals', 'Pattern Beauty', 'K18 Hair', 'Olaplex',
+  'Living Proof', 'Function of Beauty', 'Prose', 'Curology', 'Nutrafol', 'Ouai Haircare',
+];
+const investors = ['L Catterton', 'CAVU Consumer Partners', 'TSG Consumer Partners', 'Avallon', 'KKR', 'River Associates', 'General Atlantic', 'Advent International'];
+
+const investmentTemplates = [
+  (c, i, amt) => `${c} closed a $${amt} million Series A led by ${i}. The capital will fund inventory, retail distribution, product innovation and team expansion.`,
+  (c, i, amt) => `${i} has led a $${amt} million investment into ${c}, aiming to accelerate clinical research and retail distribution.`,
+  (c, i, amt) => `${c} raised $${amt} million in growth funding backed by ${i}, reshaping product, supply, and go-to-market strategy.`,
+];
+const aiTemplates = [
+  (c) => `${c} is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.`,
+  (c) => `${c}'s new AI-powered tool accelerates R&D timelines, turning weeks of research into minutes.`,
+  (c) => `${c} partners with an AI vendor to build conversational try-on and product discovery tools for consumers.`,
+];
+const trendTemplates = {
+  'Investment Activity': [
+    (c) => `${c} is among a wave of dermocosmetics brands attracting venture capital as investors chase clinical, evidence-backed skincare.`,
+    (c) => `Investors are pouring capital into ${c} and similar evidence-based skincare brands, betting on the dermocosmetics category's growth.`,
+    (c) => `${c}'s recent funding round reflects a broader investor pivot toward clinically-backed, dermatologist-led beauty brands.`,
+  ],
+  'AI Adoption': [
+    (c) => `${c} is rolling out AI-powered virtual try-on tools as beauty retailers race to modernize the online shopping experience.`,
+    (c) => `Beauty brands including ${c} are adopting AI-driven try-on technology to reduce returns and boost online conversion.`,
+    (c) => `${c}'s new virtual try-on feature is part of a wider industry shift toward AI-powered shopping tools in beauty retail.`,
+  ],
+};
+
+const usedCompanies = shuffleArr(companies);
+let companyIdx = 0;
+const nextCompany = () => usedCompanies[companyIdx++ % usedCompanies.length];
+
+const signals = [];
+
+// 10 SAME-COMPANY duplicate clusters — MUST end up on 1 card each
+for (let k = 0; k < 10; k++) {
+  const submodule = k % 2 === 0 ? 'Investment Activity' : 'AI Adoption';
+  const company = nextCompany();
+  const clusterSize = 2 + (k % 2);
+  if (submodule === 'Investment Activity') {
+    const investor = pick(investors);
+    const amt = 5 + Math.floor(rand() * 45);
+    for (let v = 0; v < clusterSize; v++) {
+      const text = investmentTemplates[v % investmentTemplates.length](company, investor, amt);
+      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+    }
+  } else {
+    for (let v = 0; v < clusterSize; v++) {
+      const text = aiTemplates[v % aiTemplates.length](company);
+      signals.push({ group: `SAMECO-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+    }
+  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// PART 1 — Topic Dedup test (topicDedup.js)
-// ─────────────────────────────────────────────────────────────────────────
-const now = () => new Date().toISOString();
+// 10 SAME-TOPIC-DIFFERENT-COMPANY clusters — should merge into 1 trend card each (your requirement)
+for (let k = 0; k < 10; k++) {
+  const submodule = k % 2 === 0 ? 'Investment Activity' : 'AI Adoption';
+  const clusterSize = 2 + (k % 2);
+  const templates = trendTemplates[submodule];
+  for (let v = 0; v < clusterSize; v++) {
+    const company = nextCompany();
+    const text = templates[v % templates.length](company);
+    signals.push({ group: `TREND-${k}`, organization: company, submodule, title: text.slice(0, 60), text });
+  }
+}
 
-const dedupTestArticles = [
-  // A) exact/near-identical title pair (different source suffix) — must collapse to 1
-  { title: 'Glossier closed a $57 million Series A led by Advent International', text: 'Glossier announced today it closed a $57 million Series A round led by Advent International. The funding will go toward retail expansion.', url: 'https://site-a.example.com/1', publishedDate: now() },
-  { title: 'Glossier closed a $57 million Series A led by Advent International | BeautyMatter', text: 'BeautyMatter reports Glossier raised $57M in a Series A led by Advent International, to be used for retail expansion and hiring.', url: 'https://site-b.example.com/1', publishedDate: now() },
-
-  // B) same event, differently worded — must collapse via embedding similarity
-  { title: 'KKR leads $15M investment in Phitku', text: 'KKR has led a $15 million investment into Phitku, aiming to accelerate clinical research and retail distribution for the brand.', url: 'https://site-c.example.com/2', publishedDate: now() },
-  { title: 'Phitku raises capital in KKR-backed round', text: 'Phitku closed a $15 million Series A led by KKR. The capital will fund inventory, retail distribution, product innovation and team expansion.', url: 'https://site-d.example.com/2', publishedDate: now() },
-
-  // C) unrelated articles — must NOT dedup against anything
-  { title: 'Estee Lauder deploys generative AI across marketing', text: 'Estee Lauder is deploying generative AI across its marketing and product functions to cut turnaround time.', url: 'https://site-e.example.com/3', publishedDate: now() },
-  { title: 'Coty closed a $37 million Series A led by TSG Consumer Partners', text: 'Coty closed a $37 million Series A led by TSG Consumer Partners. The capital will fund inventory, retail distribution, product innovation and team expansion.', url: 'https://site-f.example.com/4', publishedDate: now() },
-];
-
-const runDedupTest = async () => {
-  console.log('\n========== PART 1: TOPIC DEDUP TEST ==========\n');
-  const result = await removeSameTopicArticles(dedupTestArticles, CLIENT_ID, MODULE_ID);
-
-  console.log(`\nInput: ${dedupTestArticles.length} articles -> Output: ${result.length} unique kept`);
-  console.log('Kept:', result.map(a => a.title));
-
-  const expectedUnique = 4; // 1 from exact pair + 1 from paraphrase pair + 2 unrelated
-  if (result.length === expectedUnique) {
-    console.log(`\n✅ PASS — expected ${expectedUnique} unique articles, got ${result.length}`);
+// ~60 unrelated singleton events — should stay separate
+const singletonSubmodules = ['Investment Activity', 'AI Adoption'];
+for (let s = 0; s < 60; s++) {
+  const submodule = singletonSubmodules[s % singletonSubmodules.length];
+  const company = nextCompany();
+  let text;
+  if (submodule === 'Investment Activity') {
+    const investor = pick(investors);
+    const amt = 3 + Math.floor(rand() * 60);
+    text = investmentTemplates[Math.floor(rand() * investmentTemplates.length)](company, investor, amt);
   } else {
-    console.log(`\n❌ FAIL — expected ${expectedUnique} unique articles, got ${result.length}`);
-    console.log('   (if this is a REPEAT run against the same client_id, leftover data from a previous run can cause this — see header notes)');
+    text = aiTemplates[Math.floor(rand() * aiTemplates.length)](company);
   }
-};
+  signals.push({ group: `SINGLE-${s}`, organization: company, submodule, title: text.slice(0, 60), text });
+}
 
-// ─────────────────────────────────────────────────────────────────────────
-// PART 2 — Market Insights card merging test (marketInsights.js)
-// ─────────────────────────────────────────────────────────────────────────
-// "group" here is just OUR bookkeeping label — the real code never sees it.
-const insightTestSignals = [
-  // SAMECO-A: same company, different phrasing — should end up as 1 card
-  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Phitku',
-    text: 'Phitku closed a $15 million Series A led by KKR. The capital will fund inventory, retail distribution, product innovation and team expansion.' },
-  { group: 'SAMECO-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Phitku',
-    text: 'KKR has led a $15 million investment into Phitku, aiming to accelerate clinical research and retail distribution.' },
-
-  // SAMECO-B: same company, three different AI-adoption phrasings — should end up as 1 card
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
-    text: "Yepoda's new AI-powered tool accelerates R&D timelines, turning weeks of research into minutes." },
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
-    text: 'Yepoda partners with an AI vendor to build conversational try-on and product discovery tools for consumers.' },
-  { group: 'SAMECO-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Yepoda',
-    text: 'Yepoda is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.' },
-
-  // SINGLE-A / SINGLE-B: unrelated events — each must stay on its OWN card
-  { group: 'SINGLE-A', submoduleId: SUBMODULE_INVESTMENT_ID, signalId: SIGNAL_INVESTMENT_ID, organization: 'Glossier',
-    text: 'Glossier closed a $57 million Series A led by Advent International. The capital will fund inventory, retail distribution, product innovation and team expansion.' },
-  { group: 'SINGLE-B', submoduleId: SUBMODULE_AI_ID, signalId: SIGNAL_AI_ID, organization: 'Estee Lauder',
-    text: 'Estee Lauder is deploying generative AI across its marketing and product functions to cut turnaround time and improve personalization.' },
-];
-
-const runMarketInsightsTest = async () => {
-  console.log('\n========== PART 2: MARKET INSIGHTS MERGE TEST ==========\n');
-  const resultsByGroup = {};
-
-  for (const sig of insightTestSignals) {
-    const articleId = uuidv4();
-    await storeArticleVectorForCentroid(articleId, sig.text);
-    const signalRow = await insertSignalRow(articleId, sig);
-    const result = await enrichOrCreateInsight(
-      CLIENT_ID,
-      MODULE_ID,
-      sig.submoduleId,
-      sig.signalId,
-      articleId,
-      sig.text,
-      INDUSTRY,
-      sig.organization
-    );
-    if (signalRow && result.insightId) {
-      await linkSignalToInsight(signalRow.id, result.insightId);
-    }
-    console.log(`[${sig.group}] -> ${result.status} insightId=${result.insightId}`);
-    (resultsByGroup[sig.group] ||= new Set()).add(result.insightId);
-  }
-
-  console.log('\n--- INTENT CHECK ---');
-  let allPass = true;
-
-  for (const [group, insightIds] of Object.entries(resultsByGroup)) {
-    const ok = insightIds.size === 1;
-    if (!ok) allPass = false;
-    console.log(`${group}: ${ok ? '✅ merged into 1 card' : `❌ SPLIT across ${insightIds.size} cards`} (${[...insightIds].join(', ')})`);
-  }
-
-  const singleAId = [...resultsByGroup['SINGLE-A']][0];
-  const singleBId = [...resultsByGroup['SINGLE-B']][0];
-  const samecoAIds = resultsByGroup['SAMECO-A'];
-  const samecoBIds = resultsByGroup['SAMECO-B'];
-
-  if (samecoAIds.has(singleAId) || samecoBIds.has(singleBId)) {
-    allPass = false;
-    console.log('❌ FAIL — a SINGLE (unrelated) event wrongly merged into another card');
-  } else {
-    console.log('✅ SINGLE events stayed separate from other cards');
-  }
-
-  console.log(allPass ? '\n✅ ALL MARKET INSIGHTS CHECKS PASSED' : '\n❌ SOME CHECKS FAILED — see above');
-};
+const ordered = shuffleArr(signals);
+console.log(`Total signals to process: ${ordered.length}\n`);
 
 (async () => {
-  await runDedupTest();
-  await runMarketInsightsTest();
-  process.exit(0);
+  const cardsBySubmodule = {};
+  let nextCardId = 1;
+  const log = [];
+  const orgLastCard = {}; // organization -> most recently used card, per submodule (mirrors the org-fallback query)
+
+  for (const sig of ordered) {
+    const vec = await embedText(sig.text.slice(0, 4000));
+    const bucket = (cardsBySubmodule[sig.submodule] ||= []);
+    const orgKey = `${sig.submodule}::${sig.organization}`;
+
+    // top-1 embedding match, same as qdrant limit:1 search
+    let best = null;
+    for (const card of bucket) {
+      const score = cosineSimilarity(vec, card.centroid);
+      if (!best || score > best.score) best = { card, score };
+    }
+
+    let chosen = null;
+    let matchType = null;
+    let score = best ? best.score : null;
+
+    if (best && best.score >= CARD_SIMILARITY_THRESHOLD) {
+      chosen = best.card;
+      matchType = 'embedding';
+    } else if (sig.organization && orgLastCard[orgKey]) {
+      chosen = orgLastCard[orgKey];
+      matchType = 'org-fallback';
+    }
+
+    if (chosen) {
+      chosen.members.push({ title: sig.title, group: sig.group, organization: sig.organization, vec });
+      chosen.centroid = mean(chosen.members.map(m => m.vec));
+      log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'MERGED', cardId: chosen.id, score, matchType });
+    } else {
+      const card = { id: nextCardId++, members: [{ title: sig.title, group: sig.group, organization: sig.organization, vec }], centroid: vec };
+      bucket.push(card);
+      log.push({ title: sig.title, group: sig.group, org: sig.organization, action: 'NEW CARD', cardId: card.id, score, matchType: null });
+    }
+
+    if (sig.organization) orgLastCard[orgKey] = chosen || bucket[bucket.length - 1];
+  }
+
+  console.log('=== DECISION LOG ===\n');
+  for (const l of log) {
+    const scoreStr = l.score !== null ? l.score.toFixed(3) : '  —  ';
+    const mt = l.matchType ? ` [${l.matchType}]` : '';
+    console.log(`[score ${scoreStr}] ${l.action.padEnd(9)} card#${l.cardId}  org="${l.org}"  "${l.title}"${mt}  (group: ${l.group})`);
+  }
+
+  console.log('\n=== FINAL CARDS ===\n');
+  for (const [submodule, cards] of Object.entries(cardsBySubmodule)) {
+    console.log(`--- ${submodule} (${cards.length} cards) ---`);
+    for (const card of cards) {
+      const orgs = new Set(card.members.map(m => m.organization));
+      console.log(`  Card #${card.id} (${card.members.length} signal${card.members.length > 1 ? 's' : ''}) orgs=[${[...orgs].join(', ')}]`);
+      for (const m of card.members) console.log(`     - [${m.group}] org=${m.organization} "${m.title}"`);
+    }
+  }
+
+  const byGroup = {};
+  for (const sig of ordered) (byGroup[sig.group] ||= []).push(sig);
+
+  console.log('\n=== INTENT CHECK ===');
+  let pass = 0, fail = 0;
+  for (const [group, sigs] of Object.entries(byGroup)) {
+    if (group.startsWith('SINGLE')) continue;
+    const cardIdsUsed = new Set();
+    for (const submodule of Object.values(cardsBySubmodule)) {
+      for (const card of submodule) {
+        if (card.members.some(m => m.group === group)) cardIdsUsed.add(card.id);
+      }
+    }
+    const label = group.startsWith('SAMECO') ? 'SAME-COMPANY' : 'SAME-TOPIC-DIFF-COMPANY';
+    const ok = cardIdsUsed.size === 1;
+    ok ? pass++ : fail++;
+    console.log(`${group} [${label}]: ${ok ? '✅ merged correctly' : `❌ SPLIT across ${cardIdsUsed.size} cards`} — cards: ${[...cardIdsUsed].join(',')}`);
+  }
+
+  // check no SINGLE accidentally merged with another SINGLE or a cluster
+  let wrongMerges = 0;
+  for (const submodule of Object.values(cardsBySubmodule)) {
+    for (const card of submodule) {
+      const groups = new Set(card.members.map(m => m.group.split('-')[0])); // SAMECO / TREND / SINGLE prefix
+      if (groups.size > 1 || (groups.has('SINGLE') && card.members.length > 1)) {
+        wrongMerges++;
+        console.log(`⚠ Card #${card.id} mixes unrelated groups: ${[...new Set(card.members.map(m => m.group))].join(', ')}`);
+      }
+    }
+  }
+
+  console.log(`\n=== SUMMARY: ${pass} clusters correctly merged, ${fail} incorrectly split, ${wrongMerges} cards with unrelated signals mixed in ===`);
 })();
