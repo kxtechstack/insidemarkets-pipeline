@@ -39,7 +39,7 @@ const { generateAnswer } = require('./generateAnswer');
 // charts) couldn't even start on a Windows dev machine. Wrapped in
 // try/catch below so a chart-rendering failure degrades to a text-only
 // decision answer instead of crashing the whole request.
-const { retrieveClientData } = require('./retrieveClientData');
+const { retrieveClientData, detectTargetModules } = require('./retrieveClientData');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -55,7 +55,12 @@ const {
  * Handles a 'list' question: client data only, no LLM.
  */
 async function handleList(question, clientId, industry) {
-  const searchResults = await retrieveClientData(question, clientId, industry);
+  // Scope retrieval to the module(s) the question is about -- a "policy
+  // changes" question shouldn't also return Forward Outlook or Market
+  // Dynamics signals that happen to match on generic words. Falls back
+  // to searching all modules if no keywords match.
+  const modules = detectTargetModules(question);
+  const searchResults = await retrieveClientData(question, clientId, industry, 10, modules);
   const items = await buildListAnswer(searchResults);
   return { type: 'list', items };
 }

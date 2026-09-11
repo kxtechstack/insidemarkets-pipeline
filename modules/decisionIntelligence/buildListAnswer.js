@@ -81,58 +81,74 @@ async function buildListAnswer(searchResults) {
   }
 
   // ---- Forward Outlook: return individual signals + parent trend name ----
-if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
-  const ids = byModule[FORWARD_OUTLOOK_MODULE_ID].map(x => x.articleId);
+  // NOTE: category comes from the TREND's sector, not the signal's own
+  // sector. Signals are tagged with their own sector at ingestion time,
+  // but after the pipeline clusters them into a trend, the trend's sector
+  // is what the Forward Outlook module uses for placement in the radial
+  // chart. Displaying the signal's sector here would show a different
+  // sector than where the user will actually find it in the module.
+  if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
+    const ids = byModule[FORWARD_OUTLOOK_MODULE_ID].map(x => x.articleId);
 
-  const { data: signals, error } = await supabase
-    .from('trend_signals')
-    .select('id, article_id, signal_title, sector, horizon_estimate, summary, source_article_url')
-    .in('article_id', ids);
-  if (error) throw error;
+    const { data: signals, error } = await supabase
+      .from('trend_signals')
+      .select('id, article_id, signal_title, sector, horizon_estimate, summary, source_article_url')
+      .in('article_id', ids);
+    if (error) throw error;
 
-  // Get trend membership for these signals
-  const signalIds = signals.map(s => s.id);
-  const { data: memberships } = await supabase
-    .from('trend_membership')
-    .select('signal_id, trend_id')
-    .in('signal_id', signalIds);
+    // Get trend membership for these signals
+    const signalIds = signals.map(s => s.id);
+    const { data: memberships } = await supabase
+      .from('trend_membership')
+      .select('signal_id, trend_id')
+      .in('signal_id', signalIds);
 
-  const trendIdBySignal = new Map((memberships || []).map(m => [m.signal_id, m.trend_id]));
+    const trendIdBySignal = new Map((memberships || []).map(m => [m.signal_id, m.trend_id]));
 
-  // Get trend names
-  const trendIds = [...new Set((memberships || []).map(m => m.trend_id))];
-  const { data: trends } = trendIds.length
-    ? await supabase.from('trend_clusters').select('id, name').in('id', trendIds)
-    : { data: [] };
+    // Get trend names AND sectors
+    const trendIds = [...new Set((memberships || []).map(m => m.trend_id))];
+    const { data: trends } = trendIds.length
+      ? await supabase
+          .from('trend_clusters')
+          .select('id, name, sector')
+          .in('id', trendIds)
+          .eq('status', 'active')
+      : { data: [] };
 
-  const trendNameById = new Map((trends || []).map(t => [t.id, t.name]));
+    const trendInfoById = new Map(
+      (trends || []).map(t => [t.id, { name: t.name, sector: t.sector }])
+    );
 
-  for (const row of signals) {
-    const trendId = trendIdBySignal.get(row.id);
-    const trendName = trendId ? trendNameById.get(trendId) : null;
+    for (const row of signals) {
+      const trendId = trendIdBySignal.get(row.id);
+      const trendInfo = trendId ? trendInfoById.get(trendId) : null;
 
-    // Skip orphan signals -- they're candidate trends that haven't been
-    // promoted to a cluster yet. They're not visible anywhere in the
-    // Forward Outlook module, so showing them in the DI list would create
-    // a dead-end "Read more" link. They'll appear once the pipeline
-    // assigns them to a trend on a future run.
-    if (!trendName) continue;
+      // Skip orphan signals AND signals attached to candidate trends.
+      // Candidate trends aren't promoted to the Forward Outlook module,
+      // so we can't link to them from the DI list.
+      if (!trendInfo || !trendInfo.name) continue;
 
-    items.push({
-      id: row.id,
-      title: row.signal_title,
-      category: row.sector,
-      impact: null,
-      horizon: row.horizon_estimate,
-      summary: row.summary,
-      url: row.source_article_url,
-      module: 'Forward Outlook',
-      parentLabel: `Trend: ${trendName}`,
-    });
+      items.push({
+        id: row.id,
+        title: row.signal_title,
+        category: trendInfo.sector,          // ← trend's sector (correct)
+        impact: null,
+        horizon: row.horizon_estimate,
+        summary: row.summary,
+        url: row.source_article_url,
+        module: 'Forward Outlook',
+        parentLabel: `Trend: ${trendInfo.name}`,
+      });
+    }
   }
-}
 
     // ---- Market Dynamics: return individual signals + parent insight name ----
+  // NOTE: category comes from the INSIGHT's category, not the signal's own
+  // category. Signals are tagged with a granular sub-category at ingestion
+  // time (e.g. "Investment Activity"), but the insight card they belong to
+  // uses a broader dimension (e.g. "Funding & Investment Activity"). The
+  // Market Dynamics module displays insights by dimension, so we show the
+  // insight's category to match where the user will actually find the card.
   if (byModule[MARKET_DYNAMICS_MODULE_ID].length) {
     const articleIds = byModule[MARKET_DYNAMICS_MODULE_ID].map(x => x.articleId);
 
@@ -143,13 +159,15 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
       .in('article_id', articleIds);
     if (sigErr) throw sigErr;
 
-    // Get parent insight (bundle) titles, just for the parentLabel display
+    // Get parent insight titles AND categories for display
     const insightIds = [...new Set((signalRows || []).map(r => r.insight_id).filter(Boolean))];
     const { data: insights } = insightIds.length
-      ? await supabase.from('market_insights_live').select('id, title').in('id', insightIds)
+      ? await supabase.from('market_insights_live').select('id, title, category').in('id', insightIds)
       : { data: [] };
 
-    const insightTitleById = new Map((insights || []).map(i => [i.id, i.title]));
+    const insightInfoById = new Map(
+      (insights || []).map(i => [i.id, { title: i.title, category: i.category }])
+    );
 
     // Dedupe by signal id
     const seen = new Set();
@@ -161,10 +179,13 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
       // they have no viewable location in the Market Dynamics module.
       if (!row.insight_id) continue;
 
+      const insightInfo = insightInfoById.get(row.insight_id);
+      if (!insightInfo || !insightInfo.title) continue;
+
       items.push({
         id: row.id,
         title: row.signal_title,
-        category: row.category,
+        category: insightInfo.category,     // ← insight's category (correct)
         impact: null,
         country: row.country,
         summary: row.summary,
@@ -172,7 +193,7 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
         organization: row.organization,
         publishedDate: row.published_date,
         module: 'Market Dynamics',
-        parentLabel: `Insight: ${insightTitleById.get(row.insight_id) || '—'}`,
+        parentLabel: `Insight: ${insightInfo.title}`,
       });
     }
   }
