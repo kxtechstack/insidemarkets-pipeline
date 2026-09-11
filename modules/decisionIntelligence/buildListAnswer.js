@@ -111,6 +111,13 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
     const trendId = trendIdBySignal.get(row.id);
     const trendName = trendId ? trendNameById.get(trendId) : null;
 
+    // Skip orphan signals -- they're candidate trends that haven't been
+    // promoted to a cluster yet. They're not visible anywhere in the
+    // Forward Outlook module, so showing them in the DI list would create
+    // a dead-end "Read more" link. They'll appear once the pipeline
+    // assigns them to a trend on a future run.
+    if (!trendName) continue;
+
     items.push({
       id: row.id,
       title: row.signal_title,
@@ -120,7 +127,7 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
       summary: row.summary,
       url: row.source_article_url,
       module: 'Forward Outlook',
-      parentLabel: trendName ? `Trend: ${trendName}` : 'Not yet clustered',
+      parentLabel: `Trend: ${trendName}`,
     });
   }
 }
@@ -150,6 +157,10 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
       if (seen.has(row.id)) continue;
       seen.add(row.id);
 
+      // Skip orphan signals -- not yet promoted to an insight card, so
+      // they have no viewable location in the Market Dynamics module.
+      if (!row.insight_id) continue;
+
       items.push({
         id: row.id,
         title: row.signal_title,
@@ -161,9 +172,7 @@ if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
         organization: row.organization,
         publishedDate: row.published_date,
         module: 'Market Dynamics',
-        parentLabel: row.insight_id
-          ? `Insight: ${insightTitleById.get(row.insight_id) || '—'}`
-          : 'Not yet clustered',
+        parentLabel: `Insight: ${insightTitleById.get(row.insight_id) || '—'}`,
       });
     }
   }
