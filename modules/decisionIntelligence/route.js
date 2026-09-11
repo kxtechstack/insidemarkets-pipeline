@@ -98,6 +98,22 @@ async function handleDecision(question, clientId, industry) {
       console.log(`[handleDecision] Chart rendering unavailable: ${err.message}`);
     }
   }
+  // HALLUCINATION GUARD: if we retrieved zero context (no chunks, no
+  // facts, no resolved sources), then anything the LLM produced is
+  // fabricated -- the report may look full and plausible, but none of
+  // it is grounded. Mark as empty so the handler responds with the
+  // "no data" message instead of showing invented content.
+  const hadNoContext =
+    (!chunks || chunks.length === 0) &&
+    (!facts || facts.length === 0) &&
+    (!sources || sources.length === 0);
+
+  if (hadNoContext) {
+    console.log(
+      `[handleDecision] Discarding report for "${question}" -- zero context retrieved (chunks=${chunks?.length || 0}, facts=${facts?.length || 0}, sources=${sources?.length || 0})`
+    );
+    return { type: 'decision', report: null, sources: [], chart: null, chartMeta: null, _empty: true };
+  }
 
   return { type: 'decision', report, sources, chart, chartMeta };
 }
@@ -139,6 +155,28 @@ function registerDecisionIntelligenceRoute(app) {
         content: question,
       });
 
+            // 2b. Short-circuit trivial greetings / non-questions so we don't
+      // waste an LLM call (or hit a rate limit) on "hi", "thanks", etc.
+      const trimmed = question.trim();
+      const isGreeting = /^(hi+|hello+|hey+|yo|sup|thanks?|thank you|ok(ay)?|cool|nice|test(ing)?|help|good (morning|afternoon|evening))[\s!.,?]*$/i.test(trimmed);
+      if (isGreeting || trimmed.length < 3) {
+        const reply = 'Hi! Ask me a question about your market intelligence data to get started. For example: "What are the major policy changes in the last week?" or "Give me a SWOT analysis of Apple."';
+        await appendMessage({
+          conversationId,
+          role: 'assistant',
+          content: reply,
+          type: 'list',
+          payload: { type: 'list', items: [], greeting: true },
+        });
+        return res.json({
+          type: 'list',
+          items: [],
+          greeting: true,
+          message: reply,
+          conversationId,
+        });
+      }
+
       // 3. Classify (same as before)
       let type = providedType;
       let classifierReasoning = null;
@@ -163,6 +201,83 @@ function registerDecisionIntelligenceRoute(app) {
       }
 
       if (classifierReasoning) result.classifierReasoning = classifierReasoning;
+
+      // 4b. Detect "no relevant data" outcomes and steer the user toward
+      // working questions. Only fires when the result is *truly* empty --
+      // if the LLM produced any content (even a "no data" narrative),
+      // we keep that instead of overriding it.
+      const isEmptyResult = (() => {
+        if (!result) return true;
+        if (result._empty) return true;
+
+        if (result.type === 'list') {
+          return !result.items || result.items.length === 0;
+        }
+
+        if (result.type === 'inference' || result.type === 'decision') {
+          const r = result.report || {};
+          const hasTitle = Boolean(r.title && r.title.trim());
+          const hasOutlook = Array.isArray(r.outlook)
+            ? r.outlook.length > 0
+            : Boolean(r.outlook && String(r.outlook).trim());
+          const hasBody = Boolean(r.bodyText && r.bodyText.trim());
+          const hasTable = Boolean(
+            r.key_movement_analysis &&
+              r.key_movement_analysis.rows &&
+              r.key_movement_analysis.rows.length > 0
+          );
+          const hasDrivers = Array.isArray(r.driving_factors) && r.driving_factors.length > 0;
+          const hasSources = Array.isArray(result.sources) && result.sources.length > 0;
+          return !(hasTitle || hasOutlook || hasBody || hasTable || hasDrivers || hasSources);
+        }
+
+        return false;
+      })();
+
+      if (isEmptyResult) {
+        let suggestions = [];
+        try {
+          const homeQs = await getSuggestedQuestions({
+            clientId,
+            surface: 'home',
+            industry,
+            companyName: null,
+          });
+          suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
+        } catch (err) {
+          console.log(`[DI] Failed to load suggestions for empty result: ${err.message}`);
+        }
+
+        if (suggestions.length === 0) {
+          suggestions = [
+            'What are the major policy changes in the last week?',
+            'Show me recent M&A activity in the beauty sector',
+            'What emerging technologies are gaining traction?',
+            'Give me a SWOT analysis of Apple',
+          ];
+        }
+
+        const reply =
+          "I don't have any information related to that in your data. Would you like to explore one of these instead?";
+
+        const enriched = {
+          type: 'list',
+          items: [],
+          no_data: true,
+          message: reply,
+          suggestions,
+        };
+
+        await appendMessage({
+          conversationId,
+          role: 'assistant',
+          content: reply,
+          type: 'list',
+          payload: enriched,
+        });
+
+        return res.json({ ...enriched, conversationId });
+      }
 
       // 5. Save the assistant's answer
       const contentForSearch =
