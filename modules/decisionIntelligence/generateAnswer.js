@@ -29,6 +29,12 @@ const MAX_SEC_CONTEXT_CHARS = Math.floor(MAX_CONTEXT_CHARS * 0.6);
 const MAX_CLIENT_CONTEXT_CHARS = MAX_CONTEXT_CHARS - MAX_SEC_CONTEXT_CHARS;
 const ITEM_MAX_CHARS = 400;
 
+const MODULE_NAMES = {
+  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'Policy & Risk',
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'Market Dynamics',
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'Forward Outlook',
+};
+
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'risk_analysis', 'five_forces']);
 
 const FRAMEWORK_PROMPT_IDS = {
@@ -176,7 +182,7 @@ async function resolveSources(citedIndices, sourceManifest) {
       type: 'client',
       title: p.title || 'Untitled',
       url: p.url || null,
-      module: p.module_id || null,
+      module: MODULE_NAMES[p.module_id] || p.module_id || null,
       qdrant_point_id: s.qdrantPointId || null,
     };
   });
