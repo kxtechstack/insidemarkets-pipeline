@@ -256,7 +256,7 @@ async function extractIntent(question, getAllCompaniesFn) {
   let allYears = [...new Set((question.match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
 
   const lastNMatch = question.match(
-    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s+years?\b/i
+    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s*years?\b/i
   );
   if (lastNMatch && allYears.length === 0) {
     const raw = lastNMatch[1].toLowerCase();
