@@ -1,3 +1,5 @@
+/* server.js */
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -20,6 +22,7 @@ const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
 const { startStaleJobWatcher, startFailedArticleWatcher } = require('./modules/jobRecovery');
+const { registerDecisionIntelligenceRoute } = require('./modules/decisionIntelligence/route');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -541,6 +544,7 @@ app.get('/schedules/client/:clientId', async (req, res) => {
 
 
 const PORT = process.env.PORT || 3000;
+registerDecisionIntelligenceRoute(app);
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
