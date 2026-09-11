@@ -81,7 +81,7 @@ const TICKER_ALIASES = {
   INTEL: 'INTC', NVIDIA: 'NVDA', 'HOME DEPOT': 'HD',
 };
 
-const STOPWORD_TICKERS = new Set(['ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE', 'TECH']);
+const STOPWORD_TICKERS = new Set(['ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE', 'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END', 'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE', 'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL']);
 
 const GENERIC_FIRST_WORDS = new Set([
   'CAPITAL', 'AMERICAN', 'GENERAL', 'NATIONAL', 'GLOBAL', 'GROUP',
@@ -100,7 +100,7 @@ const QUESTION_STOPWORDS = new Set([
   'DID', 'DOES', 'EACH', 'THEIR', 'ITS', 'BUSINESS', 'SEGMENT',
   'PRODUCT', 'CORE', 'OPERATE', 'COMPANY', 'COMPANIES', 'CATEGORIZE', 'DISTRIBUTION',
   'PESTLE', 'PESTEL', 'PEST', 'PORTER', 'PORTERS', 'FORCES', 'FORCE', 'FIVE',
-  'LAST', 'PAST', 'PREVIOUS', 'YEARS', 'YEAR',
+  'LAST', 'PAST', 'PREVIOUS', 'YEARS', 'YEAR',   'SHOULD', 'OVER', 'EXPANSION', 'EXPAND', 'PRIORITIZE', 'PRIORITIS', 'DIRECT', 'RETAIL', 'SPECIALTY', 'ECOMMERCE', 'PARTNERSHIP', 'PARTNERSHIPS',
 ]);
 
 let _companyLookup = null; // cached Map<UPPER_NAME_OR_TICKER, ticker>
@@ -135,16 +135,26 @@ function extractTickers(question, lookup) {
   if (found.length) return found;
 
   const candidateWords = (question.match(/[A-Za-z][A-Za-z&.]*/g) || []).filter(w => w.length >= 4 && !QUESTION_STOPWORDS.has(w.toUpperCase()));
-  const allNames = [...lookup.keys()].filter(n => !STOPWORD_TICKERS.has(n));
+  // FIX: filter BOTH the name AND the ticker it maps to against the
+  // stopword list. Previously only the name itself was filtered, so
+  // "DOVER" (which maps to ticker DOV, a stopword) still made it into
+  // the candidate pool and matched "over" via fuzzy.
+  const allNames = [...lookup.keys()].filter(n => {
+    if (STOPWORD_TICKERS.has(n)) return false;
+    const t = lookup.get(n);
+    if (t && STOPWORD_TICKERS.has(t)) return false;
+    return true;
+  });
   for (const word of candidateWords) {
-    // FIX #1 (TJX/"companies" bug): fixed +/-3 char delta instead of a
-    // delta that scaled with word length -- see file header.
     const sameLengthNames = allNames.filter(n => Math.abs(n.length - word.length) <= 3);
     if (!sameLengthNames.length) continue;
     const { bestMatch } = stringSimilarity.findBestMatch(word.toUpperCase(), sameLengthNames);
-    // FIX #2 (Mircosoft/typo-tolerance bug): threshold lowered from 0.82
-    // to 0.6 -- see file header.
-    if (bestMatch.rating >= 0.6) {
+    // FIX: stricter threshold for short words. 4-6 char words require 0.85
+    // similarity (blocks common English words like "over", "expand" from
+    // fuzzy-matching to short company names/tickers); 7+ char words keep
+    // 0.6 for typo tolerance ("Mircosoft" -> "Microsoft").
+    const minRating = word.length <= 6 ? 0.85 : 0.6;
+    if (bestMatch.rating >= minRating) {
       const ticker = lookup.get(bestMatch.target);
       if (!found.includes(ticker)) found.push(ticker);
     }
