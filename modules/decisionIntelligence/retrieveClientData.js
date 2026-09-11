@@ -3,12 +3,13 @@
  *
  * Retrieval for List/Inference questions in the Decision Intelligence
  * chat -- searches the CLIENT'S OWN collected data (never SEC filings),
- * across all existing modules at once instead of one moduleId at a time
- * like ragChat.js's askQuestion() does.
+ * across all existing modules at once.
  *
- * Reuses the exact same embedding + Qdrant pattern already proven in
- * ragChat.js/marketInsights.js: @xenova/transformers for embeddings,
- * qdrant.search() (not .query()) against the policy_articles collection.
+ * Also parses time windows from the question ("last week", "yesterday",
+ * "recent") and applies them as a date filter on Qdrant's payload
+ * `published_date` field. If the strict window returns nothing, widens
+ * to 30d, then 90d, then 365d, then no filter -- so a client with no
+ * signals in the requested window still gets something back.
  */
 
 const { pipeline } = require('@xenova/transformers');
@@ -25,9 +26,6 @@ const POLICY_MODULE_ID = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 
-// The 3 modules that actually have live data today. Find Opportunities,
-// Competitive Radar, and Voice of Customer aren't built yet -- add their
-// module_id values here once they exist, no other change needed.
 const LIVE_MODULE_IDS = [
   POLICY_MODULE_ID,
   MARKET_DYNAMICS_MODULE_ID,
@@ -47,20 +45,64 @@ async function embedText(text) {
 }
 
 /**
+ * Parse a time window from a question. Returns { days, label } or null.
+ */
+function detectTimeWindow(question) {
+  const q = (question || "").toLowerCase();
+
+  // Numeric windows first
+  const daysMatch = q.match(/\b(?:last|past|previous)\s+(\d+)\s+days?\b/);
+  if (daysMatch) {
+    const d = Math.max(1, Math.min(parseInt(daysMatch[1], 10), 365));
+    return { days: d, label: `last ${d} days` };
+  }
+  const weeksMatch = q.match(/\b(?:last|past|previous)\s+(\d+)\s+weeks?\b/);
+  if (weeksMatch) {
+    const w = Math.max(1, Math.min(parseInt(weeksMatch[1], 10), 52));
+    return { days: w * 7, label: `last ${w} weeks` };
+  }
+  const monthsMatch = q.match(/\b(?:last|past|previous)\s+(\d+)\s+months?\b/);
+  if (monthsMatch) {
+    const m = Math.max(1, Math.min(parseInt(monthsMatch[1], 10), 12));
+    return { days: m * 30, label: `last ${m} months` };
+  }
+
+  // Named windows
+  if (/\btoday\b/.test(q))                                 return { days: 1,  label: "today" };
+  if (/\byesterday\b/.test(q))                             return { days: 2,  label: "yesterday" };
+  if (/\b(?:this|last|past|previous)\s+week\b/.test(q))    return { days: 7,  label: "last week" };
+  if (/\b(?:this|last|past|previous)\s+month\b/.test(q))   return { days: 30, label: "last month" };
+  if (/\b(?:this|last|past|previous)\s+quarter\b/.test(q)) return { days: 90, label: "last quarter" };
+  if (/\brecent(ly)?\b/.test(q))                           return { days: 7,  label: "recent" };
+  if (/\blatest\b/.test(q))                                return { days: 14, label: "latest" };
+  if (/\bnew(est)?\b/.test(q))                             return { days: 14, label: "new" };
+
+  return null;
+}
+
+/**
+ * Strip time-related tokens from the question so the semantic embedding
+ * isn't polluted by words like "yesterday" / "recent" that have no
+ * topical meaning. Falls back to the original question if stripping
+ * leaves nothing useful.
+ */
+function stripTimeTokens(question) {
+  const stripped = (question || "")
+    .replace(/\b(today|yesterday|recent(ly)?|latest|new(est)?|last|past|previous|this)\b/gi, " ")
+    .replace(/\b\d+\s+(days?|weeks?|months?|quarters?|years?)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return stripped.length >= 4 ? stripped : question;
+}
+
+/**
  * Detect which module(s) a question is about, based on keyword signals.
- * Used by the List pipeline to scope retrieval -- prevents a "policy
- * changes" question from also returning Forward Outlook or Market
- * Dynamics signals that happen to match on generic words like "cosmetic"
- * or "product".
- *
- * Returns an array of module IDs. If no keywords match, returns ALL
- * module IDs (fallback -- better to over-search than return nothing).
  */
 function detectTargetModules(question) {
   const q = (question || "").toLowerCase();
   const matched = new Set();
 
-  // ---- Policy & Risk keywords ----
   const policyKeywords = [
     "policy", "policies", "regulation", "regulations", "regulatory",
     "compliance", "law", "laws", "legislation", "legislative",
@@ -74,7 +116,6 @@ function detectTargetModules(question) {
   ];
   if (policyKeywords.some(k => q.includes(k))) matched.add(POLICY_MODULE_ID);
 
-  // ---- Forward Outlook keywords ----
   const foKeywords = [
     "outlook", "trend", "trends", "horizon", "future",
     "emerging", "forecast", "prediction", "predict",
@@ -86,7 +127,6 @@ function detectTargetModules(question) {
   ];
   if (foKeywords.some(k => q.includes(k))) matched.add(FORWARD_OUTLOOK_MODULE_ID);
 
-  // ---- Market Dynamics keywords ----
   const mdKeywords = [
     "market", "markets", "funding", "investment", "investments",
     "raise", "raised", "acquisition", "acquire", "acquired",
@@ -99,54 +139,74 @@ function detectTargetModules(question) {
   ];
   if (mdKeywords.some(k => q.includes(k))) matched.add(MARKET_DYNAMICS_MODULE_ID);
 
-  // Fallback -- no keywords matched → search all three modules
-  if (matched.size === 0) {
-    return [...LIVE_MODULE_IDS];
-  }
-
+  if (matched.size === 0) return [...LIVE_MODULE_IDS];
   return [...matched];
 }
 
 /**
- * Searches the client's own data across all existing modules for a given
- * question, scored and deduplicated by article.
- *
- * @param {string} question
- * @param {string} clientId
- * @param {string} industry
- * @param {number} limitPerModule - how many hits to pull per module before merging
- * @returns {Promise<Array>} matching chunks with payload (title, url, chunk_text, module_id, ...)
+ * Searches the client's own data across existing modules, with optional
+ * time-window filtering and module scoping.
  */
 async function retrieveClientData(question, clientId, industry, limitPerModule = 10, modules = null) {
-  const questionVector = await embedText(question);
+  const timeWindow = detectTimeWindow(question);
+  const topicQuery = stripTimeTokens(question);
+  const questionVector = await embedText(topicQuery);
 
-  // If the caller passed a specific set of modules, use that. Otherwise
-  // search all live modules (default behavior for Inference questions).
   const targetModules = (modules && modules.length) ? modules : LIVE_MODULE_IDS;
 
-  const allResults = [];
-  for (const moduleId of targetModules) {
-    const results = await qdrant.search(POLICY_COLLECTION, {
-      vector: questionVector,
-      limit: limitPerModule,
-      filter: {
-        must: [
-          { key: 'client_id', match: { value: clientId } },
-          { key: 'industry', match: { value: industry } },
-          { key: 'module_id', match: { value: moduleId } },
-        ],
-      },
-      with_payload: true,
-    });
-    allResults.push(...results);
+  // Window progression: requested window first (if any), then 30d, 90d,
+  // 365d, then no filter. The first window that returns any hits above
+  // the score floor wins.
+  const windowsToTry = timeWindow
+    ? [timeWindow.days, 30, 90, 365, null]
+    : [null];
+
+  let chosen = [];
+
+  for (const days of windowsToTry) {
+    const allResults = [];
+
+    for (const moduleId of targetModules) {
+      const must = [
+        { key: 'client_id', match: { value: clientId } },
+        { key: 'industry', match: { value: industry } },
+        { key: 'module_id', match: { value: moduleId } },
+      ];
+
+      if (days) {
+        const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        must.push({
+          key: 'published_date',
+          range: { gte: cutoff },
+        });
+      }
+
+      const results = await qdrant.search(POLICY_COLLECTION, {
+        vector: questionVector,
+        limit: limitPerModule,
+        filter: { must },
+        with_payload: true,
+      });
+      allResults.push(...results);
+    }
+
+    const filtered = allResults.filter(r => r.score >= 0.20);
+
+    if (filtered.length > 0) {
+      chosen = filtered;
+      if (timeWindow && days !== timeWindow.days) {
+        console.log(
+          `[retrieveClientData] No hits in "${timeWindow.label}" (${timeWindow.days}d), widened to ${days}d`
+        );
+      }
+      break;
+    }
   }
 
-  // Same relevance floor ragChat.js uses, then dedupe by article/title and
-  // sort by score so the strongest matches across all modules come first.
-  const filtered = allResults.filter(r => r.score >= 0.20);
+  // Dedupe by article/title and sort by score
   const seen = new Set();
   const deduped = [];
-  for (const r of filtered.sort((a, b) => b.score - a.score)) {
+  for (const r of chosen.sort((a, b) => b.score - a.score)) {
     const key = r.payload.url || r.payload.title;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -156,4 +216,11 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   return deduped;
 }
 
-module.exports = { retrieveClientData, embedText, LIVE_MODULE_IDS, detectTargetModules };
+module.exports = {
+  retrieveClientData,
+  embedText,
+  LIVE_MODULE_IDS,
+  detectTargetModules,
+  detectTimeWindow,   // exported for testing
+  stripTimeTokens,    // exported for testing
+};
