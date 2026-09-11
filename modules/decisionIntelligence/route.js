@@ -75,14 +75,18 @@ async function handleDecision(question, clientId, industry) {
     ? await retrieveForIntent(question, intent)
     : { chunks: [], facts: [] };
 
-  const { report, sources } = await generateAnswer(
+  const { report, sources, chart: autoChart, chartMeta: autoChartMeta } = await generateAnswer(
     question, intent, chunks, facts, clientId, industry
   );
 
-  // Chart only for the numeric path (qualitative/framework don't chart).
-  let chart = null;
-  let chartMeta = null;
-  if (intent.dataType === 'quantitative' && facts.length && intent.isChartable) {
+  // Chart priority:
+  //   1. Numeric path: chart from verified facts (highest priority)
+  //   2. Qualitative path: chart auto-derived from the report's table (if any)
+  //   3. No chart: just text
+  let chart = autoChart || null;
+  let chartMeta = autoChartMeta || null;
+
+  if (!chart && intent.dataType === 'quantitative' && facts.length && intent.isChartable) {
     try {
       const { decideChartFormat, renderChart } = require('./chartPipeline');
       const display = decideChartFormat(intent, facts);

@@ -34,6 +34,94 @@ const MODULE_NAMES = {
   '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'Market Dynamics',
   '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'Forward Outlook',
 };
+/**
+ * Given a report's key_movement_analysis table, try to find a column that
+ * has numeric values we can chart. Returns { type, title, dataKey, data }
+ * if a chartable column is found, or null otherwise.
+ *
+ * Heuristic rules:
+ *   - Skip column 0 (usually a label like "Channel" or "Market Segment")
+ *   - A column is chartable if >=2 of its cells parse as numbers
+ *   - Numbers can be: "$5B+", "+10%", "76%", "$13.3B", "-15%", "3.5", etc.
+ *   - Order of preference: $ amounts and % values first (they're more
+ *     meaningful visually than things like "3-6 months").
+ */
+function extractChartFromReport(report) {
+  const table = report?.key_movement_analysis;
+  if (!table?.columns || !table?.rows || table.rows.length < 2) return null;
+
+  const parseNumber = (raw) => {
+    if (raw === null || raw === undefined) return null;
+    const s = String(raw).trim();
+    // Handle "3-6 months" -> take the smaller number
+    const rangeMatch = s.match(/^(\d+(?:\.\d+)?)\s*[-–to]+\s*(\d+(?:\.\d+)?)/i);
+    if (rangeMatch) {
+      const a = parseFloat(rangeMatch[1]);
+      const b = parseFloat(rangeMatch[2]);
+      if (!isNaN(a) && !isNaN(b)) return Math.min(a, b);
+    }
+    const m = s.match(/-?\$?\s*([\d,]+(?:\.\d+)?)\s*([BMKbmk%])?/);
+    if (!m) return null;
+    let n = parseFloat(m[1].replace(/,/g, ''));
+    if (isNaN(n)) return null;
+    const suffix = (m[2] || '').toUpperCase();
+    if (suffix === 'B') n *= 1e9;
+    else if (suffix === 'M') n *= 1e6;
+    else if (suffix === 'K') n *= 1e3;
+    return { value: n, suffix };
+  };
+
+  // Try each column after the first, prefer $-columns and %-columns
+  let best = null;
+  for (let colIdx = 1; colIdx < table.columns.length; colIdx++) {
+    const cells = table.rows.map((r) => r.cells[colIdx]);
+    const parsed = cells.map(parseNumber);
+
+    const nonNull = parsed.filter((p) => p !== null);
+    if (nonNull.length < 2) continue;
+
+    // Require >= 50% of cells to be numeric
+    if (nonNull.length / cells.length < 0.5) continue;
+
+    // Require at least 2 distinct values, otherwise the chart is a flat line
+    const distinct = new Set(nonNull.map((p) => p.value));
+    if (distinct.size < 2) continue;
+
+    // Prefer $ or % columns (suffix present)
+    const hasSuffix = nonNull.some((p) => p.suffix === 'B' || p.suffix === 'M' || p.suffix === 'K' || p.suffix === '%');
+    const score = hasSuffix ? 2 : 1;
+
+    if (!best || score > best.score) {
+      best = {
+        score,
+        columnIdx: colIdx,
+        columnLabel: table.columns[colIdx],
+        xLabel: table.columns[0],
+        data: table.rows
+          .map((r, i) => ({
+            name: String(r.cells[0]).slice(0, 32),
+            value: parsed[i]?.value ?? null,
+          }))
+          .filter((d) => d.value !== null),
+      };
+    }
+  }
+
+  if (!best || best.data.length < 2) return null;
+
+  // Chart type: line if the first column looks like years, bar otherwise
+  const firstColValues = table.rows.map((r) => String(r.cells[0]));
+  const looksLikeYears = firstColValues.every((v) => /^(?:FY)?20\d{2}$/i.test(v.trim()));
+  const chartType = looksLikeYears ? 'line' : 'bar';
+
+  return {
+    type: chartType,
+    title: `${best.columnLabel} by ${best.xLabel}`,
+    dataKey: 'value',
+    unit: '',
+    data: best.data,
+  };
+}
 
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'risk_analysis', 'five_forces']);
 
@@ -278,7 +366,33 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
   }
 
   const sources = await resolveSources(citedIndices, sourceManifest);
-  return { report, sources };
+
+  // NEW: try to derive a chart from the report's table if possible.
+  // Priority: chart from table when numbers are present, otherwise no chart.
+  let chart = null;
+  let chartMeta = null;
+  try {
+    const chartSpec = extractChartFromReport(report);
+    if (chartSpec) {
+      const { renderChart } = require('./chartPipeline');
+      const buffer = await renderChart({
+        type: chartSpec.type,
+        xAxis: 'category',
+        metricLabel: chartSpec.title,
+        series: [{
+          name: chartSpec.title,
+          labels: chartSpec.data.map((d) => d.name),
+          data: chartSpec.data.map((d) => d.value),
+        }],
+      });
+      chart = buffer;
+      chartMeta = { chartType: chartSpec.type };
+    }
+  } catch (err) {
+    console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
+  }
+
+  return { report, sources, chart, chartMeta };
 }
 
 /**

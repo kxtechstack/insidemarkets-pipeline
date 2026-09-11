@@ -44,7 +44,7 @@ function buildNumericAnswer(facts) {
       .filter(f => f.ticker === ticker)
       .sort((a, b) => a.fiscal_year - b.fiscal_year || a.metric_name.localeCompare(b.metric_name));
 
-    if (tickers.length > 1) lines.push(`**${ticker}**`);
+    if (tickers.length > 1) lines.push(`\n### ${ticker}\n`);
 
     for (const f of tickerFacts) {
       const valueStr = (f.unit || 'USD') === 'USD'
