@@ -80,102 +80,91 @@ async function buildListAnswer(searchResults) {
     }
   }
 
-  // ---- Forward Outlook: join to trend_signals ----
-  if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
-    const ids = byModule[FORWARD_OUTLOOK_MODULE_ID].map(x => x.articleId);
-    const { data, error } = await supabase
-      .from('trend_signals')
-      .select('article_id, signal_title, sector, horizon_estimate, summary, source_article_url')
-      .in('article_id', ids);
-    if (error) throw error;
+  // ---- Forward Outlook: return individual signals + parent trend name ----
+if (byModule[FORWARD_OUTLOOK_MODULE_ID].length) {
+  const ids = byModule[FORWARD_OUTLOOK_MODULE_ID].map(x => x.articleId);
 
-    const byArticleId = new Map(data.map(row => [row.article_id, row]));
-    for (const { articleId } of byModule[FORWARD_OUTLOOK_MODULE_ID]) {
-      const row = byArticleId.get(articleId);
-      if (row) {
-        items.push({
-          title: row.signal_title,
-          category: row.sector,
-          impact: null, // trend_signals has no impact_level column
-          horizon: row.horizon_estimate,
-          summary: row.summary,
-          url: row.source_article_url,
-          module: 'Forward Outlook',
-        });
-      }
-    }
+  const { data: signals, error } = await supabase
+    .from('trend_signals')
+    .select('id, article_id, signal_title, sector, horizon_estimate, summary, source_article_url')
+    .in('article_id', ids);
+  if (error) throw error;
+
+  // Get trend membership for these signals
+  const signalIds = signals.map(s => s.id);
+  const { data: memberships } = await supabase
+    .from('trend_membership')
+    .select('signal_id, trend_id')
+    .in('signal_id', signalIds);
+
+  const trendIdBySignal = new Map((memberships || []).map(m => [m.signal_id, m.trend_id]));
+
+  // Get trend names
+  const trendIds = [...new Set((memberships || []).map(m => m.trend_id))];
+  const { data: trends } = trendIds.length
+    ? await supabase.from('trend_clusters').select('id, name').in('id', trendIds)
+    : { data: [] };
+
+  const trendNameById = new Map((trends || []).map(t => [t.id, t.name]));
+
+  for (const row of signals) {
+    const trendId = trendIdBySignal.get(row.id);
+    const trendName = trendId ? trendNameById.get(trendId) : null;
+
+    items.push({
+      id: row.id,
+      title: row.signal_title,
+      category: row.sector,
+      impact: null,
+      horizon: row.horizon_estimate,
+      summary: row.summary,
+      url: row.source_article_url,
+      module: 'Forward Outlook',
+      parentLabel: trendName ? `Trend: ${trendName}` : 'Not yet clustered',
+    });
   }
+}
 
-  // ---- Market Dynamics: article_id -> market_dynamics_signals -> insight_id ----
-  // ----                  -> market_insights_live (bundle card) ----
-  // ----                  -> market_insight_members (all sources in the bundle) ----
+    // ---- Market Dynamics: return individual signals + parent insight name ----
   if (byModule[MARKET_DYNAMICS_MODULE_ID].length) {
     const articleIds = byModule[MARKET_DYNAMICS_MODULE_ID].map(x => x.articleId);
 
-    // Step 1: article_id -> signal row (gives us insight_id per matched article)
+    // Get individual signal rows for the matched articles
     const { data: signalRows, error: sigErr } = await supabase
       .from('market_dynamics_signals')
-      .select('article_id, insight_id')
+      .select('id, article_id, insight_id, signal_title, summary, organization, country, source_url, published_date, category')
       .in('article_id', articleIds);
     if (sigErr) throw sigErr;
 
-    const insightIdByArticleId = new Map(signalRows.map(r => [r.article_id, r.insight_id]));
+    // Get parent insight (bundle) titles, just for the parentLabel display
+    const insightIds = [...new Set((signalRows || []).map(r => r.insight_id).filter(Boolean))];
+    const { data: insights } = insightIds.length
+      ? await supabase.from('market_insights_live').select('id, title').in('id', insightIds)
+      : { data: [] };
 
-    // Resolve to unique insight_ids -- this is the real dedup key for this module,
-    // since multiple matched articles can belong to the same bundle.
-    const uniqueInsightIds = [...new Set(insightIdByArticleId.values())].filter(Boolean);
+    const insightTitleById = new Map((insights || []).map(i => [i.id, i.title]));
 
-    if (uniqueInsightIds.length) {
-      // Step 2: insight_id -> the bundle-level card itself
-      const { data: insightRows, error: insErr } = await supabase
-        .from('market_insights_live')
-        .select('id, title, category, relevance_level, country, summary, short_summary')
-        .in('id', uniqueInsightIds);
-      if (insErr) throw insErr;
-      const insightById = new Map(insightRows.map(r => [r.id, r]));
+    // Dedupe by signal id
+    const seen = new Set();
+    for (const row of signalRows || []) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
 
-      // Step 3: insight_id -> every article_id in that bundle
-      const { data: memberRows, error: memErr } = await supabase
-        .from('market_insight_members')
-        .select('insight_id, article_id')
-        .in('insight_id', uniqueInsightIds);
-      if (memErr) throw memErr;
-
-      const memberArticleIdsByInsight = new Map();
-      for (const m of memberRows) {
-        if (!memberArticleIdsByInsight.has(m.insight_id)) memberArticleIdsByInsight.set(m.insight_id, []);
-        memberArticleIdsByInsight.get(m.insight_id).push(m.article_id);
-      }
-
-      // Step 4: every member article_id -> its source_url, so each card can list all its sources
-      const allMemberArticleIds = [...new Set(memberRows.map(m => m.article_id))];
-      const { data: urlRows, error: urlErr } = await supabase
-        .from('market_dynamics_signals')
-        .select('article_id, source_url')
-        .in('article_id', allMemberArticleIds);
-      if (urlErr) throw urlErr;
-      const urlByArticleId = new Map(urlRows.map(r => [r.article_id, r.source_url]));
-
-      // Build one item per unique insight_id (bundle), not per matched article
-      for (const insightId of uniqueInsightIds) {
-        const insight = insightById.get(insightId);
-        if (!insight) continue;
-
-        const memberArticleIds = memberArticleIdsByInsight.get(insightId) || [];
-        const urls = memberArticleIds
-          .map(aid => urlByArticleId.get(aid))
-          .filter(Boolean);
-
-        items.push({
-          title: insight.title,
-          category: insight.category,
-          impact: insight.relevance_level, // relevance_level standing in for impact, same Low/Medium/High shape as Policy & Risk
-          country: insight.country,
-          summary: insight.summary,
-          urls, // ARRAY -- a bundle can have multiple source articles, unlike Policy/Forward Outlook's single `url`
-          module: 'Market Dynamics',
-        });
-      }
+      items.push({
+        id: row.id,
+        title: row.signal_title,
+        category: row.category,
+        impact: null,
+        country: row.country,
+        summary: row.summary,
+        url: row.source_url,
+        organization: row.organization,
+        publishedDate: row.published_date,
+        module: 'Market Dynamics',
+        parentLabel: row.insight_id
+          ? `Insight: ${insightTitleById.get(row.insight_id) || '—'}`
+          : 'Not yet clustered',
+      });
     }
   }
 
