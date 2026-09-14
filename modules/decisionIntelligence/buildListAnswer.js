@@ -59,7 +59,7 @@ async function buildListAnswer(searchResults) {
     const ids = byModule[POLICY_MODULE_ID].map(x => x.articleId);
     const { data, error } = await supabase
       .from('policy_signals')
-      .select('article_id, signal_title, category, impact_level, country, summary, source_article_url')
+      .select('id, article_id, signal_title, category, impact_level, country, summary, source_article_url')
       .in('article_id', ids);
     if (error) throw error;
 
@@ -68,6 +68,7 @@ async function buildListAnswer(searchResults) {
       const row = byArticleId.get(articleId);
       if (row) {
         items.push({
+          id: row.id,
           title: row.signal_title,
           category: row.category,
           impact: row.impact_level,
