@@ -55,7 +55,16 @@ async function handleList(question, clientId, industry) {
  */
 async function handleInference(question, clientId, industry) {
   const searchResults = await retrieveClientData(question, clientId, industry);
-  const { report, sources } = await generateInferenceAnswer(question, searchResults);
+  const { report, sources, _empty, _reason } = await generateInferenceAnswer(question, searchResults);
+  if (_empty) {
+    return {
+      type: 'inference',
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: _reason || null,
+    };
+  }
   return { type: 'inference', report, sources };
 }
 
@@ -75,9 +84,23 @@ async function handleDecision(question, clientId, industry) {
     ? await retrieveForIntent(question, intent)
     : { chunks: [], facts: [] };
 
-  const { report, sources, chart: autoChart, chartMeta: autoChartMeta, clientContextCount } = await generateAnswer(
+  const { report, sources, chart: autoChart, chartMeta: autoChartMeta, clientContextCount, _empty, _reason } = await generateAnswer(
     question, intent, chunks, facts, clientId, industry
   );
+
+  // If generateAnswer flagged the answer as empty (e.g. LLM said no_data),
+  // short-circuit and let the caller show the "no data" redirect.
+  if (_empty) {
+    return {
+      type: 'decision',
+      report: null,
+      sources: [],
+      chart: null,
+      chartMeta: null,
+      _empty: true,
+      _reason: _reason || null,
+    };
+  }
 
   // Chart priority:
   //   1. Numeric path: chart from verified facts (highest priority)
@@ -231,6 +254,17 @@ function registerDecisionIntelligenceRoute(app) {
       // working questions. Only fires when the result is *truly* empty --
       // if the LLM produced any content (even a "no data" narrative),
       // we keep that instead of overriding it.
+      const NO_DATA_PATTERNS = [
+        /no (specific|relevant|publicly[\s-]?available|reported) (developments?|information|data|coverage|insights?)/i,
+        /context (lacks|does not contain|does not provide|provides no)/i,
+        /not documented in the (provided|given|available) context/i,
+        /no insights? (are|is) available/i,
+        /cannot (identify|determine|find|locate) (any )?(drivers|signals|information|developments?)/i,
+        /no relevant information/i,
+      ];
+      const textSaysNoData = (text) =>
+        typeof text === 'string' && NO_DATA_PATTERNS.some((p) => p.test(text));
+
       const isEmptyResult = (() => {
         if (!result) return true;
         if (result._empty) return true;
@@ -241,6 +275,13 @@ function registerDecisionIntelligenceRoute(app) {
 
         if (result.type === 'inference' || result.type === 'decision') {
           const r = result.report || {};
+
+          // If the LLM wrote a "no data" narrative, treat as empty.
+          const outlookText = Array.isArray(r.outlook) ? r.outlook.join(' ') : (r.outlook || '');
+          if (textSaysNoData(outlookText) || textSaysNoData(r.bodyText) || textSaysNoData(r.bottom_line)) {
+            return true;
+          }
+
           const hasTitle = Boolean(r.title && r.title.trim());
           const hasOutlook = Array.isArray(r.outlook)
             ? r.outlook.length > 0
@@ -283,7 +324,9 @@ function registerDecisionIntelligenceRoute(app) {
         }
 
         const reply =
-          "I don't have any information related to that in your data. Would you like to explore one of these instead?";
+          result._reason
+            ? `I don't have relevant data on that in your current dataset (${result._reason}). Would you like to explore one of these instead?`
+            : "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?";
 
         const enriched = {
           type: 'list',

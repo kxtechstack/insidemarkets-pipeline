@@ -366,6 +366,19 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
     }
   }
 
+    // If the LLM explicitly flagged that the retrieved context has no
+  // relevant information, treat the answer as empty so the caller can
+  // respond with the "no data" redirect.
+  if (report && report.no_data === true) {
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: report.reason || 'no relevant data',
+    };
+  }
+
+
   const sources = await resolveSources(citedIndices, sourceManifest);
 
   // NEW: try to derive a chart from the report's table if possible.

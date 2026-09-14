@@ -124,8 +124,10 @@ function resolveSources(citedIndices, sourceManifest) {
 async function generateInferenceAnswer(question, searchResults) {
   if (!searchResults.length) {
     return {
-      report: { title: question, outlook: ['No relevant data found for your question.'] },
+      report: null,
       sources: [],
+      _empty: true,
+      _reason: 'no signals matched the question',
     };
   }
 
@@ -191,6 +193,18 @@ async function generateInferenceAnswer(question, searchResults) {
         sources,
       };
     }
+  }
+
+  // If the LLM flagged the retrieved context as unrelated to the
+  // question, treat the answer as empty so the caller can show the
+  // "no relevant data" redirect.
+  if (report && report.no_data === true) {
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: report.reason || 'no relevant data',
+    };
   }
 
   const sources = resolveSources(citedIndices, sourceManifest);
