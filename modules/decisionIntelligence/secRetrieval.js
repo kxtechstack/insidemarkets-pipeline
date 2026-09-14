@@ -81,7 +81,7 @@ const TICKER_ALIASES = {
   INTEL: 'INTC', NVIDIA: 'NVDA', 'HOME DEPOT': 'HD',
 };
 
-const STOPWORD_TICKERS = new Set(['ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE', 'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END', 'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE', 'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL']);
+const STOPWORD_TICKERS = new Set(['ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE', 'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END', 'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE', 'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL', 'EXE', 'SEE', 'ME', 'MY', 'BY', 'DO', 'UP', 'OF', 'PAY', 'LIFE', 'LOVE', 'WORK', 'TIME', 'MOVE', 'NICE', 'FIRST', 'BEST', 'ONLY', 'SURE', 'ABLE', 'HOME', 'HELP', 'BACK', 'HOLD', 'MEET', 'TAKE', 'MAKE', 'GIVE', 'HAVE', 'KNOW', 'FIND', 'LOOK', 'WANT', 'NEED', 'TELL', 'SAY', 'GO', 'TO']);
 
 const GENERIC_FIRST_WORDS = new Set([
   'CAPITAL', 'AMERICAN', 'GENERAL', 'NATIONAL', 'GLOBAL', 'GROUP',
@@ -128,8 +128,20 @@ function extractTickers(question, lookup) {
   const names = [...lookup.keys()].sort((a, b) => b.length - a.length);
   for (const name of names) {
     if (STOPWORD_TICKERS.has(name)) continue;
-    const pattern = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
     const ticker = lookup.get(name);
+    // Only exact-match if the name is either:
+    //   (a) the full legal company name (contains a space), OR
+    //   (b) the actual ticker symbol (matches ticker exactly), OR
+    //   (c) a single-word name that appears CAPITALIZED in the question.
+    // This blocks lowercase business verbs like "expand"/"grow"/"buy"
+    // from matching companies whose first word happens to be the same,
+    // while still allowing "Expand Energy Corp" and "EXPAND" caps.
+    const isFullName = name.includes(' ');
+    const isTicker = name === ticker;
+    const capitalizedPattern = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);  // case-sensitive
+    if (!isFullName && !isTicker && !capitalizedPattern.test(question)) continue;
+
+    const pattern = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
     if (pattern.test(question) && !found.includes(ticker)) found.push(ticker);
   }
   if (found.length) return found;

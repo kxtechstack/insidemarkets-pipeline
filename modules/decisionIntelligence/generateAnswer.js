@@ -314,6 +314,7 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
       bodyText: cleanBody,
     },
     sources,
+    clientContextCount: (clientResults || []).length,
   };
 }
 
@@ -392,7 +393,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
     console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
   }
 
-  return { report, sources, chart, chartMeta };
+  return { report, sources, chart, chartMeta, clientContextCount: (clientResults || []).length };
 }
 
 /**
@@ -408,6 +409,7 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
         bodyText: text,
       },
       sources: [],
+      clientContextCount: 0,
     };
   }
 

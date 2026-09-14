@@ -75,7 +75,7 @@ async function handleDecision(question, clientId, industry) {
     ? await retrieveForIntent(question, intent)
     : { chunks: [], facts: [] };
 
-  const { report, sources, chart: autoChart, chartMeta: autoChartMeta } = await generateAnswer(
+  const { report, sources, chart: autoChart, chartMeta: autoChartMeta, clientContextCount } = await generateAnswer(
     question, intent, chunks, facts, clientId, industry
   );
 
@@ -106,7 +106,8 @@ async function handleDecision(question, clientId, industry) {
   const hadNoContext =
     (!chunks || chunks.length === 0) &&
     (!facts || facts.length === 0) &&
-    (!sources || sources.length === 0);
+    (!sources || sources.length === 0) &&
+    (!clientContextCount || clientContextCount === 0);
 
   if (hadNoContext) {
     console.log(
@@ -155,26 +156,50 @@ function registerDecisionIntelligenceRoute(app) {
         content: question,
       });
 
-            // 2b. Short-circuit trivial greetings / non-questions so we don't
-      // waste an LLM call (or hit a rate limit) on "hi", "thanks", etc.
-      const trimmed = question.trim();
-      const isGreeting = /^(hi+|hello+|hey+|yo|sup|thanks?|thank you|ok(ay)?|cool|nice|test(ing)?|help|good (morning|afternoon|evening))[\s!.,?]*$/i.test(trimmed);
-      if (isGreeting || trimmed.length < 3) {
-        const reply = 'Hi! Ask me a question about your market intelligence data to get started. For example: "What are the major policy changes in the last week?" or "Give me a SWOT analysis of Apple."';
+                  // 2b. LLM-driven intent classification: greeting / off_topic /
+      // clarification / market_intelligence. Replaces the hardcoded
+      // greeting regex. If not market_intelligence, respond with the
+      // LLM-generated message plus optional suggestions and skip the
+      // full pipeline.
+      const { classifyIntent } = require('./classifyIntent');
+      const intentResult = await classifyIntent(question);
+
+      if (intentResult.intent !== 'market_intelligence') {
+        // Fetch client's suggested questions to offer as next steps
+        let suggestions = [];
+        try {
+          const homeQs = await getSuggestedQuestions({
+            clientId,
+            surface: 'home',
+            industry,
+            companyName: null,
+          });
+          suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
+        } catch (err) {
+          console.log(`[DI intent] Failed to load suggestions: ${err.message}`);
+        }
+
+        const reply = intentResult.message
+          || 'Hey! Ask me a question about your market intelligence data to get started.';
+
+        const payload = {
+          type: 'list',
+          items: [],
+          greeting: intentResult.intent === 'greeting',
+          no_data: intentResult.intent === 'off_topic' || intentResult.intent === 'clarification',
+          message: reply,
+          suggestions,
+        };
+
         await appendMessage({
           conversationId,
           role: 'assistant',
           content: reply,
           type: 'list',
-          payload: { type: 'list', items: [], greeting: true },
+          payload,
         });
-        return res.json({
-          type: 'list',
-          items: [],
-          greeting: true,
-          message: reply,
-          conversationId,
-        });
+
+        return res.json({ ...payload, conversationId });
       }
 
       // 3. Classify (same as before)
