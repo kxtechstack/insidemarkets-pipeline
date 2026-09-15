@@ -117,8 +117,13 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     // Step 6 - LLM relevance classification + signal extraction
     // CHANGED: processQueueInBatches now takes moduleId before submoduleId
     const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
-    if (moduleId !== FORWARD_OUTLOOK_MODULE_ID && moduleId !== MARKET_DYNAMICS_MODULE_ID) {
-      await generateHighlight(clientId, moduleId);
+
+    // Unified daily snapshot — runs for ALL 3 modules
+    try {
+      const { buildDailySnapshot } = require('./dailySnapshotBuilder');
+      await buildDailySnapshot(clientId, moduleId, industry);
+    } catch (snapErr) {
+      console.error(`[Pipeline] Daily snapshot generation failed (non-fatal): ${snapErr.message}`);
     }
     await updateJobStage(jobId, 'llm_processing', {
       afterLlm: llmResult.relevant,

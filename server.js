@@ -542,6 +542,64 @@ app.get('/schedules/client/:clientId', async (req, res) => {
   res.json({ schedule: data || null });
 });
 
+// ── Daily module snapshots (unified card for MD / Policy / FO) ──
+app.get('/daily-snapshot/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { moduleId, date } = req.query;
+
+    // Default to today's IST date
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(Date.now() + IST_OFFSET_MS);
+    const istToday = new Date(Date.UTC(
+      istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()
+    )).toISOString().slice(0, 10);
+
+    const targetDate = date || istToday;
+
+    let query = supabaseClient
+      .from('daily_module_snapshots')
+      .select('*')
+      .eq('client_id', clientId)
+      .eq('snapshot_date', targetDate);
+
+    if (moduleId) query = query.eq('module_id', moduleId);
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ snapshots: data || [], date: targetDate });
+  } catch (err) {
+    console.error('[DailySnapshot] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Fallback: latest available snapshot (for when today's run hasn't fired yet)
+app.get('/daily-snapshot-latest/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { moduleId } = req.query;
+
+    let query = supabaseClient
+      .from('daily_module_snapshots')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('snapshot_date', { ascending: false })
+      .limit(3);
+
+    if (moduleId) query = query.eq('module_id', moduleId);
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ snapshots: data || [] });
+  } catch (err) {
+    console.error('[DailySnapshotLatest] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 3000;
 registerDecisionIntelligenceRoute(app);
