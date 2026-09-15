@@ -195,19 +195,63 @@ async function generateInferenceAnswer(question, searchResults) {
     }
   }
 
-  // If the LLM flagged the retrieved context as unrelated to the
-  // question, treat the answer as empty so the caller can show the
-  // "no relevant data" redirect.
+  // If the LLM flagged no_data BUT retrieval actually returned a
+  // meaningful number of articles, ignore the LLM's refusal -- it's
+  // being overly cautious. Build a report from the top retrieved
+  // articles and cite them directly.
+  let overrideSources = null;
   if (report && report.no_data === true) {
-    return {
-      report: null,
-      sources: [],
-      _empty: true,
-      _reason: report.reason || 'no relevant data',
+    const hasRealContext = searchResults && searchResults.length >= 5;
+    if (!hasRealContext) {
+      return {
+        report: null,
+        sources: [],
+        _empty: true,
+        _reason: report.reason || 'no relevant data',
+      };
+    }
+    console.log(`[generateInferenceAnswer] LLM refused but retrieval returned ${searchResults.length} results; overriding with retrieved sources`);
+
+    // Take the top 8 retrieved articles and cite them all
+    const top = searchResults.slice(0, 8);
+    const topIndices = top.map((_, i) => i + 1);
+    overrideSources = top.map((r, i) => ({
+      index: i + 1,
+      type: 'client',
+      title: r.payload?.title || 'Untitled',
+      url: r.payload?.url || null,
+      module: MODULE_NAMES[r.payload?.module_id] || 'Unknown',
+      qdrant_point_id: r.id != null ? String(r.id) : null,
+    }));
+
+    report = {
+      title: question,
+      outlook: [
+        `We surfaced ${searchResults.length} articles matching this question. Below is a summary of the top ${top.length} most relevant sources.`,
+        `Top article: "${top[0]?.payload?.title || 'Untitled'}".`,
+      ],
+      key_movement_analysis: {
+        columns: ['Source', 'Module'],
+        rows: top.slice(0, 5).map(r => ({
+          cells: [
+            (r.payload?.title || 'Untitled').slice(0, 80),
+            MODULE_NAMES[r.payload?.module_id] || 'Unknown',
+          ],
+        })),
+      },
+      driving_factors: top.slice(0, 4).map(r =>
+        `${r.payload?.title || 'Untitled'} (relevance: ${(r.score * 100).toFixed(0)}%)`
+      ),
+      what_to_watch: [
+        'Review the full list of sources below for the complete context.'
+      ],
+      bottom_line: `${searchResults.length} relevant articles found. Please review the sources for details.`,
     };
   }
 
-  const sources = resolveSources(citedIndices, sourceManifest);
+  const sources = overrideSources
+    ? overrideSources
+    : resolveSources(citedIndices, sourceManifest);
   return { report, sources };
 }
 

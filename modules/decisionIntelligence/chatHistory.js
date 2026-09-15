@@ -47,6 +47,7 @@ async function listConversations({ userId, limit = 100 }) {
     .from('di_conversations')
     .select('id, title, created_at, updated_at')
     .eq('user_id', userId)
+    .is('deleted_at', null)                       // hide soft-deleted
     .order('updated_at', { ascending: false })
     .limit(limit);
   if (error) throw error;
@@ -59,6 +60,7 @@ async function loadConversation({ conversationId, userId }) {
     .select('id, title, created_at, updated_at')
     .eq('id', conversationId)
     .eq('user_id', userId)          // ownership check
+    .is('deleted_at', null)         // hide soft-deleted
     .single();
   if (cErr || !convo) throw new Error('Conversation not found');
 
@@ -72,13 +74,41 @@ async function loadConversation({ conversationId, userId }) {
   return { conversation: convo, messages: messages || [] };
 }
 
+/**
+ * Soft-delete: hide the conversation from the user, but preserve their
+ * QUESTIONS for analytics. Wipes assistant ANSWERS (content + payload).
+ * The row itself stays so we can count "how many users deleted this".
+ *
+ *  - di_conversations.deleted_at = now()      (hides from list + load)
+ *  - di_messages where role='assistant'       (content = NULL, payload = NULL)
+ *  - di_messages where role='user'            (untouched)
+ */
 async function deleteConversation({ conversationId, userId }) {
-  const { error } = await supabase
+  // Verify ownership first
+  const { data: convo, error: fetchErr } = await supabase
     .from('di_conversations')
-    .delete()
+    .select('id')
     .eq('id', conversationId)
-    .eq('user_id', userId);          // ownership check
-  if (error) throw error;
+    .eq('user_id', userId)
+    .is('deleted_at', null)
+    .single();
+  if (fetchErr || !convo) throw new Error('Conversation not found');
+
+  // 1. Soft-delete the conversation (hide from user)
+  const { error: updErr } = await supabase
+    .from('di_conversations')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', conversationId)
+    .eq('user_id', userId);
+  if (updErr) throw updErr;
+
+  // 2. Wipe assistant message content + payload, keep user messages
+  const { error: msgErr } = await supabase
+    .from('di_messages')
+    .update({ content: null, payload: null })
+    .eq('conversation_id', conversationId)
+    .eq('role', 'assistant');
+  if (msgErr) throw msgErr;
 }
 
 // --- Suggested questions -------------------------------------------------

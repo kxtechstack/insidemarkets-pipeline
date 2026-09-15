@@ -161,7 +161,13 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
     ? [timeWindow.days, 30, 90, 365, null]
     : [null];
 
-  let chosen = [];
+  // Keep widening until we have at least this many results, OR we've
+  // tried every window. Prevents "past week" from returning 1-2 items
+  // when the corpus has plenty of older, still-relevant material.
+  const MIN_RESULTS_TO_STOP_WIDENING = 5;
+
+  let bestAttempt = [];
+  let bestWindowDays = null;
 
   for (const days of windowsToTry) {
     const allResults = [];
@@ -192,16 +198,27 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
 
     const filtered = allResults.filter(r => r.score >= 0.20);
 
-    if (filtered.length > 0) {
-      chosen = filtered;
-      if (timeWindow && days !== timeWindow.days) {
-        console.log(
-          `[retrieveClientData] No hits in "${timeWindow.label}" (${timeWindow.days}d), widened to ${days}d`
-        );
-      }
+    // Remember the richest attempt so far
+    if (filtered.length > bestAttempt.length) {
+      bestAttempt = filtered;
+      bestWindowDays = days;
+    }
+
+    // Stop as soon as we have enough results
+    if (filtered.length >= MIN_RESULTS_TO_STOP_WIDENING) {
+      bestAttempt = filtered;
+      bestWindowDays = days;
       break;
     }
   }
+
+  if (timeWindow && bestWindowDays !== timeWindow.days) {
+    console.log(
+      `[retrieveClientData] Window "${timeWindow.label}" (${timeWindow.days}d) returned < ${MIN_RESULTS_TO_STOP_WIDENING} hits; widened to ${bestWindowDays || 'no filter'}`
+    );
+  }
+
+  const chosen = bestAttempt;
 
   // Dedupe by article/title and sort by score
   const seen = new Set();
