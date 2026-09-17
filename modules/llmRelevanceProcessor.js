@@ -324,19 +324,37 @@ const formatScopeForPrompt = (enabledSignals) => {
 // (hallucinated or drifted), mark irrelevant instead of storing it silently
 // under an unmonitored signal.
 const applyMonitoringScopeValidation = (classification, enabledSignals) => {
+  // Case 1: Client has no enabled signals at all → genuinely irrelevant
   if (enabledSignals.length === 0) {
     console.log(`  [MonitoringScope] Client has 0 enabled signals — marking irrelevant`);
     return { ...classification, is_relevant: false, reason: 'No signals enabled in client monitoring scope' };
   }
 
-  const match = enabledSignals[classification.signal_number - 1];
-
-  if (!classification.signal_number || !match) {
-    console.log(`  [MonitoringScope] signal_number ${classification.signal_number} is not a valid enabled signal — marking irrelevant`);
-    return { ...classification, is_relevant: false, reason: 'Signal not in client monitoring scope' };
+  // Case 2: LLM said irrelevant → trust it, don't touch
+  if (!classification.is_relevant) {
+    return classification;
   }
 
-  return { ...classification, signal_id: match.signal_id, submodule_id: match.submodule_id };
+  // Case 3: LLM said relevant AND gave a valid signal_number → use it
+  const idx = Number.isInteger(classification.signal_number) ? classification.signal_number - 1 : -1;
+  if (idx >= 0 && idx < enabledSignals.length) {
+    const match = enabledSignals[idx];
+    return { ...classification, signal_id: match.signal_id, submodule_id: match.submodule_id };
+  }
+
+  // Case 4: LLM said relevant but signal_number is 0 / missing / out of range.
+  // DO NOT discard. Try to salvage a match by name, otherwise fall back to
+  // the first enabled submodule so the article still surfaces on the dashboard.
+  const searchText = `${classification.signal_title || ''} ${classification.summary || ''} ${classification.topic_summary || ''}`.toLowerCase();
+  const substringMatch = enabledSignals.find(s => searchText.includes((s.signal_name || '').toLowerCase()));
+
+  if (substringMatch) {
+    console.log(`  [MonitoringScope] signal_number=${classification.signal_number} — rescued via name substring match: "${substringMatch.signal_name}"`);
+    return { ...classification, signal_id: substringMatch.signal_id, submodule_id: substringMatch.submodule_id };
+  }
+
+  console.log(`  [MonitoringScope] signal_number=${classification.signal_number} — no match found, keeping relevant with fallback submodule`);
+  return { ...classification, signal_id: null, submodule_id: enabledSignals[0].submodule_id };
 };
 
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
