@@ -143,10 +143,10 @@ app.post('/run', async (req, res) => {
 });
 
 app.post('/schedules', async (req, res) => {
-  const { clientId, moduleId, source, frequency, scheduleTime, isActive } = req.body;
+  const { clientId, submoduleId, source, frequency, scheduleTime, isActive } = req.body;
 
-  if (!clientId || !moduleId) {
-    return res.status(400).json({ error: 'clientId and moduleId are required' });
+  if (!clientId || !submoduleId) {
+    return res.status(400).json({ error: 'clientId and submoduleId are required' });
   }
 
   const updatePayload = {
@@ -163,21 +163,20 @@ app.post('/schedules', async (req, res) => {
     .from('prompts')
     .update(updatePayload)
     .eq('client_id', clientId)
-    .eq('module_id', moduleId)
+    .eq('submodule_id', submoduleId)
     .select();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ updatedCount: data.length, schedule: data[0] || null });
+  res.json({ schedule: data[0] || null });
 });
 
-app.get('/schedules/:clientId/:moduleId', async (req, res) => {
+app.get('/schedules/:clientId/:submoduleId', async (req, res) => {
   const { data, error } = await supabaseClient
     .schema('admin')
     .from('prompts')
     .select('source, frequency, schedule_time, is_active')
     .eq('client_id', req.params.clientId)
-    .eq('module_id', req.params.moduleId)
-    .limit(1)
+    .eq('submodule_id', req.params.submoduleId)
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
