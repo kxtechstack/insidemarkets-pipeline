@@ -88,6 +88,23 @@ const CHUNK_SIZE = Number(process.env.CHUNK_SIZE) || 300;
 const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP) || 50;
 const TEXT_TRUNCATE_LENGTH = Number(process.env.LLM_TEXT_TRUNCATE_LENGTH) || 5000;
 
+// NEW: Circuit breaker -- stop trying more articles if this many
+// consecutive articles fail at the LLM stage. Prevents burning through
+// the rest of the queue with 5-min timeouts when the rate limit is
+// clearly going to keep failing.
+const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.CIRCUIT_BREAKER_THRESHOLD) || 3;
+
+// NEW: Custom error type thrown when the circuit breaker trips.
+// Callers can catch this specifically to distinguish "we're rate-limited"
+// from "something is actually broken."
+class RateLimitAbortError extends Error {
+  constructor(message, unprocessedArticles = []) {
+    super(message);
+    this.name = 'RateLimitAbortError';
+    this.unprocessedArticles = unprocessedArticles;
+  }
+}
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // NEW: Retries a Qdrant/network operation up to 3 times with backoff,
@@ -954,6 +971,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   let relevantCount = 0;
   let irrelevantCount = 0;
 
+  // NEW: track consecutive LLM failures so we can abort early when the
+  // rate limit is clearly going to keep failing every article.
+  let consecutiveTechnicalFailures = 0;
+
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
@@ -1014,6 +1035,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         irrelevantCount++;
         console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
       }
+
+      // Any successful classification (relevant OR irrelevant) resets
+      // the consecutive-failure counter -- the LLM is clearly working.
+      consecutiveTechnicalFailures = 0;
     } catch (articleErr) {
       // NEW: catches anything that throws mid-processing (e.g. storeRelevantArticle's
       // embedding/Qdrant/Supabase calls) so this article always gets logged instead of
@@ -1027,6 +1052,21 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         console.error(`  [!] Also failed to log the error for "${article.title}": ${logErr.message}`);
       }
       irrelevantCount++;
+
+      // NEW: circuit breaker -- if the LLM has failed N times in a row,
+      // stop trying the remaining articles. They'd just waste time on a
+      // rate-limited LLM. The unprocessed articles are returned so the
+      // caller can re-queue them.
+      consecutiveTechnicalFailures++;
+      if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+        const failedIndex = articles.indexOf(article);
+        const unprocessed = articles.slice(failedIndex); // includes this article
+        console.log(`  [CircuitBreaker] ${consecutiveTechnicalFailures} consecutive failures — aborting batch. ${unprocessed.length} article(s) left unprocessed.`);
+        throw new RateLimitAbortError(
+          `${consecutiveTechnicalFailures} consecutive LLM failures`,
+          unprocessed
+        );
+      }
     }
 
     await refreshLock(clientId, submoduleId);
@@ -1055,6 +1095,26 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
     try {
       result = await processArticlesForRelevance(batch, clientId, industry, jobId, moduleId, submoduleId);
     } catch (batchErr) {
+      // NEW: circuit breaker abort -- stop the whole batch loop and hand
+      // control back to pipelineRunner, which will pause the job and let
+      // the rate-limit watcher resume it later.
+      if (batchErr.name === 'RateLimitAbortError') {
+        console.log(`[LLMProcessor] Circuit breaker tripped — aborting batch processing.`);
+        // Re-queue this batch's unprocessed articles so a future resume
+        // picks them up.
+        const { redis } = require('./queueManager');
+        for (const article of (batchErr.unprocessedArticles || [])) {
+          await redis.rpush(queueKey, JSON.stringify(article));
+        }
+        return {
+          relevant: totalRelevant,
+          irrelevant: totalIrrelevant,
+          aborted: true,
+          reason: batchErr.message,
+        };
+      }
+
+      // Any other error: keep the old behavior (skip this batch, continue)
       console.error(`[LLMProcessor] Batch ${batchNumber} failed, skipping to next batch: ${batchErr.message}`);
       remaining = await getProcessedQueueLength(queueKey);
       batchNumber++;
@@ -1069,7 +1129,7 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
   }
 
   console.log(`\n[LLMProcessor] ALL BATCHES DONE. Total relevant: ${totalRelevant}, Total irrelevant: ${totalIrrelevant}`);
-  return { relevant: totalRelevant, irrelevant: totalIrrelevant };
+  return { relevant: totalRelevant, irrelevant: totalIrrelevant, aborted: false };
 }
 
 // NEW: moved here from server.js so both the manual /retry-failed route
@@ -1211,6 +1271,7 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
 module.exports = {
   processArticlesForRelevance,
   processQueueInBatches,
+  RateLimitAbortError, // NEW: so processQueueInBatches and callers can identify it
   setupPolicyCollection, // CHANGED: exported so ragChat.js can also ensure indexes exist
   classifyArticle,       // TEMP: exported for manual testing
   getClientContext,      // TEMP: exported for manual testing

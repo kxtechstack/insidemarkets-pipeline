@@ -19,6 +19,8 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
   try {
 
     await startJobTracking(jobId, clientId, promptText, submoduleId);
+    const { recordJobContext } = require('./jobStatusTracker');
+    await recordJobContext(jobId, industry, moduleId);
     await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
     currentStage = 'fetching'; // CHANGED
 
@@ -117,6 +119,40 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     // Step 6 - LLM relevance classification + signal extraction
     // CHANGED: processQueueInBatches now takes moduleId before submoduleId
     const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
+
+    // NEW: circuit breaker abort -- LLM failed N times in a row, so we
+    // stopped trying. Pause the job (don't mark complete) and let the
+    // rate-limit watcher resume it later. The Redis processed-queue still
+    // holds the unprocessed articles; extend its TTL to survive the pause.
+    if (llmResult.aborted) {
+      const BACKOFF_MINUTES = [60, 360, 720, 720]; // 1h, 6h, 12h, 12h
+      const { getJobResumeAttempts, markJobPaused } = require('./jobStatusTracker');
+      const existingAttempts = await getJobResumeAttempts(jobId);
+      const backoffIdx = Math.min(existingAttempts, BACKOFF_MINUTES.length - 1);
+      const backoffMin = BACKOFF_MINUTES[backoffIdx];
+      const resumeAt = new Date(Date.now() + backoffMin * 60 * 1000).toISOString();
+
+      await setStatus(jobId, {
+        status: 'paused_rate_limited',
+        total: sorted.length,
+        afterLlmRelevant: llmResult.relevant,
+        afterLlmIrrelevant: llmResult.irrelevant,
+        message: `LLM rate limited — paused. Will resume in ${backoffMin} min (attempt ${existingAttempts + 1}).`,
+      });
+
+      await markJobPaused(jobId, {
+        reason: llmResult.reason || 'Circuit breaker tripped',
+        resumeAt,
+      });
+
+      // Extend the Redis queue TTL so unprocessed articles survive the pause.
+      const { redis } = require('./queueManager');
+      await redis.expire(processedQueueKey, 7 * 24 * 60 * 60);
+
+      console.log(`Pipeline PAUSED (rate limited): ${jobId}. Resume at ${resumeAt} (attempt ${existingAttempts + 1}).`);
+
+      return; // do NOT markFullyCompleted
+    }
 
     // Unified daily snapshot — runs for ALL 3 modules
     try {

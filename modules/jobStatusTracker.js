@@ -103,10 +103,49 @@ const failJobTracking = async (jobId, stage, errorMessage) => {
   }).eq('job_id', jobId);
 };
 
+// NEW: read the current resume_attempts count for a paused job.
+// Used by pipelineRunner to pick the next backoff interval.
+const getJobResumeAttempts = async (jobId) => {
+  const { data, error } = await supabase
+    .from(TABLE_NAME)
+    .select('resume_attempts')
+    .eq('job_id', jobId)
+    .single();
+  if (error) return 0;
+  return data?.resume_attempts || 0;
+};
+
+// NEW: mark a job as paused due to rate limiting. Sets status, resume_at,
+// paused_reason, and increments resume_attempts by 1. The rate-limit
+// watcher (Stage 4) will find jobs where resume_at <= now() and resume them.
+const markJobPaused = async (jobId, { reason, resumeAt }) => {
+  const currentAttempts = await getJobResumeAttempts(jobId);
+
+  await supabase.from(TABLE_NAME).update({
+    status: 'paused_rate_limited',
+    resume_at: resumeAt,
+    paused_reason: reason,
+    resume_attempts: currentAttempts + 1,
+    updated_at: new Date().toISOString(),
+  }).eq('job_id', jobId);
+};
+
+// NEW: record the job's industry + module_id on the row so the resume
+// path (Stage 4) can rebuild context without re-deriving it.
+const recordJobContext = async (jobId, industry, moduleId) => {
+  await supabase.from(TABLE_NAME).update({
+    industry,
+    module_id: moduleId,
+  }).eq('job_id', jobId);
+};
+
 module.exports = {
   startJobTracking,
   updateJobStage,
   completeJobTracking,
   markFullyCompleted,
   failJobTracking,
+  getJobResumeAttempts,
+  markJobPaused,
+  recordJobContext,
 };
