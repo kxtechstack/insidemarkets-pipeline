@@ -107,6 +107,21 @@ class RateLimitAbortError extends Error {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// NEW: Hard cap on how long a single article's LLM classification (including
+// all internal retries and retry-after sleeps) is allowed to run. If it
+// exceeds this, the article is treated as a technical failure and the loop
+// moves on. Failed articles are NOT committed to dedup, so they stay
+// retryable on a later run.
+const PER_ARTICLE_TIMEOUT_MS = Number(process.env.PER_ARTICLE_TIMEOUT_MS) || 5 * 60 * 1000;
+
+const withTimeout = (promise, ms, label) => {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout after ${ms}ms (${label})`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+};
+
 // NEW: Retries a Qdrant/network operation up to 3 times with backoff,
 // so a single transient timeout doesn't crash the entire batch run.
 const retryWithBackoff = async (fn, label, maxRetries = 3) => {
@@ -979,9 +994,13 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
     try {
-      let classification = await classifyArticle(
-        promptTemplate, industry, article, clientContext, moduleId,
-        moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
+      let classification = await withTimeout(
+        classifyArticle(
+          promptTemplate, industry, article, clientContext, moduleId,
+          moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
+        ),
+        PER_ARTICLE_TIMEOUT_MS,
+        `classify "${(article.title || '').slice(0, 60)}"`
       );
       classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
       classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);

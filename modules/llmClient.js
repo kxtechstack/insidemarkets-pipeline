@@ -62,11 +62,25 @@ const callLLM = async (messages, options = {}) => {
 
       if (status === 429 && attempt < maxRetries) {
         const retryAfterHeader = err.response.headers['retry-after'];
-        const waitMs = retryAfterHeader
+        const rawWaitMs = retryAfterHeader
           ? Number(retryAfterHeader) * 1000
           : attempt * 5000; // fallback: 5s, 10s, 15s...
 
-        console.log(`  [llmClient] 429 rate limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`);
+        // Cap the wait. Groq sometimes returns retry-after values in the
+        // hundreds or thousands of seconds (e.g. 426000ms = 7 minutes).
+        // Sleeping that long blocks the pipeline and prevents the circuit
+        // breaker from ever firing. If Groq asks for more than 60s, we give
+        // up on this attempt -- the article will be marked 'failed' by the
+        // caller and picked up again on the next pipeline run (it's not
+        // committed to dedup, thanks to the commit-on-success fix).
+        const MAX_RETRY_WAIT_MS = 60 * 1000;
+        const waitMs = Math.min(rawWaitMs, MAX_RETRY_WAIT_MS);
+
+        if (rawWaitMs > MAX_RETRY_WAIT_MS) {
+          console.log(`  [llmClient] 429 rate limited, Groq asked for ${rawWaitMs}ms (${Math.round(rawWaitMs/1000)}s) — capping at ${MAX_RETRY_WAIT_MS}ms (attempt ${attempt}/${maxRetries})`);
+        } else {
+          console.log(`  [llmClient] 429 rate limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`);
+        }
         await sleep(waitMs);
         continue;
       }
