@@ -221,4 +221,110 @@ const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleI
   return jobId;
 };
 
-module.exports = { runPipeline, triggerPipelineRun };
+// NEW (Stage 4): resume a paused_rate_limited job. Skips fetch/dedup/quality
+// filter entirely and jumps straight back into LLM processing using the
+// Redis processed-queue that was left intact when the job paused.
+const resumePipelineRun = async (jobId) => {
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  const { data: job, error } = await supabase
+    .from('pipeline_job_status')
+    .select('*')
+    .eq('job_id', jobId)
+    .single();
+
+  if (error || !job) {
+    console.error(`[Resume] Job ${jobId} not found: ${error?.message}`);
+    return;
+  }
+
+  if (job.status !== 'paused_rate_limited') {
+    console.log(`[Resume] Job ${jobId} is not paused (status: ${job.status}), skipping`);
+    return;
+  }
+
+  // Cap: if we've already resumed N times, give up.
+  const MAX_RESUME_ATTEMPTS = 4;
+  if ((job.resume_attempts || 0) > MAX_RESUME_ATTEMPTS) {
+    console.log(`[Resume] Job ${jobId} exceeded max resume attempts (${MAX_RESUME_ATTEMPTS}). Marking permanently failed.`);
+    await supabase.from('pipeline_job_status').update({
+      status: 'permanently_failed',
+      error_message: `Rate limit persisted after ${MAX_RESUME_ATTEMPTS} resume attempts`,
+      updated_at: new Date().toISOString(),
+    }).eq('job_id', jobId);
+    return;
+  }
+
+  const processedQueueKey = job.processed_queue_key;
+  if (!processedQueueKey) {
+    console.error(`[Resume] Job ${jobId} missing processed_queue_key, cannot resume`);
+    await supabase.from('pipeline_job_status').update({
+      status: 'failed',
+      error_message: 'Missing processed_queue_key',
+      updated_at: new Date().toISOString(),
+    }).eq('job_id', jobId);
+    return;
+  }
+
+  const { setStatus } = require('./queueManager');
+  const { processQueueInBatches } = require('./llmRelevanceProcessor');
+  const { markFullyCompleted, failJobTracking, getJobResumeAttempts, markJobPaused } = require('./jobStatusTracker');
+
+  console.log(`[Resume] Job ${jobId} — resuming (attempt ${(job.resume_attempts || 0) + 1}/${MAX_RESUME_ATTEMPTS})`);
+
+  await setStatus(jobId, {
+    status: 'llm_processing',
+    message: `Resuming after rate limit (attempt ${(job.resume_attempts || 0) + 1})...`,
+  });
+
+  try {
+    const llmResult = await processQueueInBatches(
+      processedQueueKey,
+      job.client_id,
+      job.industry || 'General',
+      jobId,
+      job.module_id,
+      job.submodule_id
+    );
+
+    if (llmResult.aborted) {
+      // Still rate-limited. Re-pause with the next backoff.
+      const BACKOFF_MINUTES = [60, 360, 720, 720];
+      const attempts = await getJobResumeAttempts(jobId);
+      const backoffIdx = Math.min(attempts, BACKOFF_MINUTES.length - 1);
+      const backoffMin = BACKOFF_MINUTES[backoffIdx];
+      const resumeAt = new Date(Date.now() + backoffMin * 60 * 1000).toISOString();
+
+      await setStatus(jobId, {
+        status: 'paused_rate_limited',
+        message: `Still rate limited — re-paused. Will resume in ${backoffMin} min (attempt ${attempts + 1}).`,
+      });
+      await markJobPaused(jobId, {
+        reason: llmResult.reason || 'Still rate limited on resume',
+        resumeAt,
+      });
+
+      // Extend queue TTL again
+      const { redis } = require('./queueManager');
+      await redis.expire(processedQueueKey, 7 * 24 * 60 * 60);
+
+      console.log(`[Resume] Job ${jobId} still rate limited — re-paused until ${resumeAt}`);
+      return;
+    }
+
+    // Success!
+    await setStatus(jobId, {
+      status: 'completed',
+      message: `Resumed and completed. ${llmResult.relevant} relevant, ${llmResult.irrelevant} irrelevant.`,
+    });
+    await markFullyCompleted(jobId);
+    console.log(`[Resume] Job ${jobId} completed after resume. Relevant: ${llmResult.relevant}, Irrelevant: ${llmResult.irrelevant}`);
+
+  } catch (err) {
+    console.error(`[Resume] Job ${jobId} threw during resume: ${err.message}`);
+    await failJobTracking(jobId, 'resume', err.message);
+  }
+};
+
+module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun };

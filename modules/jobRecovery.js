@@ -167,9 +167,53 @@ const startFailedArticleWatcher = (intervalMinutes = 24 * 60) => {
   }, intervalMinutes * 60 * 1000);
 };
 
+// NEW (Stage 4): watches for paused_rate_limited jobs whose resume_at has
+// passed, and resumes them. Runs every 5 minutes by default. This is what
+// completes the pause/resume cycle -- without it, paused jobs would sit
+// forever until the next scheduled pipeline run.
+const startRateLimitResumeWatcher = (intervalMinutes = 5) => {
+  console.log(`[JobRecovery] Starting rate-limit resume watcher (checks every ${intervalMinutes}min)`);
+
+  setInterval(async () => {
+    try {
+      const now = new Date().toISOString();
+
+      const { data: pausedJobs, error } = await supabase
+        .from('pipeline_job_status')
+        .select('job_id, resume_attempts, resume_at')
+        .eq('status', 'paused_rate_limited')
+        .lte('resume_at', now)
+        .order('resume_at', { ascending: true })
+        .limit(5); // process up to 5 at a time per tick
+
+      if (error) {
+        console.log('[RateLimitWatcher] Query error:', error.message);
+        return;
+      }
+
+      if (!pausedJobs || pausedJobs.length === 0) return;
+
+      console.log(`[RateLimitWatcher] Found ${pausedJobs.length} paused job(s) ready to resume`);
+
+      const { resumePipelineRun } = require('./pipelineRunner');
+
+      for (const job of pausedJobs) {
+        try {
+          await resumePipelineRun(job.job_id);
+        } catch (err) {
+          console.error(`[RateLimitWatcher] Resume failed for ${job.job_id}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.error('[RateLimitWatcher] Unhandled error:', err.message);
+    }
+  }, intervalMinutes * 60 * 1000);
+};
+
 module.exports = {
   detectStaleJobs,
   startStaleJobWatcher,
   sweepFailedArticles,
   startFailedArticleWatcher,
+  startRateLimitResumeWatcher,
 };

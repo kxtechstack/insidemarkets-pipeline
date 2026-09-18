@@ -21,7 +21,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
-const { startStaleJobWatcher, startFailedArticleWatcher } = require('./modules/jobRecovery');
+const { startStaleJobWatcher, startFailedArticleWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
 const { registerDecisionIntelligenceRoute } = require('./modules/decisionIntelligence/route');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
@@ -615,5 +615,6 @@ app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
   startFailedArticleWatcher(60); // every 1h, capped at 30min per sweep
+  startRateLimitResumeWatcher(5); // every 5min, checks for paused jobs ready to resume
   startScheduler();
 });
