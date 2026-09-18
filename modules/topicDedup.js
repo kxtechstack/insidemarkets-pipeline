@@ -14,8 +14,9 @@
  *   2. Search Qdrant's "dedup_titles" collection for similar vectors,
  *      filtered by client_id + module_id and a 60-day recency window
  *   3. If a close match is found -> it's the same story, drop it
- *   4. If not -> keep it, and immediately store its embedding in Qdrant
- *      so later articles (this batch or future runs) can be compared to it
+ *   4. If not -> keep it. The embedding is NOT stored here anymore.
+ *      The caller must call commitTopicSeen() once the article has been
+ *      fully handled, so future runs can compare against it.
  *
  * This collection ("dedup_titles") is SEPARATE from your RAG collection.
  * It only stores title-level vectors for dedup purposes, not full article
@@ -206,36 +207,51 @@ const removeSameTopicArticles = async (articles, clientId, moduleId) => {
       );
     }
 
-    // Not a duplicate -> keep it, and store its embedding for future comparisons
+    // Not a duplicate -> keep it. Embedding is NOT stored here anymore.
+    // The caller commits it later via commitTopicSeen() once the article
+    // has actually been handled (signal stored, or LLM judged it irrelevant).
     uniqueArticles.push(article);
-
-    const publishedTs = article.publishedDate
-      ? new Date(article.publishedDate).getTime()
-      : Date.now();
-
-    await qdrant.upsert(DEDUP_COLLECTION, {
-      wait: true,
-      points: [
-        {
-          id: uuidv4(),
-          vector,
-          payload: {
-            client_id: clientId,
-            module_id: moduleId,
-            title: article.title,
-            normalized_title: normalizedTitle,
-            url: article.url,
-            published_date_ts: publishedTs,
-          },
-        },
-      ],
-    });
   }
 
   console.log(`[TopicDedup] module=${moduleId}: ${uniqueArticles.length} unique out of ${articles.length}`);
   return uniqueArticles;
 };
 
+// NEW: commits a single article's topic embedding to the dedup collection.
+// Called AFTER the article has been fully handled (signal stored, or LLM
+// explicitly judged it irrelevant). Never called for failed articles, so
+// a failed article can be re-processed on a later run.
+const commitTopicSeen = async (article, clientId, moduleId) => {
+  if (!article || !article.title) return;
+  try {
+    const normalizedTitle = normalizeTitle(article.title);
+    const textForEmbedding = buildEmbeddingText(article);
+    const vector = await embedText(textForEmbedding);
+    const publishedTs = article.publishedDate
+      ? new Date(article.publishedDate).getTime()
+      : Date.now();
+
+    await qdrant.upsert(DEDUP_COLLECTION, {
+      wait: true,
+      points: [{
+        id: uuidv4(),
+        vector,
+        payload: {
+          client_id: clientId,
+          module_id: moduleId,
+          title: article.title,
+          normalized_title: normalizedTitle,
+          url: article.url,
+          published_date_ts: publishedTs,
+        },
+      }],
+    });
+  } catch (err) {
+    console.log('[TopicDedup] commitTopicSeen error:', err.message);
+  }
+};
+
 module.exports = {
   removeSameTopicArticles,
+  commitTopicSeen,
 };

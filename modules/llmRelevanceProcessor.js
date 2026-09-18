@@ -40,6 +40,8 @@ const axios = require('axios');
 const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
 const { refreshLock } = require('./queueManager');
 const { matchSignalToTrend } = require('./trendClustering');
+const { commitUrlSeen } = require('./deduplicator');
+const { commitTopicSeen } = require('./topicDedup');
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -973,6 +975,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
         irrelevantCount++;
         console.log(`  [!] FAILED | ${classification.reason}`);
+        // DO NOT commit dedup state -- this article failed due to a technical
+        // issue (LLM rate limit, timeout, etc.), NOT because the content was
+        // judged irrelevant. Leaving it uncommitted means a future run can
+        // re-fetch and re-process it.
       } else if (classification.is_relevant) {
         const chunkCount = await storeRelevantArticle(
           article,
@@ -984,6 +990,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
           submoduleId
         );
         await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
+        // Article is now fully stored -- commit dedup state so future runs
+        // recognize it as handled.
+        await commitUrlSeen(article, clientId, moduleId);
+        await commitTopicSeen(article, clientId, moduleId);
         relevantCount++;
 
         if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
@@ -997,6 +1007,10 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         }
       } else {
         await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
+        // LLM made a definite "irrelevant" judgement -- commit dedup state so
+        // a future run doesn't waste an LLM call to get the same answer.
+        await commitUrlSeen(article, clientId, moduleId);
+        await commitTopicSeen(article, clientId, moduleId);
         irrelevantCount++;
         console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
       }

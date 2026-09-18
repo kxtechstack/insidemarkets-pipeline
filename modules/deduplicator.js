@@ -116,26 +116,12 @@ const removeUrlDuplicates = async (articles, clientId, moduleId) => {
       cleanArticles.push(article);
     }
 
-    // Store newly seen URLs (raw, as before) so future runs can compare against them
-    if (cleanArticles.length > 0) {
-      const rows = cleanArticles.map(article => ({
-        client_id: clientId,
-        module_id: moduleId,
-        source_url: article.url,
-        title: article.title,
-        published_date: article.publishedDate || null,
-        created_at: new Date().toISOString()
-      }));
-
-      const { error: insertError } = await supabase
-        .from('processed_urls')
-        .insert(rows);
-
-      if (insertError) {
-        console.log('processed urls insert error:', insertError.message);
-      }
-    }
-
+    // NOTE: previously this inserted every passing URL into processed_urls
+    // immediately. That marked articles as "seen" BEFORE they had actually
+    // been processed -- so if the LLM stage later failed (rate limit, crash),
+    // the URL was permanently poisoned and never re-processable. Now the
+    // insert is deferred: the caller commits each URL via commitUrlSeen()
+    // only after the article has been fully handled.
     console.log(`URL check (module: ${moduleId}): ${cleanArticles.length} passed out of ${articles.length}`);
     return cleanArticles;
 
@@ -145,7 +131,52 @@ const removeUrlDuplicates = async (articles, clientId, moduleId) => {
   }
 };
 
+// NEW: commits a single article's URL to processed_urls. Called AFTER
+// the article has been fully handled (signal stored, or LLM explicitly
+// judged it irrelevant). Never called for articles that failed processing,
+// so a failed article can be re-processed on a later run.
+const commitUrlSeen = async (article, clientId, moduleId) => {
+  if (!article || !article.url) return;
+  try {
+    const { error } = await supabase.from('processed_urls').insert({
+      client_id: clientId,
+      module_id: moduleId,
+      source_url: article.url,
+      title: article.title,
+      published_date: article.publishedDate || null,
+      created_at: new Date().toISOString(),
+    });
+    if (error) console.log('processed_urls commit error:', error.message);
+  } catch (err) {
+    console.log('processed_urls commit exception:', err.message);
+  }
+};
+
+// NEW: batch version, in case you want to commit multiple at once.
+const commitUrlsSeen = async (articles, clientId, moduleId) => {
+  if (!articles || articles.length === 0) return;
+  const rows = articles
+    .filter(a => a && a.url)
+    .map(article => ({
+      client_id: clientId,
+      module_id: moduleId,
+      source_url: article.url,
+      title: article.title,
+      published_date: article.publishedDate || null,
+      created_at: new Date().toISOString(),
+    }));
+  if (rows.length === 0) return;
+  try {
+    const { error } = await supabase.from('processed_urls').insert(rows);
+    if (error) console.log('processed_urls bulk commit error:', error.message);
+  } catch (err) {
+    console.log('processed_urls bulk commit exception:', err.message);
+  }
+};
+
 module.exports = {
   removeUrlDuplicates,
+  commitUrlSeen,
+  commitUrlsSeen,
   normalizeUrl, // exported for testing/inspection
 };

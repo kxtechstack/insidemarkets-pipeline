@@ -157,6 +157,9 @@ app.post('/schedules', async (req, res) => {
   if (scheduleTime) {
     updatePayload.schedule_time = scheduleTime;
   }
+  if (isActive !== undefined) {
+    updatePayload.status = isActive ? 'Running' : 'Paused';
+  }
 
   const { data, error } = await supabaseClient
     .schema('admin')
