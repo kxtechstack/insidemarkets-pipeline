@@ -1019,6 +1019,22 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         // issue (LLM rate limit, timeout, etc.), NOT because the content was
         // judged irrelevant. Leaving it uncommitted means a future run can
         // re-fetch and re-process it.
+
+        // NEW: increment the circuit-breaker counter here too. classifyArticle
+        // catches 429s internally and returns technical_failure: true (rather
+        // than throwing), so the outer catch block never sees these. Without
+        // this increment, three consecutive rate-limit failures would never
+        // trip the breaker.
+        consecutiveTechnicalFailures++;
+        if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+          const failedIndex = articles.indexOf(article);
+          const unprocessed = articles.slice(failedIndex);
+          console.log(`  [CircuitBreaker] ${consecutiveTechnicalFailures} consecutive failures — aborting batch. ${unprocessed.length} article(s) left unprocessed.`);
+          throw new RateLimitAbortError(
+            `${consecutiveTechnicalFailures} consecutive LLM failures`,
+            unprocessed
+          );
+        }
       } else if (classification.is_relevant) {
         const chunkCount = await storeRelevantArticle(
           article,
@@ -1086,6 +1102,16 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
           unprocessed
         );
       }
+    }
+
+    // Heartbeat: bump pipeline_job_status.updated_at so the stale-job
+    // watcher (10-minute threshold) doesn't mark this job failed while the
+    // LLM is legitimately sleeping through a 429 retry-after wait.
+    try {
+      const { updateJobStage } = require('./jobStatusTracker');
+      await updateJobStage(jobId, 'llm_processing', {});
+    } catch (heartbeatErr) {
+      console.log(`  [!] Heartbeat update failed (non-fatal): ${heartbeatErr.message}`);
     }
 
     await refreshLock(clientId, submoduleId);
