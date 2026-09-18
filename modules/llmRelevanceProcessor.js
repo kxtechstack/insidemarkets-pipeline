@@ -1026,6 +1026,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         // this increment, three consecutive rate-limit failures would never
         // trip the breaker.
         consecutiveTechnicalFailures++;
+        console.log(`  [CircuitBreaker-DEBUG] counter=${consecutiveTechnicalFailures}, threshold=${CIRCUIT_BREAKER_THRESHOLD}, comparison=${consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD}`);
         if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
           const failedIndex = articles.indexOf(article);
           const unprocessed = articles.slice(failedIndex);
@@ -1051,6 +1052,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         await commitUrlSeen(article, clientId, moduleId);
         await commitTopicSeen(article, clientId, moduleId);
         relevantCount++;
+        consecutiveTechnicalFailures = 0;  // success resets the breaker counter
 
         if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
           console.log(
@@ -1068,12 +1070,9 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         await commitUrlSeen(article, clientId, moduleId);
         await commitTopicSeen(article, clientId, moduleId);
         irrelevantCount++;
+        consecutiveTechnicalFailures = 0;  // success resets the breaker counter
         console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
       }
-
-      // Any successful classification (relevant OR irrelevant) resets
-      // the consecutive-failure counter -- the LLM is clearly working.
-      consecutiveTechnicalFailures = 0;
     } catch (articleErr) {
       // NEW: catches anything that throws mid-processing (e.g. storeRelevantArticle's
       // embedding/Qdrant/Supabase calls) so this article always gets logged instead of
