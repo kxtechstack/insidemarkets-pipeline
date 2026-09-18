@@ -313,6 +313,36 @@ const resumePipelineRun = async (jobId) => {
       return;
     }
 
+    // Guard against false completion: if the resumed batch made zero
+    // progress (nothing relevant, nothing irrelevant, and either the queue
+    // was empty or everything failed), don't pretend this job succeeded.
+    // Re-pause it so a future resume (or the next scheduled run) can try
+    // again once the rate limit actually clears.
+    const madeProgress = llmResult.relevant > 0 || llmResult.irrelevant > 0;
+
+    if (!madeProgress) {
+      const BACKOFF_MINUTES = [60, 360, 720, 720];
+      const attempts = await getJobResumeAttempts(jobId);
+      const backoffIdx = Math.min(attempts, BACKOFF_MINUTES.length - 1);
+      const backoffMin = BACKOFF_MINUTES[backoffIdx];
+      const resumeAt = new Date(Date.now() + backoffMin * 60 * 1000).toISOString();
+
+      await setStatus(jobId, {
+        status: 'paused_rate_limited',
+        message: `Resume made no progress (still rate limited) — re-paused. Will retry in ${backoffMin} min (attempt ${attempts + 1}).`,
+      });
+      await markJobPaused(jobId, {
+        reason: 'Resume made no progress — still rate limited',
+        resumeAt,
+      });
+
+      const { redis } = require('./queueManager');
+      await redis.expire(processedQueueKey, 7 * 24 * 60 * 60);
+
+      console.log(`[Resume] Job ${jobId} made no progress — re-paused until ${resumeAt}`);
+      return;
+    }
+
     // Success!
     await setStatus(jobId, {
       status: 'completed',

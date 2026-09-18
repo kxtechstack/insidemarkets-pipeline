@@ -990,6 +990,11 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   // rate limit is clearly going to keep failing every article.
   let consecutiveTechnicalFailures = 0;
 
+  // NEW: collect articles that failed technically, so the caller can
+  // re-queue them for a future resume if the batch completes without
+  // tripping the breaker (e.g. only 2 articles in the batch).
+  const technicalFailureArticles = [];
+
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
 
@@ -1014,6 +1019,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       if (classification.technical_failure) {
         await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
         irrelevantCount++;
+        technicalFailureArticles.push(article);  // NEW: track for re-queue
         console.log(`  [!] FAILED | ${classification.reason}`);
         // DO NOT commit dedup state -- this article failed due to a technical
         // issue (LLM rate limit, timeout, etc.), NOT because the content was
@@ -1026,7 +1032,6 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
         // this increment, three consecutive rate-limit failures would never
         // trip the breaker.
         consecutiveTechnicalFailures++;
-        console.log(`  [CircuitBreaker-DEBUG] counter=${consecutiveTechnicalFailures}, threshold=${CIRCUIT_BREAKER_THRESHOLD}, comparison=${consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD}`);
         if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
           const failedIndex = articles.indexOf(article);
           const unprocessed = articles.slice(failedIndex);
@@ -1118,7 +1123,11 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   }
 
   console.log(`[LLMProcessor] Done. Relevant: ${relevantCount}, Irrelevant: ${irrelevantCount}`);
-  return { relevant: relevantCount, irrelevant: irrelevantCount };
+  return {
+    relevant: relevantCount,
+    irrelevant: irrelevantCount,
+    technicalFailureArticles,
+  };
 };
 
 // ── Batch processing from Redis queue ───────────────────────────────────────
@@ -1167,6 +1176,17 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
 
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;
+
+    // NEW: if this batch had technical failures but didn't trip the breaker
+    // (e.g. batch size < threshold), push those articles back onto the queue
+    // so they aren't silently lost. A future resume or run will pick them up.
+    if (Array.isArray(result.technicalFailureArticles) && result.technicalFailureArticles.length > 0) {
+      const { redis } = require('./queueManager');
+      for (const article of result.technicalFailureArticles) {
+        await redis.rpush(queueKey, JSON.stringify(article));
+      }
+      console.log(`[LLMProcessor] Re-queued ${result.technicalFailureArticles.length} technically-failed article(s) for a future resume`);
+    }
 
     remaining = await getProcessedQueueLength(queueKey);
     batchNumber++;
