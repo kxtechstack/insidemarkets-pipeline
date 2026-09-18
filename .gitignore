@@ -1,3 +1,6 @@
 node_modules/
 .envmodules_backup*/
 modules_backup_*/
+.env
+volumes/
+modules_backup*/
