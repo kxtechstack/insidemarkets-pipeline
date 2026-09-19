@@ -15,7 +15,6 @@ const { filterLowQualityArticles } = require('./modules/qualityFilter');
 const { pushToProcessedQueue } = require('./modules/processedQueue');
 const { startJobTracking, updateJobStage, completeJobTracking, markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
 const { processQueueInBatches, retryFailedArticles, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
-const { generateHighlight } = require('./modules/highlightGenerator');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
