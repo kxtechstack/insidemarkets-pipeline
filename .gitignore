@@ -3,4 +3,4 @@ node_modules/
 modules_backup_*/
 .env
 volumes/
-modules_backup*/
+modules_backup*/modules_backup*/

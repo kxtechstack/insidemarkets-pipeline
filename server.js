@@ -21,7 +21,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
-const { startStaleJobWatcher, startFailedArticleWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
+const { startStaleJobWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
 const { registerDecisionIntelligenceRoute } = require('./modules/decisionIntelligence/route');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
@@ -429,7 +429,7 @@ app.post('/custom-source/run/:sourceId', async (req, res) => {
   }
 });
 
-// Retry failed articles (manual trigger — the automatic sweep lives in jobRecovery.js)
+// Retry failed articles (manual trigger).
 // CHANGED: now accepts optional submoduleId in the request body -- when the
 // frontend's per-submodule "Retry Failed" button sends it, only that
 // submodule's failed articles are retried instead of the whole client's.
@@ -444,6 +444,93 @@ app.post('/retry-failed/:clientId', async (req, res) => {
 
   } catch (err) {
     console.error(`[Retry] Error for client ${clientId}:`, err.message);
+  }
+});
+
+// NEW: "Retry now" -- this is the endpoint the frontend's Retry button hits.
+// Two-stage behavior:
+//   1. If there are paused_rate_limited jobs for this client (and submodule,
+//      if provided), resume them IMMEDIATELY -- bypassing resume_at -- using
+//      the same resumePipelineRun the rate-limit watcher uses. This lets
+//      users say "I fixed the key, try again right now" instead of waiting
+//      for the next scheduled backoff window (1h / 6h / 12h / 12h).
+//   2. If no paused jobs exist, fall back to the log-based retryFailedArticles
+//      so orphaned `failed` rows also get retried.
+app.post('/retry-now/:clientId', async (req, res) => {
+  const { clientId } = req.params;
+  const { submoduleId } = req.body || {};
+
+  // Respond immediately -- the actual work runs in the background, exactly
+  // like /run and /retry-failed do.
+  res.json({ message: 'Retry-now started', clientId, submoduleId: submoduleId || 'all' });
+
+  try {
+    // Stage 1: find paused jobs and resume them immediately.
+    let pausedQuery = supabaseClient
+      .from('pipeline_job_status')
+      .select('job_id, status, resume_attempts')
+      .eq('client_id', clientId)
+      .eq('status', 'paused_rate_limited');
+
+    if (submoduleId) {
+      pausedQuery = pausedQuery.eq('submodule_id', submoduleId);
+    }
+
+    const { data: pausedJobs, error: pausedErr } = await pausedQuery;
+
+    if (pausedErr) {
+      console.error(`[RetryNow] Error querying paused jobs for ${clientId}:`, pausedErr.message);
+    }
+
+    if (pausedJobs && pausedJobs.length > 0) {
+      const { resumePipelineRun } = require('./modules/pipelineRunner');
+
+      console.log(`[RetryNow] Found ${pausedJobs.length} paused job(s) for client ${clientId}${submoduleId ? `, submodule ${submoduleId}` : ''} — resuming immediately`);
+
+      for (const job of pausedJobs) {
+        // Cap safeguard: don't resume jobs that have already blown past the
+        // normal 5-attempt backoff cap. Users clicking the button repeatedly
+        // shouldn't be able to bypass the safety limit.
+        if ((job.resume_attempts || 0) >= 5) {
+          console.log(`[RetryNow] Skipping ${job.job_id} — resume_attempts (${job.resume_attempts}) exceeded cap (5). Marking permanently_failed.`);
+          await supabaseClient
+            .from('pipeline_job_status')
+            .update({
+              status: 'permanently_failed',
+              error_message: 'Retry cap exceeded via manual Retry button',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('job_id', job.job_id);
+          continue;
+        }
+
+        // Force resume_at to now so resumePipelineRun doesn't skip on the
+        // "is it time yet" check inside.
+        await supabaseClient
+          .from('pipeline_job_status')
+          .update({
+            resume_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('job_id', job.job_id);
+
+        // Fire and forget -- resumePipelineRun can take minutes. Catch any
+        // error so one failure doesn't kill the whole loop.
+        resumePipelineRun(job.job_id).catch((err) => {
+          console.error(`[RetryNow] resumePipelineRun error for ${job.job_id}:`, err.message);
+        });
+      }
+      return;
+    }
+
+    // Stage 2: no paused jobs -- fall back to log-based retry for orphaned
+    // failures (articles that failed mid-run but never tripped the breaker).
+    console.log(`[RetryNow] No paused jobs for client ${clientId}${submoduleId ? `, submodule ${submoduleId}` : ''} — falling back to log-based retry`);
+    const result = await retryFailedArticles(clientId, submoduleId || null);
+    console.log(`[RetryNow] Log-based retry: attempted ${result.attempted}, succeeded ${result.succeeded}`);
+
+  } catch (err) {
+    console.error(`[RetryNow] Error for client ${clientId}:`, err.message);
   }
 });
 
@@ -614,7 +701,6 @@ registerDecisionIntelligenceRoute(app);
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
-  startFailedArticleWatcher(60); // every 1h, capped at 30min per sweep
   startRateLimitResumeWatcher(5); // every 5min, checks for paused jobs ready to resume
   startScheduler();
 });
