@@ -562,6 +562,173 @@ app.post('/retry-now/:clientId', async (req, res) => {
   }
 });
 
+// GET /report/:clientId?date=YYYY-MM-DD
+// Returns the aggregated daily intelligence collection report.
+// All aggregation happens server-side so the frontend just renders.
+app.get('/report/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ error: 'date query param is required (YYYY-MM-DD, IST day)' });
+    }
+
+    // IST day boundaries → UTC timestamps
+    const startIso = new Date(`${date}T00:00:00.000+05:30`).toISOString();
+    const endIso = new Date(`${date}T23:59:59.999+05:30`).toISOString();
+
+    // ── Fetch all jobs started that day ──────────────────────────────────
+    const { data: jobs, error: jobsErr } = await supabaseClient
+      .from('pipeline_job_status')
+      .select('job_id, submodule_id, module_id, count_fetched, count_after_url_check, count_after_topic_dedup, count_after_quality_filter')
+      .eq('client_id', clientId)
+      .gte('started_at', startIso)
+      .lte('started_at', endIso);
+
+    if (jobsErr) return res.status(500).json({ error: jobsErr.message });
+
+    // ── Fetch all logs touched that day ──────────────────────────────────
+    // We fetch both completed (via completed_at) AND failed/skipped (via
+    // processed_at). A row can appear in both categories conceptually,
+    // but status determines which bucket it lands in for this day.
+    const { data: completedLogs, error: completedErr } = await supabaseClient
+      .from('article_processing_log')
+      .select('id, submodule_id, status, completed_at')
+      .eq('client_id', clientId)
+      .eq('status', 'completed')
+      .gte('completed_at', startIso)
+      .lte('completed_at', endIso);
+
+    if (completedErr) return res.status(500).json({ error: completedErr.message });
+
+    const { data: nonCompletedLogs, error: nonCompletedErr } = await supabaseClient
+      .from('article_processing_log')
+      .select('id, submodule_id, status, processed_at')
+      .eq('client_id', clientId)
+      .in('status', ['failed', 'skipped', 'retrying'])
+      .gte('processed_at', startIso)
+      .lte('processed_at', endIso);
+
+    if (nonCompletedErr) return res.status(500).json({ error: nonCompletedErr.message });
+
+    const allLogs = [...(completedLogs || []), ...(nonCompletedLogs || [])];
+
+    // ── Build submodule → module map ─────────────────────────────────────
+    // Query admin.submodules once; join module_id by submodule_id.
+    const submoduleIds = [
+      ...new Set(
+        [...(jobs || []).map(j => j.submodule_id), ...allLogs.map(l => l.submodule_id)]
+          .filter(Boolean)
+      ),
+    ];
+
+    let submoduleMap = {};
+    if (submoduleIds.length > 0) {
+      const { data: subs } = await supabaseClient
+        .schema('admin')
+        .from('submodules')
+        .select('id, submodule_name, module_id')
+        .in('id', submoduleIds);
+      (subs || []).forEach(s => { submoduleMap[s.id] = s; });
+    }
+
+    // ── Aggregate: totals ────────────────────────────────────────────────
+    const totalFetched = (jobs || []).reduce((sum, j) => sum + (j.count_fetched || 0), 0);
+    const totalStored = (completedLogs || []).length;
+    const totalFailed = (nonCompletedLogs || []).filter(l => l.status === 'failed').length;
+    const totalSkipped = (nonCompletedLogs || []).filter(l => l.status === 'skipped').length;
+
+    // ── Aggregate: per-module ────────────────────────────────────────────
+    const moduleAgg = {}; // moduleId → { fetched, stored, failed, skipped }
+
+    for (const job of jobs || []) {
+      const sub = job.submodule_id ? submoduleMap[job.submodule_id] : null;
+      const modId = job.module_id || sub?.module_id || 'unknown';
+      if (!moduleAgg[modId]) moduleAgg[modId] = { fetched: 0, stored: 0, failed: 0, skipped: 0 };
+      moduleAgg[modId].fetched += job.count_fetched || 0;
+    }
+
+    for (const log of completedLogs || []) {
+      const sub = log.submodule_id ? submoduleMap[log.submodule_id] : null;
+      const modId = sub?.module_id || 'unknown';
+      if (!moduleAgg[modId]) moduleAgg[modId] = { fetched: 0, stored: 0, failed: 0, skipped: 0 };
+      moduleAgg[modId].stored += 1;
+    }
+
+    for (const log of nonCompletedLogs || []) {
+      const sub = log.submodule_id ? submoduleMap[log.submodule_id] : null;
+      const modId = sub?.module_id || 'unknown';
+      if (!moduleAgg[modId]) moduleAgg[modId] = { fetched: 0, stored: 0, failed: 0, skipped: 0 };
+      if (log.status === 'failed') moduleAgg[modId].failed += 1;
+      if (log.status === 'skipped') moduleAgg[modId].skipped += 1;
+    }
+
+    // ── Aggregate: per-submodule (grouped by module) ─────────────────────
+    const submoduleAgg = {};
+    const ensureSubmodule = (subId, modId) => {
+      if (!submoduleAgg[subId]) {
+        submoduleAgg[subId] = {
+          submoduleId: subId,
+          submoduleName: submoduleMap[subId]?.submodule_name || subId,
+          moduleId: modId,
+          fetched: 0,
+          afterUrlCheck: 0,
+          afterTopicDedup: 0,
+          afterQualityFilter: 0,
+          stored: 0,
+          failed: 0,
+          skipped: 0,
+        };
+      }
+    };
+
+    for (const job of jobs || []) {
+      if (!job.submodule_id) continue;
+      const sub = submoduleMap[job.submodule_id];
+      ensureSubmodule(job.submodule_id, job.module_id || sub?.module_id || 'unknown');
+      submoduleAgg[job.submodule_id].fetched += job.count_fetched || 0;
+      submoduleAgg[job.submodule_id].afterUrlCheck += job.count_after_url_check || 0;
+      submoduleAgg[job.submodule_id].afterTopicDedup += job.count_after_topic_dedup || 0;
+      submoduleAgg[job.submodule_id].afterQualityFilter += job.count_after_quality_filter || 0;
+    }
+
+    for (const log of completedLogs || []) {
+      if (!log.submodule_id) continue;
+      const sub = submoduleMap[log.submodule_id];
+      ensureSubmodule(log.submodule_id, sub?.module_id || 'unknown');
+      submoduleAgg[log.submodule_id].stored += 1;
+    }
+
+    for (const log of nonCompletedLogs || []) {
+      if (!log.submodule_id) continue;
+      const sub = submoduleMap[log.submodule_id];
+      ensureSubmodule(log.submodule_id, sub?.module_id || 'unknown');
+      if (log.status === 'failed') submoduleAgg[log.submodule_id].failed += 1;
+      if (log.status === 'skipped') submoduleAgg[log.submodule_id].skipped += 1;
+    }
+
+    return res.json({
+      date,
+      totals: {
+        fetched: totalFetched,
+        stored: totalStored,
+        failed: totalFailed,
+        skipped: totalSkipped,
+      },
+      modules: Object.entries(moduleAgg).map(([moduleId, agg]) => ({
+        moduleId,
+        ...agg,
+      })),
+      submodules: Object.values(submoduleAgg),
+    });
+
+  } catch (err) {
+    console.error('[Report] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/admin/users-last-signin', async (req, res) => {
   const { emails } = req.body;
 

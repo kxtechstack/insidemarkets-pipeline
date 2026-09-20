@@ -52,6 +52,8 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 // row instead of INSERTing a new one -- avoids accumulating a duplicate
 // row in article_processing_log every time an article gets retried.
 const logArticle = async (jobId, clientId, article, status, errorMessage = null, submoduleId = null, existingLogId = null) => {
+  const nowIso = new Date().toISOString();
+
   const payload = {
     job_id: jobId,
     client_id: clientId,
@@ -61,8 +63,15 @@ const logArticle = async (jobId, clientId, article, status, errorMessage = null,
     status,
     error_message: errorMessage,
     raw_content: status === 'failed' ? JSON.stringify(article) : null,
-    processed_at: new Date().toISOString(),
+    processed_at: nowIso,  // last attempt time -- always refreshed
   };
+
+  // Set completed_at ONLY when the article is truly done. It's the frozen
+  // timestamp the Daily Report uses for "Signals Stored" -- retries that
+  // succeed later set it to the retry's time, not the original attempt's.
+  if (status === 'completed') {
+    payload.completed_at = nowIso;
+  }
 
   if (existingLogId) {
     await supabase.from('article_processing_log').update(payload).eq('id', existingLogId);
