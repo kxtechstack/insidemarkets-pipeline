@@ -137,6 +137,21 @@ app.post('/run', async (req, res) => {
     return res.status(400).json({ error: 'clientId, promptText, industry, moduleId, and submoduleId are all required' });
   }
 
+  const { data: promptRow, error: fetchErr } = await supabaseClient
+    .schema('admin')
+    .from('prompts')
+    .select('status, is_active')
+    .eq('client_id', clientId)
+    .eq('submodule_id', submoduleId)
+    .maybeSingle();
+
+  if (fetchErr) {
+    return res.status(500).json({ error: fetchErr.message });
+  }
+  if (promptRow && (promptRow.status === 'Paused' || promptRow.is_active === false)) {
+    return res.status(403).json({ error: 'This prompt is paused — enable at least one signal under its submodule to run it.' });
+  }
+
   const jobId = triggerPipelineRun(clientId, promptText, industry, moduleId, submoduleId, source);
   res.json({ jobId, status: 'started' });
 });
