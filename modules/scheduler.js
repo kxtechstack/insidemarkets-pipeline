@@ -54,7 +54,7 @@ const checkAndRunSchedules = async () => {
   const { data: schedules, error } = await supabase
     .schema('admin')
     .from('prompts')
-    .select('*, clients:client_id ( industry )')
+    .select('*, clients:client_id ( industry, status )')
     .eq('is_active', true)
     .eq('schedule_time', currentTime)
     .eq('status', 'Running');
@@ -70,6 +70,11 @@ const checkAndRunSchedules = async () => {
 
   for (const s of schedules) {
     if (s.frequency?.toLowerCase() !== 'daily') continue;
+
+    if (s.clients?.status && s.clients.status.toLowerCase() !== 'active') {
+      console.log(`[Scheduler] Skipping — client: ${s.client_id} is ${s.clients.status}, not active`);
+      continue;
+    }
 
     const isEnabled = await isSubmoduleEnabledForClient(s.client_id, s.module_id, s.submodule_id);
     if (!isEnabled) {

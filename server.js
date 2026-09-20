@@ -152,6 +152,20 @@ app.post('/run', async (req, res) => {
     return res.status(403).json({ error: 'This prompt is paused — enable at least one signal under its submodule to run it.' });
   }
 
+  const { data: clientRow, error: clientErr } = await supabaseClient
+    .schema('admin')
+    .from('clients')
+    .select('status')
+    .eq('id', clientId)
+    .maybeSingle();
+
+  if (clientErr) {
+    return res.status(500).json({ error: clientErr.message });
+  }
+  if (clientRow && clientRow.status && clientRow.status.toLowerCase() !== 'active') {
+    return res.status(403).json({ error: `This client is ${clientRow.status} — cannot run pipelines.` });
+  }
+
   const jobId = triggerPipelineRun(clientId, promptText, industry, moduleId, submoduleId, source);
   res.json({ jobId, status: 'started' });
 });
