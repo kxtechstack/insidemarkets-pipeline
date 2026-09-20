@@ -708,6 +708,23 @@ app.get('/report/:clientId', async (req, res) => {
       if (log.status === 'skipped') submoduleAgg[log.submodule_id].skipped += 1;
     }
 
+    // NEW: "Failed" should reflect every article that entered the LLM stage
+    // but hasn't succeeded or been judged irrelevant yet -- including articles
+    // the circuit breaker never got to. Those are still in the Redis queue
+    // waiting for a retry, but from the user's perspective they're "failed
+    // and waiting to be retried," so we surface them under Failed.
+    //
+    // attributableFailed = afterQualityFilter - stored - skipped
+    // (floored at 0, and never less than the log-based failed count)
+    for (const subId of Object.keys(submoduleAgg)) {
+      const entry = submoduleAgg[subId];
+      const attributable = Math.max(
+        0,
+        (entry.afterQualityFilter || 0) - (entry.stored || 0) - (entry.skipped || 0)
+      );
+      entry.failed = Math.max(entry.failed || 0, attributable);
+    }
+
     return res.json({
       date,
       totals: {
