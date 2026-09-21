@@ -271,6 +271,7 @@ async function resolveSources(citedIndices, sourceManifest) {
       title: p.title || 'Untitled',
       url: p.url || null,
       module: MODULE_NAMES[p.module_id] || p.module_id || null,
+      article_id: p.article_id || null,
       qdrant_point_id: s.qdrantPointId || null,
     };
   });
@@ -390,6 +391,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
       title: r.payload?.title || 'Untitled',
       url: r.payload?.url || null,
       module: MODULE_NAMES[r.payload?.module_id] || 'Unknown',
+      article_id: r.payload?.article_id || null,
       qdrant_point_id: r.id != null ? String(r.id) : null,
     }));
 

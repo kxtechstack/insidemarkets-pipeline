@@ -27,7 +27,7 @@ const { retrieveClientData, detectTargetModules } = require('./retrieveClientDat
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
-
+const { enrichSourcesWithSignalIds } = require('./enrichSources');
 const {
   createConversation, appendMessage,
   listConversations, loadConversation, deleteConversation,
@@ -249,6 +249,13 @@ function registerDecisionIntelligenceRoute(app) {
       }
 
       if (classifierReasoning) result.classifierReasoning = classifierReasoning;
+            if (result.sources && result.sources.length) {
+        try {
+          result.sources = await enrichSourcesWithSignalIds(result.sources);
+        } catch (err) {
+          console.log(`[DI] enrichSources failed: ${err.message}`);
+        }
+      }
 
       // 4b. Detect "no relevant data" outcomes and steer the user toward
       // working questions. Only fires when the result is *truly* empty --
