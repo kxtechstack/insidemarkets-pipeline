@@ -63,21 +63,43 @@ const logArticle = async (jobId, clientId, article, status, errorMessage = null,
     status,
     error_message: errorMessage,
     raw_content: status === 'failed' ? JSON.stringify(article) : null,
-    processed_at: nowIso,  // last attempt time -- always refreshed
+    processed_at: nowIso,
   };
 
-  // Set completed_at ONLY when the article is truly done. It's the frozen
-  // timestamp the Daily Report uses for "Signals Stored" -- retries that
-  // succeed later set it to the retry's time, not the original attempt's.
   if (status === 'completed') {
     payload.completed_at = nowIso;
   }
 
+  // 1. If the caller already knows the row id (retry path), update it directly.
   if (existingLogId) {
     await supabase.from('article_processing_log').update(payload).eq('id', existingLogId);
-  } else {
-    await supabase.from('article_processing_log').insert(payload);
+    return;
   }
+
+  // 2. Otherwise, check whether this article already has a log row for THIS
+  //    job. If it does, update that row instead of inserting a duplicate.
+  //    Prevents runaway duplicate rows when an article is retried repeatedly
+  //    inside the same job (circuit-breaker re-queue, resume, etc.).
+  try {
+    const { data: existing } = await supabase
+      .from('article_processing_log')
+      .select('id')
+      .eq('job_id', jobId)
+      .eq('article_url', article.url)
+      .limit(1)
+      .maybeSingle();
+
+    if (existing?.id) {
+      await supabase.from('article_processing_log').update(payload).eq('id', existing.id);
+      return;
+    }
+  } catch (lookupErr) {
+    // Non-fatal: if the lookup fails, fall through to insert so we don't lose the log entry
+    console.log(`  [logArticle] Existing-row lookup failed (non-fatal): ${lookupErr.message}`);
+  }
+
+  // 3. No existing row -> insert a fresh one.
+  await supabase.from('article_processing_log').insert(payload);
 };
 
 const qdrant = new QdrantClient({
