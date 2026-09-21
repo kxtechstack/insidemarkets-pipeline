@@ -25,7 +25,7 @@ const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articl
 const POLICY_MODULE_ID = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
-
+const { keepVisibleResults } = require('./visibleFilter');
 const LIVE_MODULE_IDS = [
   POLICY_MODULE_ID,
   MARKET_DYNAMICS_MODULE_ID,
@@ -196,7 +196,10 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
       allResults.push(...results);
     }
 
-    const filtered = allResults.filter(r => r.score >= 0.20);
+    const filtered = await keepVisibleResults(
+      allResults.filter(r => r.score >= 0.20),
+      clientId
+    );
 
     // Remember the richest attempt so far
     if (filtered.length > bestAttempt.length) {
