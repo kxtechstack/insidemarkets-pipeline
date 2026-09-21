@@ -1,12 +1,13 @@
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+const POLICY_MODULE_ID = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 
 /**
  * Keeps only Qdrant hits that the module tabs actually show.
- *  - Policy & Risk: all kept (tab shows every policy signal)
+ *  - Policy & Risk: only articles that have a row in policy_signals for this client
  *  - Forward Outlook: only signals whose trend is in trend_snapshots_latest (active)
  *  - Market Dynamics: only signals whose insight is in market_insights_live
  */
@@ -20,6 +21,14 @@ async function keepVisibleResults(results, clientId) {
   )];
 
   const visible = new Set();
+
+    // Policy & Risk: signal must exist in policy_signals for this client
+  const pIds = idsFor(POLICY_MODULE_ID);
+  if (pIds.length) {
+    const { data } = await supabase
+      .from('policy_signals').select('article_id').eq('client_id', clientId).in('article_id', pIds);
+    (data || []).forEach(r => visible.add(r.article_id));
+  }
 
   // Forward Outlook
   const fIds = idsFor(FORWARD_OUTLOOK_MODULE_ID);
@@ -58,7 +67,11 @@ async function keepVisibleResults(results, clientId) {
 
   return results.filter(r => {
     const p = r.payload || {};
-    if (p.module_id === FORWARD_OUTLOOK_MODULE_ID || p.module_id === MARKET_DYNAMICS_MODULE_ID) {
+    if (
+      p.module_id === POLICY_MODULE_ID ||
+      p.module_id === FORWARD_OUTLOOK_MODULE_ID ||
+      p.module_id === MARKET_DYNAMICS_MODULE_ID
+    ) {
       return Boolean(p.article_id) && visible.has(p.article_id);
     }
     return true;
