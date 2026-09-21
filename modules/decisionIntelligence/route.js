@@ -251,7 +251,7 @@ function registerDecisionIntelligenceRoute(app) {
       if (classifierReasoning) result.classifierReasoning = classifierReasoning;
             if (result.sources && result.sources.length) {
         try {
-          result.sources = await enrichSourcesWithSignalIds(result.sources);
+          result.sources = await enrichSourcesWithSignalIds(result.sources, clientId);
         } catch (err) {
           console.log(`[DI] enrichSources failed: ${err.message}`);
         }
