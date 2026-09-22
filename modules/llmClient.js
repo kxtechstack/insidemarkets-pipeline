@@ -6,15 +6,17 @@
  * this is the ONLY file that needs to change — every other module
  * just calls callLLM() and doesn't know or care what's behind it.
  *
- * Includes automatic retry on 429 (rate limit) errors, using Groq's
+ * Includes automatic retry on 429 (rate limit) errors, using Novita's
  * retry-after header when available.
  */
 
 const axios = require('axios');
 
-const LLM_API_URL = process.env.LLM_API_URL || 'https://api.novita.ai/v3/openai/chat/completions';
-const LLM_MODEL = process.env.LLM_MODEL || process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
-const LLM_API_KEY = process.env.LLM_API_KEY || process.env.GROQ_API_KEY;
+const { apiUrl, apiKey, model } = require('./llmConfig');
+
+const LLM_API_URL = apiUrl;
+const LLM_MODEL = model;
+const LLM_API_KEY = apiKey;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -66,10 +68,10 @@ const callLLM = async (messages, options = {}) => {
           ? Number(retryAfterHeader) * 1000
           : attempt * 5000; // fallback: 5s, 10s, 15s...
 
-        // Cap the wait. Groq sometimes returns retry-after values in the
+        // Cap the wait. Novita sometimes returns retry-after values in the
         // hundreds or thousands of seconds (e.g. 426000ms = 7 minutes).
         // Sleeping that long blocks the pipeline and prevents the circuit
-        // breaker from ever firing. If Groq asks for more than 60s, we give
+        // breaker from ever firing. If Novita asks for more than 60s, we give
         // up on this attempt -- the article will be marked 'failed' by the
         // caller and picked up again on the next pipeline run (it's not
         // committed to dedup, thanks to the commit-on-success fix).
@@ -77,7 +79,7 @@ const callLLM = async (messages, options = {}) => {
         const waitMs = Math.min(rawWaitMs, MAX_RETRY_WAIT_MS);
 
         if (rawWaitMs > MAX_RETRY_WAIT_MS) {
-          console.log(`  [llmClient] 429 rate limited, Groq asked for ${rawWaitMs}ms (${Math.round(rawWaitMs/1000)}s) — capping at ${MAX_RETRY_WAIT_MS}ms (attempt ${attempt}/${maxRetries})`);
+          console.log(`  [llmClient] 429 rate limited, Novita asked for ${rawWaitMs}ms (${Math.round(rawWaitMs/1000)}s) — capping at ${MAX_RETRY_WAIT_MS}ms (attempt ${attempt}/${maxRetries})`);
         } else {
           console.log(`  [llmClient] 429 rate limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`);
         }
