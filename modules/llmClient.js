@@ -2,7 +2,7 @@
  * llmClient.js
  * ==============
  * Single shared entry point for all LLM calls in the pipeline.
- * Currently backed by Groq. If we ever switch providers again,
+ * Currently backed by Novita. If we ever switch providers again,
  * this is the ONLY file that needs to change — every other module
  * just calls callLLM() and doesn't know or care what's behind it.
  *
@@ -12,7 +12,7 @@
 
 const axios = require('axios');
 
-const LLM_API_URL = process.env.LLM_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
+const LLM_API_URL = process.env.LLM_API_URL || 'https://api.novita.ai/v3/openai/chat/completions';
 const LLM_MODEL = process.env.LLM_MODEL || process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 const LLM_API_KEY = process.env.LLM_API_KEY || process.env.GROQ_API_KEY;
 

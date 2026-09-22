@@ -1167,6 +1167,7 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
   let totalRelevant = 0;
   let totalIrrelevant = 0;
   let remaining = await getProcessedQueueLength(queueKey);
+  let consecutiveEmptyProgressBatches = 0; // NEW — tracks batches with zero real progress
 
   console.log(`[LLMProcessor] Starting batch processing of ${queueKey} (${remaining} articles, batches of ${batchSize})`);
 
@@ -1212,11 +1213,29 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
     // (e.g. batch size < threshold), push those articles back onto the queue
     // so they aren't silently lost. A future resume or run will pick them up.
     if (Array.isArray(result.technicalFailureArticles) && result.technicalFailureArticles.length > 0) {
+      // NEW: if this batch made zero real progress (every article in it
+      // technically failed), count it toward the breaker. A batch with at
+      // least one relevant/irrelevant result resets the counter.
+      const madeNoProgress = result.relevant === 0 && result.irrelevant === result.technicalFailureArticles.length;
+      consecutiveEmptyProgressBatches = madeNoProgress ? consecutiveEmptyProgressBatches + 1 : 0;
+
+      if (consecutiveEmptyProgressBatches >= CIRCUIT_BREAKER_THRESHOLD) {
+        console.log(`[LLMProcessor] ${consecutiveEmptyProgressBatches} consecutive no-progress batches — aborting, not re-queuing.`);
+        return {
+          relevant: totalRelevant,
+          irrelevant: totalIrrelevant,
+          aborted: true,
+          reason: 'Persistent LLM failure across batches',
+        };
+      }
+
       const { redis } = require('./queueManager');
       for (const article of result.technicalFailureArticles) {
         await redis.rpush(queueKey, JSON.stringify(article));
       }
       console.log(`[LLMProcessor] Re-queued ${result.technicalFailureArticles.length} technically-failed article(s) for a future resume`);
+    } else {
+      consecutiveEmptyProgressBatches = 0; // NEW — a clean batch resets the counter
     }
 
     remaining = await getProcessedQueueLength(queueKey);
