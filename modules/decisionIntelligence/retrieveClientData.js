@@ -229,6 +229,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays === null ? 'no filter' : bestWindowDays + 'd'} | ${chosen.length} result(s)`);
   chosen.forEach((r, i) => {
     console.log(`  [${i + 1}] score=${r.score.toFixed(3)} | module=${r.payload.module_id} | title="${r.payload.title}"`);
+    console.log(`      chunk_text: ${(r.payload.chunk_text || '(none)').slice(0, 300)}`);
   });
 
   // Dedupe by article/title and sort by score
