@@ -11,7 +11,7 @@ const daysAgoISO = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).t
 const fetchFromExa = async (promptText, lookbackDays = 90) => {
   console.log(`[TEST] fetchFromExa called with lookbackDays = ${lookbackDays}`);
   const response = await exa.searchAndContents(promptText, {
-    numResults:20,
+    numResults:100,
     type: 'auto',
     category: 'news',
     startPublishedDate: daysAgoISO(lookbackDays)
@@ -36,7 +36,7 @@ const fetchFromTavily = async (promptText, lookbackDays = 90) => {
       api_key: process.env.TAVILY_API_KEY,
       query: promptText,
       topic: 'news',
-      max_results: 20,
+      max_results: 100,
       days: lookbackDays,
       include_answer: false,
       include_raw_content: false
@@ -84,7 +84,7 @@ const fetchFromParallel = async (promptText, lookbackDays = 90) => {
     body: JSON.stringify({
       objective: promptText,
       search_queries: [promptText],
-      max_results: 20,
+      max_results: 100,
       excerpts: { max_chars_per_result: 5000 },
       source_policy: { start_date: startDateOnly }
     })
