@@ -83,8 +83,8 @@ const checkAndRunSchedules = async () => {
     }
 
     const industry = s.clients?.industry || 'Unknown';
-    console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST, industry: ${industry}`);
-    triggerPipelineRun(s.client_id, s.prompt_text, industry, s.module_id, s.submodule_id, s.source);
+    console.log(`[Scheduler] Triggering — client: ${s.client_id}, submodule: ${s.submodule_id}, time: ${currentTime} IST, industry: ${industry}, lookback: 1 day`);
+    triggerPipelineRun(s.client_id, s.prompt_text, industry, s.module_id, s.submodule_id, s.source, 1);
   }
 };
 

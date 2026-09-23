@@ -131,7 +131,7 @@ app.post('/ask', async (req, res) => {
 });
 
 app.post('/run', async (req, res) => {
-  const { clientId, promptText, industry, moduleId, submoduleId, source } = req.body;
+  const { clientId, promptText, industry, moduleId, submoduleId, source, lookbackDays } = req.body;
 
   if (!clientId || !promptText || !industry || !moduleId || !submoduleId) {
     return res.status(400).json({ error: 'clientId, promptText, industry, moduleId, and submoduleId are all required' });
@@ -166,7 +166,7 @@ app.post('/run', async (req, res) => {
     return res.status(403).json({ error: `This client is ${clientRow.status} — cannot run pipelines.` });
   }
 
-  const jobId = triggerPipelineRun(clientId, promptText, industry, moduleId, submoduleId, source);
+  const jobId = triggerPipelineRun(clientId, promptText, industry, moduleId, submoduleId, source, lookbackDays || 90);
   res.json({ jobId, status: 'started' });
 });
 

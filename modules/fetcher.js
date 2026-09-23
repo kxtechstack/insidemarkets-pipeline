@@ -2,15 +2,19 @@
 const Exa = require('exa-js').default;
 const exa = new Exa(process.env.EXA_API_KEY);
 
-const NINETY_DAYS_AGO = () => new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+const daysAgoISO = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+
+
 
 // ---------- EXA ----------
-const fetchFromExa = async (promptText) => {
+const fetchFromExa = async (promptText, lookbackDays = 90) => {
+  console.log(`[TEST] fetchFromExa called with lookbackDays = ${lookbackDays}`);
   const response = await exa.searchAndContents(promptText, {
     numResults:20,
     type: 'auto',
     category: 'news',
-    startPublishedDate: NINETY_DAYS_AGO()
+    startPublishedDate: daysAgoISO(lookbackDays)
   });
 
   console.log(`Fetched ${response.results.length} articles from Exa`);
@@ -24,7 +28,7 @@ const fetchFromExa = async (promptText) => {
 };
 
 // ---------- TAVILY ----------
-const fetchFromTavily = async (promptText) => {
+const fetchFromTavily = async (promptText, lookbackDays = 90) => {
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -33,7 +37,7 @@ const fetchFromTavily = async (promptText) => {
       query: promptText,
       topic: 'news',
       max_results: 20,
-      days: 90,
+      days: lookbackDays,
       include_answer: false,
       include_raw_content: false
     })
@@ -65,8 +69,8 @@ const fetchFromTavily = async (promptText) => {
 // Also, unlike Exa's category:'news', Parallel has no way to exclude
 // multi-topic "roundup" articles at the source -- that filtering still
 // relies on qualityFilter.js and llmRelevanceProcessor.js downstream.
-const fetchFromParallel = async (promptText) => {
-  const ninetyDaysAgoDateOnly = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+const fetchFromParallel = async (promptText, lookbackDays = 90) => {
+  const startDateOnly = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000)
     .toISOString()
     .split('T')[0];
 
@@ -82,7 +86,7 @@ const fetchFromParallel = async (promptText) => {
       search_queries: [promptText],
       max_results: 20,
       excerpts: { max_chars_per_result: 5000 },
-      source_policy: { start_date: ninetyDaysAgoDateOnly }
+      source_policy: { start_date: startDateOnly }
     })
   });
 
@@ -115,12 +119,12 @@ const fetchers = {
   Perplexity: fetchFromPerplexity
 };
 
-const fetchArticles = async (source, promptText) => {
+const fetchArticles = async (source, promptText, lookbackDays = 90) => {
   const fetcher = fetchers[source];
   if (!fetcher) {
     throw new Error(`Unknown source: "${source}". Expected one of: ${Object.keys(fetchers).join(', ')}`);
   }
-  return fetcher(promptText);
+  return fetcher(promptText, lookbackDays);
 };
 
 module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles };

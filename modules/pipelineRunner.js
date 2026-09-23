@@ -11,7 +11,7 @@ const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE
 // CHANGED: runPipeline now takes moduleId, threads it through dedup calls
 // and processQueueInBatches. Also tracks currentStage so a crash logs the
 // REAL stage it failed at, instead of the hardcoded 'unknown' from before.
-const runPipeline = async (jobId, clientId, promptText, industry, moduleId, submoduleId, source) => {
+const runPipeline = async (jobId, clientId, promptText, industry, moduleId, submoduleId, source, lookbackDays = 90) => {
 
   let currentStage = 'starting'; // CHANGED: new — tracks real stage for failJobTracking
 
@@ -24,7 +24,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     currentStage = 'fetching'; // CHANGED
 
     // Step 1 - Fetch from selected source
-    const articles = await fetchArticles(source, promptText);
+    const articles = await fetchArticles(source, promptText, lookbackDays);
     console.log(`\n========== PROMPT SENT TO ${source.toUpperCase()} ==========\n`);
     console.log(promptText);
     console.log("Industry:", industry);
@@ -214,9 +214,9 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
 // CHANGED: new — shared entry point for both the /run route (manual trigger)
 // and scheduler.js (automatic trigger). Generates the jobId and fires
 // runPipeline in the background, exactly like /run used to do inline.
-const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleId, source) => {
+const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleId, source, lookbackDays = 90) => {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  runPipeline(jobId, clientId, promptText, industry, moduleId, submoduleId, source || 'Exa');
+  runPipeline(jobId, clientId, promptText, industry, moduleId, submoduleId, source || 'Exa', lookbackDays);
   return jobId;
 };
 
