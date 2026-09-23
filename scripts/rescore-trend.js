@@ -1,51 +1,31 @@
 #!/usr/bin/env node
 /**
- * scripts/cleanup-duplicate-trends.js
- * =====================================
- * Removes duplicate members from Forward Outlook trends, caused by the
- * within-batch topic dedup bug that was fixed in modules/topicDedup.js.
+ * scripts/rescore-trend.js
+ * ==========================
+ * Cleans up duplicate members in Forward Outlook trends (caused by the
+ * within-batch topic dedup bug that was fixed in modules/topicDedup.js),
+ * then re-runs weekly scoring to refresh snapshots.
  *
  * ── What counts as a duplicate ────────────────────────────────────────
- * Two trend members are considered duplicates if EITHER:
- *   1. They share the same source_article_url (same URL ingested twice)
- *   2. They share the same md5(summary)  (same story, different URL --
- *      the syndicated press-release pattern)
+ * Two members of the same trend are duplicates if EITHER:
+ *   1. They share the same source_article_url (URL ingested twice)
+ *   2. They share the same md5(summary)  (syndicated press-release pattern)
  *
- * Within each duplicate group, the member whose trend_signals.created_at
- * is OLDEST is kept. Everything else is deleted.
- *
- * ── What it does per affected trend ───────────────────────────────────
- *   1. Deletes the redundant trend_membership rows
- *   2. Deletes the now-orphaned trend_signals rows
- *   3. Recomputes dot_size, ring, confidence_score, posture on trend_clusters
- *   4. Resets periods_in_posture = 0 so posture can adjust on next scoring
- *   5. After all trends are processed, runs runWeeklyScoring once per
- *      affected (client_id, module_id, industry) so trend_snapshots gets
- *      a fresh, correct row that the dashboard will display
+ * Within each group, the member with the OLDEST trend_signals.created_at
+ * is kept. Everything else is deleted.
  *
  * ── Safety ────────────────────────────────────────────────────────────
- * - Dry-run by default. Nothing is deleted unless you pass --apply.
- * - Skips any trend_signals row whose source_article_url contains
- *   'example.com' (test/seed data).
- * - Does NOT touch policy_signals, market_dynamics_signals, or
- *   policy_articles_full. Only trend-side tables.
- * - Does NOT touch Qdrant. Orphan vectors in trend_matching are harmless;
- *   they'll never be matched because their article_id no longer exists in
- *   trend_membership.
- * - Prints a summary report at the end.
+ * - Dry-run by default. Pass --apply to actually delete.
+ * - Skips example.com test data.
+ * - Does NOT touch policy_signals, market_dynamics_signals, or Qdrant.
  *
  * ── Usage ─────────────────────────────────────────────────────────────
- *   Dry-run (safe, default):
- *     docker exec -it app-test-app-1 node scripts/cleanup-duplicate-trends.js
+ *   Dry run:   docker exec -it app-test-app-1 node scripts/rescore-trend.js
+ *   Apply:     docker exec -it app-test-app-1 node scripts/rescore-trend.js --apply
+ *   Filter:    ... --apply --client=<uuid>   or   --apply --trend=<uuid>
  *
- *   Apply changes:
- *     docker exec -it app-test-app-1 node scripts/cleanup-duplicate-trends.js --apply
- *
- *   Scope to one client:
- *     docker exec -it app-test-app-1 node scripts/cleanup-duplicate-trends.js --apply --client=<uuid>
- *
- *   Scope to one trend:
- *     docker exec -it app-test-app-1 node scripts/cleanup-duplicate-trends.js --apply --trend=<uuid>
+ *   No-args mode (used earlier for single-client re-scoring):
+ *     node scripts/rescore-trend.js <moduleId> <clientId> <industry>
  */
 
 require('dotenv').config();
@@ -57,53 +37,77 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 const CLIENT_FILTER = (args.find(a => a.startsWith('--client=')) || '').split('=')[1] || null;
-const TREND_FILTER = (args.find(a => a.startsWith('--trend=')) || '').split('=')[1] || null;
+const TREND_FILTER  = (args.find(a => a.startsWith('--trend='))  || '').split('=')[1] || null;
 
-const { runWeeklyScoring } = require('../modules/trendClustering');
-
-const md5 = (s) => crypto.createHash('md5').update(s || '').digest('hex');
-
-// ── Fetch every trend member (excludes example.com test data) ────────────
-async function loadAllMembers() {
-  let query = supabase
-    .from('trend_membership')
-    .select(`
-      id,
-      trend_id,
-      signal_id,
-      joined_at,
-      trend_signals!inner (
-        id,
-        client_id,
-        module_id,
-        industry,
-        source_article_url,
-        summary,
-        created_at
-      )
-    `)
-    .not('trend_signals.source_article_url', 'ilike', '%example.com%');
-
-  if (TREND_FILTER) query = query.eq('trend_id', TREND_FILTER);
-
-  const { data, error } = await query;
-  if (error) throw new Error(`Failed to load trend_membership: ${error.message}`);
-  return data || [];
+// ── Legacy mode: rescore-trend.js <moduleId> <clientId> <industry> ───────
+// (Kept so the earlier workflow still works.)
+if (!APPLY && !CLIENT_FILTER && !TREND_FILTER && args.length === 3 && !args[0].startsWith('--')) {
+  const [moduleId, clientId, industry] = args;
+  const { runWeeklyScoring } = require('../modules/trendClustering');
+  (async () => {
+    console.log('[Rescore] Running weekly scoring for:');
+    console.log('  moduleId:', moduleId);
+    console.log('  clientId:', clientId);
+    console.log('  industry:', industry);
+    console.log('');
+    await runWeeklyScoring(moduleId, clientId, industry);
+    console.log('\n[Rescore] Done.');
+    process.exit(0);
+  })().catch(err => {
+    console.error('[Rescore] Failed:', err.message);
+    console.error(err.stack);
+    process.exit(1);
+  });
+  return;
 }
 
-// ── Group members of a single trend by duplicate key ─────────────────────
-// Duplicate groups are formed by UNION of URL-equal and summary-equal.
-// We use a simple union-find style grouping to handle that cleanly.
-function groupDuplicates(members) {
-  const byUrl = new Map();
-  const byHash = new Map();
-  const parent = new Map(); // signal_id -> representative signal_id
+const { runWeeklyScoring } = require('../modules/trendClustering');
+const md5 = (s) => crypto.createHash('md5').update(s || '').digest('hex');
 
+// ── Load memberships (no embedded join -- does it in JS) ─────────────────
+async function loadAllMembers() {
+  // 1. All memberships (optionally filtered by trend)
+  let mq = supabase.from('trend_membership').select('id, trend_id, signal_id, joined_at');
+  if (TREND_FILTER) mq = mq.eq('trend_id', TREND_FILTER);
+  const { data: memberships, error: mErr } = await mq;
+  if (mErr) throw new Error(`Failed to load trend_membership: ${mErr.message}`);
+  if (!memberships || memberships.length === 0) return [];
+
+  // 2. All distinct signal_ids, batched (Supabase has a URL length limit)
+  const signalIds = [...new Set(memberships.map(m => m.signal_id).filter(Boolean))];
+  const signalsById = new Map();
+  const BATCH = 500;
+  for (let i = 0; i < signalIds.length; i += BATCH) {
+    const slice = signalIds.slice(i, i + BATCH);
+    let sq = supabase
+      .from('trend_signals')
+      .select('id, client_id, module_id, industry, source_article_url, summary, created_at')
+      .in('id', slice);
+    const { data: signals, error: sErr } = await sq;
+    if (sErr) throw new Error(`Failed to load trend_signals: ${sErr.message}`);
+    for (const s of signals || []) signalsById.set(s.id, s);
+  }
+
+  // 3. Join in JS. Drop any whose signal row is missing or is test data.
+  const joined = [];
+  for (const m of memberships) {
+    const s = signalsById.get(m.signal_id);
+    if (!s) continue; // orphaned membership -- skip
+    if (s.source_article_url && s.source_article_url.includes('example.com')) continue;
+    if (CLIENT_FILTER && s.client_id !== CLIENT_FILTER) continue;
+    joined.push({ ...m, trend_signals: s });
+  }
+  return joined;
+}
+
+// ── Group members of a trend into duplicate clusters (union-find) ────────
+function groupDuplicates(members) {
+  const parent = new Map();
   const find = (id) => {
     if (parent.get(id) === id) return id;
-    const root = find(parent.get(id));
-    parent.set(id, root);
-    return root;
+    const r = find(parent.get(id));
+    parent.set(id, r);
+    return r;
   };
   const union = (a, b) => {
     const ra = find(a), rb = find(b);
@@ -112,103 +116,85 @@ function groupDuplicates(members) {
 
   for (const m of members) parent.set(m.signal_id, m.signal_id);
 
+  const byUrl = new Map();
+  const byHash = new Map();
   for (const m of members) {
-    const url = m.trend_signals?.source_article_url;
+    const url = m.trend_signals.source_article_url;
     if (url) {
       if (byUrl.has(url)) union(m.signal_id, byUrl.get(url));
       else byUrl.set(url, m.signal_id);
     }
   }
   for (const m of members) {
-    const hash = md5(m.trend_signals?.summary);
-    if (byHash.has(hash)) union(m.signal_id, byHash.get(hash));
-    else byHash.set(hash, m.signal_id);
+    const h = md5(m.trend_signals.summary);
+    if (byHash.has(h)) union(m.signal_id, byHash.get(h));
+    else byHash.set(h, m.signal_id);
   }
 
-  // Build groups: representative -> [members]
   const groups = new Map();
   for (const m of members) {
-    const root = find(m.signal_id);
-    if (!groups.has(root)) groups.set(root, []);
-    groups.get(root).push(m);
+    const r = find(m.signal_id);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(m);
   }
   return [...groups.values()];
 }
 
-// ── Analyze all trends and produce a plan ────────────────────────────────
+// ── Build the plan ───────────────────────────────────────────────────────
 async function buildPlan(members) {
-  // Group members by trend_id
   const byTrend = new Map();
   for (const m of members) {
     if (!byTrend.has(m.trend_id)) byTrend.set(m.trend_id, []);
     byTrend.get(m.trend_id).push(m);
   }
 
-  const plan = []; // [{ trendId, clientId, moduleId, industry, keep: [...], delete: [...] }]
-
+  const plan = [];
   for (const [trendId, trendMembers] of byTrend) {
-    if (CLIENT_FILTER && trendMembers[0].trend_signals.client_id !== CLIENT_FILTER) continue;
-
     const groups = groupDuplicates(trendMembers);
-
-    const keep = [];
-    const remove = [];
-
+    const keep = [], remove = [];
     for (const group of groups) {
-      if (group.length === 1) {
-        keep.push(group[0]);
-        continue;
-      }
-      // Sort by trend_signals.created_at ascending -- oldest wins
-      const sorted = [...group].sort((a, b) => {
-        const ta = new Date(a.trend_signals.created_at).getTime();
-        const tb = new Date(b.trend_signals.created_at).getTime();
-        return ta - tb;
-      });
+      if (group.length === 1) { keep.push(group[0]); continue; }
+      const sorted = [...group].sort((a, b) =>
+        new Date(a.trend_signals.created_at).getTime() -
+        new Date(b.trend_signals.created_at).getTime()
+      );
       keep.push(sorted[0]);
       remove.push(...sorted.slice(1));
     }
-
-    if (remove.length === 0) continue; // nothing to do for this trend
+    if (remove.length === 0) continue;
 
     plan.push({
       trendId,
       clientId: trendMembers[0].trend_signals.client_id,
       moduleId: trendMembers[0].trend_signals.module_id,
       industry: trendMembers[0].trend_signals.industry,
-      keep,
-      remove,
+      keep, remove,
       totalMembers: trendMembers.length,
     });
   }
-
   return plan;
 }
 
-// ── Print the report ─────────────────────────────────────────────────────
+// ── Report ───────────────────────────────────────────────────────────────
 function printPlan(plan) {
   console.log('');
   console.log('='.repeat(72));
-  console.log(`DRY RUN — no changes made${APPLY ? '' : ' (pass --apply to commit)'}`);
+  console.log(`MODE: ${APPLY ? 'APPLY (will delete)' : 'DRY RUN (no changes)'}`);
   console.log('='.repeat(72));
   console.log('');
 
   if (plan.length === 0) {
-    console.log('No trends with duplicates found. Nothing to do.');
+    console.log('No trends with duplicates found.');
     return;
   }
 
-  let totalRemoved = 0;
-  let totalKept = 0;
-
+  let totalRemoved = 0, totalKept = 0;
   for (const p of plan) {
     console.log(`Trend: ${p.trendId}`);
-    console.log(`  client: ${p.clientId}  |  module: ${p.moduleId}  |  industry: ${p.industry}`);
-    console.log(`  members: ${p.totalMembers}  |  keeping: ${p.keep.length}  |  removing: ${p.remove.length}`);
+    console.log(`  client=${p.clientId}  module=${p.moduleId}  industry=${p.industry}`);
+    console.log(`  members=${p.totalMembers}  keep=${p.keep.length}  remove=${p.remove.length}`);
     for (const r of p.remove) {
-      const url = r.trend_signals.source_article_url || '(no url)';
-      const t = r.trend_signals.created_at;
-      console.log(`    - REMOVE  ${r.signal_id}  ${t}  ${url}`);
+      console.log(`    REMOVE ${r.signal_id}  ${r.trend_signals.created_at}  ${r.trend_signals.source_article_url || '(no url)'}`);
     }
     console.log('');
     totalRemoved += p.remove.length;
@@ -219,47 +205,34 @@ function printPlan(plan) {
   console.log(`SUMMARY: ${plan.length} trends affected`);
   console.log(`         ${totalKept} memberships kept`);
   console.log(`         ${totalRemoved} memberships to delete`);
-  console.log(`         ${totalRemoved} trend_signals to delete (same count)`);
   console.log('='.repeat(72));
   console.log('');
 }
 
-// ── Execute the plan ─────────────────────────────────────────────────────
+// ── Apply ────────────────────────────────────────────────────────────────
 async function applyPlan(plan) {
-  console.log('');
-  console.log('Applying changes...');
-  console.log('');
-
-  let membershipsDeleted = 0;
-  let signalsDeleted = 0;
-  const affected = new Set(); // "clientId|moduleId|industry"
+  let membershipsDeleted = 0, signalsDeleted = 0;
+  const affected = new Set();
 
   for (const p of plan) {
-    console.log(`Trend ${p.trendId}: removing ${p.remove.length} duplicate members...`);
-
     const membershipIds = p.remove.map(r => r.id);
     const signalIds = p.remove.map(r => r.signal_id);
+
+    console.log(`Trend ${p.trendId}: removing ${membershipIds.length} members...`);
 
     // 1. Delete trend_membership rows
     const { error: tmErr } = await supabase
       .from('trend_membership')
       .delete()
       .in('id', membershipIds);
-    if (tmErr) {
-      console.error(`  [!] Failed to delete memberships: ${tmErr.message}`);
-      continue;
-    }
+    if (tmErr) { console.error(`  [!] membership delete failed: ${tmErr.message}`); continue; }
     membershipsDeleted += membershipIds.length;
 
-    // 2. Verify none of the signals are still referenced
-    const { data: stillRef, error: refErr } = await supabase
+    // 2. Verify signals aren't referenced elsewhere
+    const { data: stillRef } = await supabase
       .from('trend_membership')
       .select('id')
       .in('signal_id', signalIds);
-    if (refErr) {
-      console.error(`  [!] Verification query failed: ${refErr.message}`);
-      continue;
-    }
     if (stillRef && stillRef.length > 0) {
       console.error(`  [!] ${stillRef.length} signals still referenced elsewhere, skipping signal delete for this trend`);
       continue;
@@ -270,79 +243,60 @@ async function applyPlan(plan) {
       .from('trend_signals')
       .delete()
       .in('id', signalIds);
-    if (tsErr) {
-      console.error(`  [!] Failed to delete signals: ${tsErr.message}`);
-      continue;
-    }
+    if (tsErr) { console.error(`  [!] signal delete failed: ${tsErr.message}`); continue; }
     signalsDeleted += signalIds.length;
 
-    // 4. Reset hysteresis so posture can adjust on next scoring
+    // 4. Reset hysteresis
     await supabase
       .from('trend_clusters')
       .update({ periods_in_posture: 0, last_updated_at: new Date().toISOString() })
       .eq('id', p.trendId);
 
     affected.add(`${p.clientId}|${p.moduleId}|${p.industry}`);
-    console.log(`  [ok] ${membershipIds.length} memberships + ${signalIds.length} signals removed`);
+    console.log(`  [ok] removed ${membershipIds.length} memberships + ${signalIds.length} signals`);
   }
 
   console.log('');
   console.log('='.repeat(72));
-  console.log(`Deleted ${membershipsDeleted} memberships`);
-  console.log(`Deleted ${signalsDeleted} signals`);
+  console.log(`Deleted ${membershipsDeleted} memberships, ${signalsDeleted} signals`);
   console.log('='.repeat(72));
   console.log('');
 
-  // 5. Run weekly scoring for each affected (client, module, industry)
+  // 5. Re-run weekly scoring for each affected combo
   if (affected.size > 0) {
-    console.log(`Re-scoring ${affected.size} client+module+industry combos...`);
-    console.log('');
+    console.log(`Re-scoring ${affected.size} client+module+industry combos...\n`);
     for (const key of affected) {
       const [clientId, moduleId, industry] = key.split('|');
-      console.log(`--- Scoring: client=${clientId} module=${moduleId} industry=${industry}`);
-      try {
-        await runWeeklyScoring(moduleId, clientId, industry);
-      } catch (err) {
-        console.error(`  [!] Scoring failed: ${err.message}`);
-      }
+      console.log(`--- Scoring: ${clientId} / ${moduleId} / ${industry}`);
+      try { await runWeeklyScoring(moduleId, clientId, industry); }
+      catch (err) { console.error(`  [!] scoring failed: ${err.message}`); }
       console.log('');
     }
   }
-
   console.log('Done.');
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
 (async () => {
   try {
-    console.log(`Mode: ${APPLY ? 'APPLY (changes will be made)' : 'DRY RUN (no changes)'}`);
+    console.log(`Mode: ${APPLY ? 'APPLY' : 'DRY RUN'}`);
     if (CLIENT_FILTER) console.log(`Client filter: ${CLIENT_FILTER}`);
-    if (TREND_FILTER) console.log(`Trend filter: ${TREND_FILTER}`);
+    if (TREND_FILTER)  console.log(`Trend filter:  ${TREND_FILTER}`);
     console.log('');
 
-    console.log('Loading trend members...');
+    console.log('Loading trend memberships...');
     const members = await loadAllMembers();
-    console.log(`Loaded ${members.length} memberships across ${new Set(members.map(m => m.trend_id)).size} trends.`);
-    console.log('');
+    console.log(`Loaded ${members.length} memberships across ${new Set(members.map(m => m.trend_id)).size} trends.\n`);
 
     console.log('Building cleanup plan...');
     const plan = await buildPlan(members);
-
     printPlan(plan);
 
-    if (!APPLY) {
-      console.log('DRY RUN — no changes made. Re-run with --apply to execute.');
-      process.exit(0);
-    }
-
-    if (plan.length === 0) {
-      console.log('Nothing to do.');
-      process.exit(0);
-    }
+    if (!APPLY) { console.log('DRY RUN — pass --apply to execute.'); process.exit(0); }
+    if (plan.length === 0) { console.log('Nothing to do.'); process.exit(0); }
 
     await applyPlan(plan);
     process.exit(0);
-
   } catch (err) {
     console.error('[cleanup] Fatal error:', err.message);
     console.error(err.stack);
