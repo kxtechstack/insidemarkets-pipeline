@@ -221,12 +221,15 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
     );
   }
 
-  console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays}d`);
-filtered.forEach((r, i) => {
-  console.log(`  [${i+1}] score=${r.score.toFixed(3)} | module=${r.payload.module_id} | title="${r.payload.title}"`);
-});
-
   const chosen = bestAttempt;
+
+  // NEW: log every retrieved chunk with its score, so we can see exactly
+  // what's passing the current 0.20 threshold before deciding whether to
+  // change it.
+  console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays === null ? 'no filter' : bestWindowDays + 'd'} | ${chosen.length} result(s)`);
+  chosen.forEach((r, i) => {
+    console.log(`  [${i + 1}] score=${r.score.toFixed(3)} | module=${r.payload.module_id} | title="${r.payload.title}"`);
+  });
 
   // Dedupe by article/title and sort by score
   const seen = new Set();
