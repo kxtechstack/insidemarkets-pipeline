@@ -76,7 +76,7 @@ async function loadAllMembers() {
   // 2. All distinct signal_ids, batched (Supabase has a URL length limit)
   const signalIds = [...new Set(memberships.map(m => m.signal_id).filter(Boolean))];
   const signalsById = new Map();
-  const BATCH = 500;
+  const BATCH = 200;
   for (let i = 0; i < signalIds.length; i += BATCH) {
     const slice = signalIds.slice(i, i + BATCH);
     let sq = supabase
