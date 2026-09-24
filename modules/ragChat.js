@@ -24,6 +24,34 @@ const RAG_MODULE_PROMPTS = {
   '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'rag_chat_forward_outlook_v1',      // Forward Outlook
 };
 
+// ── Shared formatting contract injected into every RAG prompt ────────────────
+const SHARED_FORMATTING_RULES = `FORMATTING RULES — apply to every answer without exception:
+
+Structure the answer as a professional intelligence report:
+1. Open with a one-paragraph executive summary that directly answers the question.
+2. Follow with clearly labelled sections using "## Section Name" for each major theme.
+3. Use "- " bullets for lists and "  - " (two-space indent + dash) for sub-bullets.
+4. When comparing multiple items that each have several attributes, format them as:
+   • Item Name
+      - Attribute 1: value
+      - Attribute 2: value
+      - Attribute 3: value
+5. Close with a short "## Implications" or "## What This Means" section when relevant.
+
+Hard prohibitions:
+- Never use tables. Never use the "|" character. Never use HTML tags such as <br>.
+- Never insert citation markers anywhere in the answer text — no [1], no [1,3],
+  no (Signal 1), no (Article 1), no (Source 1), no (Ref 1). The CITED_SOURCES
+  line at the very top of your response is the ONLY place numbers may appear.
+- Do not mention phrases such as "According to the provided articles",
+  "Based on the retrieved context", or "The signals state".
+- Do not repeat information. Do not invent or modify names, dates, numbers,
+  organizations, regulations, or titles.
+
+Preserve exactly:
+- Organization names, jurisdiction names, regulation/legislation names,
+  product names, dates, deadlines, numerical values, and monetary figures.`;
+
 const getRagPromptTemplate = async (moduleId) => {
   const promptId = RAG_MODULE_PROMPTS[moduleId] || 'rag_chat_policy_v1';
 
@@ -38,7 +66,9 @@ const getRagPromptTemplate = async (moduleId) => {
     throw new Error(`Could not load RAG prompt '${promptId}': ${error?.message}`);
   }
 
-  return data.prompt_template;
+  return data.prompt_template.includes('{FORMATTING_RULES}')
+    ? data.prompt_template.replace('{FORMATTING_RULES}', SHARED_FORMATTING_RULES)
+    : data.prompt_template;
 };
 
 // ── Local embedding model ────────────────────────────────────────────────────
@@ -80,11 +110,62 @@ class GroqChat extends BaseChatModel {
 // ── RAG chain using LangChain ────────────────────────────────────────────────
 // CHANGED: askQuestion now takes moduleId and filters Qdrant search by it,
 // so chat answers on one module's tab don't pull in content from other modules.
+// ── Shared answer post-processor ─────────────────────────────────────────────
+// Strips: leading filler, CITED_SOURCES line, leaked inline citation markers
+//         ((Signal n) / (Article n) / [n] / [1,3]), HTML breaks, tables.
+// KEEPS: markdown headers (##), bold (**), bullets (- / •), sub-bullets.
+const cleanRagAnswer = (raw) => {
+  let out = raw;
+
+  // 1. Remove leading conversational filler
+  out = out
+    .replace(/^According to the (provided )?policy articles[:,-]?\s*/i, '')
+    .replace(/^According to the (provided )?market signals[:,-]?\s*/i, '')
+    .replace(/^According to the (provided )?trend signals[:,-]?\s*/i, '')
+    .replace(/^According to the articles[:,-]?\s*/i, '')
+    .replace(/the articles state that\s*/gi, '')
+    .replace(/the signals state that\s*/gi, '')
+    .replace(/Based on the retrieved context[:,-]?\s*/gi, '');
+
+  // 2. Extract & strip CITED_SOURCES line (tolerant of whitespace/periods)
+  const citedMatch = out.match(/^\s*CITED_SOURCES:\s*(none|[\d,\s]+)\s*[\.\n]/i);
+  let citedIndices = new Set();
+  if (citedMatch) {
+    const val = citedMatch[1].toLowerCase().trim();
+    if (val !== 'none') {
+      citedIndices = new Set(
+        val.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+      );
+    }
+    out = out.replace(/^\s*CITED_SOURCES:\s*(none|[\d,\s]+)\s*[\.\n]+/i, '');
+  }
+
+  // 3. Strip leaked inline citation markers the LLM snuck in
+  out = out
+    .replace(/\s*\((?:Signal|Article|Source|Ref|Reference)\s*\d+\)/gi, '')
+    .replace(/\s*\[(?:Signal|Article|Source|Ref|Reference)\s*\d+\]/gi, '')
+    .replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\]/g, '')          // bare [1] or [1,3]
+    .replace(/\s*\((?:see|ref\.?|refer to)\s+(?:Signal|Article|Source)\s*\d+\)/gi, '');
+
+  // 4. HTML + markdown table → bullet fallback (belt & braces)
+  out = out
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/^\|?-{3,}(\|-{3,})*\|?\s*$/gm, '')
+    .replace(/^\s*\|\s*/gm, '• ')
+    .replace(/\s*\|\s*/g, '  —  ');
+
+  // 5. Collapse whitespace
+  out = out.replace(/\n{3,}/g, '\n\n').trim();
+
+  return { answer: out, citedIndices };
+};
+
+// ── RAG chain ────────────────────────────────────────────────────────────────
 const askQuestion = async (question, clientId, industry, moduleId) => {
 
-  await setupPolicyCollection(); // CHANGED: ensures module_id index exists before searching
+  await setupPolicyCollection();
 
-  // Step 1 — embed question and retrieve from Qdrant
+  // Step 1 — embed question, retrieve from Qdrant scoped to client + industry + module
   const questionVector = await embedText(question);
 
   const searchResults = await qdrant.search(POLICY_COLLECTION, {
@@ -93,23 +174,26 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     filter: {
       must: [
         { key: 'client_id', match: { value: clientId } },
-        { key: 'industry', match: { value: industry } },
-        { key: 'module_id', match: { value: moduleId } }, // CHANGED: new
+        { key: 'industry',  match: { value: industry } },
+        { key: 'module_id', match: { value: moduleId } },
       ],
     },
     with_payload: true,
   });
-    const filteredResults = searchResults.filter(r => r.score >= 0.20);
 
+  const filteredResults = searchResults.filter(r => r.score >= 0.20);
 
   console.log('[RAG] Retrieved chunks:');
   filteredResults.forEach((r, i) => {
-    console.log(`[${i+1}] Score: ${r.score.toFixed(3)} | Title: ${r.payload.title}`);
+    console.log(`[${i + 1}] Score: ${r.score.toFixed(3)} | Title: ${r.payload.title}`);
     console.log(`     Chunk: ${r.payload.chunk_text.slice(0, 150)}`);
   });
 
   if (!filteredResults || filteredResults.length === 0) {
-    return { answer: 'No relevant policy information found for your question.', sources: [] };
+    return {
+      answer: 'No relevant information found for your question in this module.',
+      sources: [],
+    };
   }
 
   // Step 2 — build context
@@ -119,12 +203,11 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
 
   // Step 3 — LangChain RAG chain
   const llm = new GroqChat();
-
   const promptTemplate = await getRagPromptTemplate(moduleId);
 
   const prompt = ChatPromptTemplate.fromMessages([
-  ["system", promptTemplate]
-]);
+    ['system', promptTemplate],
+  ]);
 
   const chain = RunnableSequence.from([
     prompt,
@@ -132,55 +215,39 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     new StringOutputParser(),
   ]);
 
-  const answer = await chain.invoke({
-    context,
-    question,
-    industry
-});
+  const rawAnswer = await chain.invoke({ context, question, industry });
 
-  let cleanedAnswer = answer
-  .replace(/^According to the (provided )?policy articles[:,-]?\s*/i, "")
-  .replace(/^According to the articles[:,-]?\s*/i, "")
-  .replace(/the articles state that\s*/gi, "")
-  .replace(/Based on the retrieved context[:,-]?\s*/gi, "")
-  .replace(/\*\*(.*?)\*\*/g, '$1')
-  .replace(/\*(.*?)\*/g, '$1')
-  .replace(/#{1,6}\s/g, '')
-  .replace(/^\s*[-*]\s/gm, '• ')
-  .replace(/<br\s*\/?>/gi, '\n')
-  .replace(/^\|?-{3,}(\|-{3,})*\|?\s*$/gm, '')
-  .replace(/^\s*\|\s*/gm, '• ')
-  .replace(/\s*\|\s*/g, '  —  ')
-  .replace(/\n{3,}/g, '\n\n')
-  .trim();
+  // Step 4 — clean + extract citations
+  const { answer: cleanedAnswer, citedIndices } = cleanRagAnswer(rawAnswer);
 
-
-  // Step 4 — parse the CITED_SOURCES line from the START of the response (immune to truncation),
-  // strip it from the visible answer, and use it to filter sources accurately.
-  const citedMatch = cleanedAnswer.match(/^CITED_SOURCES:\s*(none|[\d,\s]+)\s*\n+/i);
-
-  let citedIndices = new Set();
-  if (citedMatch && citedMatch[1].toLowerCase() !== 'none') {
-    citedIndices = new Set(
-      citedMatch[1].split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
-    );
-  }
-
-  // Strip the CITED_SOURCES line from what the user sees
-  cleanedAnswer = cleanedAnswer.replace(/^CITED_SOURCES:\s*(none|[\d,\s]+)\s*\n+/i, '').trim();
-
+  // Step 5 — resolve sources
   const NO_ANSWER_PATTERNS = [
     /don'?t have enough information/i,
-    /no relevant (policy )?information/i,
+    /no relevant (policy |market |trend )?information/i,
   ];
   const isNoAnswer = NO_ANSWER_PATTERNS.some(p => p.test(cleanedAnswer));
 
-  const citedResults = isNoAnswer ? [] : filteredResults.filter((_, i) => citedIndices.has(i + 1));
+  // Bounds-check cited indices against what we actually retrieved
+  const validIndices = new Set(
+    [...citedIndices].filter(n => n >= 1 && n <= filteredResults.length)
+  );
 
-  const sources = [...new Map(citedResults.map(r => [r.payload.url, {
-    title: r.payload.title,
-    url: r.payload.url,
-  }])).values()];
+  let citedResults;
+  if (isNoAnswer) {
+    citedResults = [];
+  } else if (validIndices.size > 0) {
+    citedResults = filteredResults.filter((_, i) => validIndices.has(i + 1));
+  } else {
+    // LLM forgot to declare sources but did answer → show top 3 retrieved
+    citedResults = filteredResults.slice(0, 3);
+  }
+
+  const sources = [...new Map(
+    citedResults.map(r => [r.payload.url, {
+      title: r.payload.title,
+      url:   r.payload.url,
+    }])
+  ).values()];
 
   return { answer: cleanedAnswer, sources };
 };
