@@ -9,7 +9,7 @@ const { AIMessage } = require('@langchain/core/messages');
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const { setupPolicyCollection } = require('./llmRelevanceProcessor'); // CHANGED: new
-
+const { classifyIntent } = require('./decisionIntelligence/classifyIntent');
 const qdrant = new QdrantClient({
   url: process.env.QDRANT_URL,
   apiKey: process.env.QDRANT_API_KEY,
@@ -163,6 +163,40 @@ out = out
 
 // ── RAG chain ────────────────────────────────────────────────────────────────
 const askQuestion = async (question, clientId, industry, moduleId) => {
+
+  // ── 0. Intent gate ───────────────────────────────────────────────────
+  // Same LLM-driven classification the DI chat uses. Stops greetings,
+  // off-topic questions, and clarifications from ever reaching Qdrant.
+  // On any failure, classifyIntent() falls back to 'market_intelligence'
+  // so real questions are never blocked.
+  try {
+    const intentResult = await classifyIntent(question);
+
+    if (intentResult.intent !== 'market_intelligence') {
+      const MODULE_LABELS = {
+        '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'Policy & Risk',
+        '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'Market Dynamics',
+        '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'Forward Outlook',
+      };
+      const moduleLabel = MODULE_LABELS[moduleId] || 'this module';
+
+      let reply;
+      if (intentResult.intent === 'greeting') {
+        reply = `Hi! Ask me anything about ${moduleLabel} — I'll pull from the signals in this tab.`;
+      } else if (intentResult.intent === 'clarification') {
+        reply = `Could you clarify what you'd like to know about ${moduleLabel}? Try asking about recent developments, key players, or trends.`;
+      } else {
+        // off_topic
+        reply = `I can only answer questions about ${moduleLabel}. Try asking about recent developments, key players, or trends in this area.`;
+      }
+
+      console.log(`[RAG] intent=${intentResult.intent} — short-circuiting before retrieval`);
+      return { answer: reply, sources: [] };
+    }
+  } catch (err) {
+    // If classification itself throws, log and fall through to normal flow.
+    console.log(`[RAG] classifyIntent failed, proceeding with retrieval: ${err.message}`);
+  }
 
   await setupPolicyCollection();
 
