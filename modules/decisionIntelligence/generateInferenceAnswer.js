@@ -25,6 +25,66 @@ const MODULE_NAMES = {
   '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'Forward Outlook',
 };
 
+/**
+ * Numeric hallucination guard.
+ * Strips key_movement_analysis table if its numeric cells aren't traceable
+ * to the retrieved context. Years (2000-2099) are excluded from the check
+ * because they commonly appear in context and would falsely "match".
+ */
+function guardNumericTable(report, contextText) {
+  if (!report || !report.key_movement_analysis) return report;
+  const table = report.key_movement_analysis;
+  if (!table.rows || !table.rows.length) return report;
+
+  const extractNumbers = (s) =>
+    (String(s).match(/\d+(?:\.\d+)?/g) || []).map(n => parseFloat(n));
+
+  const contextNumbers = new Set();
+  for (const n of extractNumbers(contextText)) {
+    contextNumbers.add(String(n));
+    contextNumbers.add(String(n.toFixed(0)));
+    contextNumbers.add(String(n.toFixed(1)));
+  }
+
+  const isYearLike = (n) => n >= 2000 && n <= 2099 && Number.isInteger(n);
+
+  let totalNumericCells = 0;
+  let trustedCells = 0;
+
+  for (const row of table.rows) {
+    for (let i = 1; i < row.cells.length; i++) {
+      const cell = String(row.cells[i] ?? '');
+      const nums = extractNumbers(cell).filter(n => !isYearLike(n));
+      if (nums.length === 0) continue;
+      totalNumericCells++;
+      const allPresent = nums.every(n =>
+        contextNumbers.has(String(n)) ||
+        contextNumbers.has(String(n.toFixed(0))) ||
+        contextNumbers.has(String(n.toFixed(1)))
+      );
+      if (allPresent) trustedCells++;
+    }
+  }
+
+  if (totalNumericCells === 0) return report;
+
+  const trustRatio = trustedCells / totalNumericCells;
+  if (trustRatio < 0.5) {
+    console.warn(
+      `[guardNumericTable:inference] Table likely hallucinated: only ${trustedCells}/${totalNumericCells} numeric cells had all their non-year values present in context. Stripping table.`
+    );
+    const stripped = { ...report };
+    delete stripped.key_movement_analysis;
+    stripped._table_stripped = true;
+    stripped._table_strip_reason =
+      'Numeric values in the original table were not present in the retrieved data and could not be verified. ' +
+      'See the narrative sections for the qualitative analysis.';
+    return stripped;
+  }
+
+  return report;
+}
+
 async function loadInferencePrompt() {
   const { data, error } = await supabase
     .from('prompts')
@@ -254,6 +314,13 @@ async function generateInferenceAnswer(question, searchResults) {
   const sources = overrideSources
     ? overrideSources
     : resolveSources(citedIndices, sourceManifest);
+
+  // ── Numeric hallucination guard ──────────────────────────────────────
+  // Same guard used in generateAnswer.js — strips the table if its
+  // numeric cells aren't traceable to the retrieved context.
+  report = guardNumericTable(report, context);
+  // ─────────────────────────────────────────────────────────────────────
+
   return { report, sources };
 }
 
