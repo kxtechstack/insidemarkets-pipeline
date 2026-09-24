@@ -1028,6 +1028,29 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
+    
+    // NEW: mark this article as actively retrying BEFORE classification starts,
+    // so the frontend's 5s poll picks up "Retrying (N)" immediately instead of
+    // only after the article finishes. Only matters when this is a re-run of
+    // an existing job (existingLogId set, or a log row already exists for this
+    // job+url) -- for a brand-new first-time run, this is a no-op update.
+    try {
+      const { data: existingRow } = await supabase
+        .from('article_processing_log')
+        .select('id')
+        .eq('job_id', jobId)
+        .eq('article_url', article.url)
+        .limit(1)
+        .maybeSingle();
+      if (existingRow?.id) {
+        await supabase
+          .from('article_processing_log')
+          .update({ status: 'retrying', processed_at: new Date().toISOString() })
+          .eq('id', existingRow.id);
+      }
+    } catch (markErr) {
+      console.log(`  [!] Failed to mark retrying (non-fatal): ${markErr.message}`);
+    }
 
     try {
       let classification = await withTimeout(

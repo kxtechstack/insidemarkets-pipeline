@@ -562,6 +562,93 @@ app.post('/retry-now/:clientId', async (req, res) => {
   }
 });
 
+// NEW: resumes jobs stuck at status='failed', current_stage='llm_processing'
+// (i.e. died mid-classification, like the stale-job-watcher scenario) by
+// replaying whatever's still sitting in their Redis processed-queue.
+// Different from /retry-now, which only handles paused_rate_limited jobs
+// and article_processing_log rows with status='failed'.
+app.post('/retry-stuck-jobs/:clientId', async (req, res) => {
+  const { clientId } = req.params;
+  const { submoduleId } = req.body || {};
+
+  res.json({ message: 'Retry-stuck-jobs started', clientId, submoduleId: submoduleId || 'all' });
+
+  try {
+    let query = supabaseClient
+      .from('pipeline_job_status')
+      .select('job_id, submodule_id, module_id, industry, processed_queue_key')
+      .eq('client_id', clientId)
+      .eq('status', 'failed')
+      .eq('current_stage', 'llm_processing');
+
+    if (submoduleId) {
+      query = query.eq('submodule_id', submoduleId);
+    }
+
+    const { data: stuckJobs, error } = await query;
+
+    if (error) {
+      console.error(`[RetryStuckJobs] Query error for ${clientId}:`, error.message);
+      return;
+    }
+
+    if (!stuckJobs || stuckJobs.length === 0) {
+      console.log(`[RetryStuckJobs] No stuck jobs found for client ${clientId}${submoduleId ? `, submodule ${submoduleId}` : ''}`);
+      return;
+    }
+
+    console.log(`[RetryStuckJobs] Found ${stuckJobs.length} stuck job(s) for client ${clientId} — resuming each`);
+
+    const { redis } = require('./modules/queueManager');
+    const { markFullyCompleted, failJobTracking } = require('./modules/jobStatusTracker');
+    const { acquireLLMSlot, releaseLLMSlot } = require('./modules/concurrencyLimiter');
+
+    for (const job of stuckJobs) {
+      const queueKey = job.processed_queue_key || `processed:${job.job_id}`;
+      const len = await redis.llen(queueKey);
+
+      if (!len) {
+        console.log(`[RetryStuckJobs] ${job.job_id} — queue empty, marking permanently_failed`);
+        await supabaseClient
+          .from('pipeline_job_status')
+          .update({ status: 'permanently_failed', error_message: 'Queue empty on stuck-job retry', updated_at: new Date().toISOString() })
+          .eq('job_id', job.job_id);
+        continue;
+      }
+
+      console.log(`[RetryStuckJobs] Resuming ${job.job_id} (${len} articles queued)`);
+
+      await supabaseClient
+        .from('pipeline_job_status')
+        .update({ status: 'running', current_stage: 'llm_processing', updated_at: new Date().toISOString() })
+        .eq('job_id', job.job_id);
+
+      await acquireLLMSlot(job.job_id);
+      try {
+        const result = await processQueueInBatches(
+          queueKey, clientId, job.industry || 'General', job.job_id, job.module_id, job.submodule_id
+        );
+
+        if (!result.aborted) {
+          await markFullyCompleted(job.job_id);
+          console.log(`[RetryStuckJobs] ${job.job_id} completed: relevant=${result.relevant}, irrelevant=${result.irrelevant}`);
+        } else {
+          await failJobTracking(job.job_id, 'llm_processing', result.reason || 'Circuit breaker tripped again');
+          console.log(`[RetryStuckJobs] ${job.job_id} aborted again — left as failed`);
+        }
+      } catch (err) {
+        await failJobTracking(job.job_id, 'llm_processing', err.message);
+        console.error(`[RetryStuckJobs] ${job.job_id} threw:`, err.message);
+      } finally {
+        releaseLLMSlot(job.job_id);
+      }
+    }
+
+  } catch (err) {
+    console.error(`[RetryStuckJobs] Error for client ${clientId}:`, err.message);
+  }
+});
+
 // GET /report/:clientId?date=YYYY-MM-DD
 // Returns the aggregated daily intelligence collection report.
 // All aggregation happens server-side so the frontend just renders.
