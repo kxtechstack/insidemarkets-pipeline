@@ -32,6 +32,7 @@ const MODULE_NAMES = {
  * because they commonly appear in context and would falsely "match".
  */
 function guardNumericTable(report, contextText) {
+  console.log(`[guardNumericTable:inference] CALLED | hasTable=${!!report?.key_movement_analysis} | contextLen=${contextText?.length || 0}`);
   if (!report || !report.key_movement_analysis) return report;
   const table = report.key_movement_analysis;
   if (!table.rows || !table.rows.length) return report;
