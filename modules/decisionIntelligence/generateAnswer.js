@@ -152,7 +152,7 @@ function guardNumericTable(report, contextText) {
 
     // Pattern: optional $, number (with optional commas/decimals), optional unit.
     // Units we recognize: %, percent, b/billion, m/million, k/thousand.
-    const re = /(\$)?\s*([\d,]+(?:\.\d+)?)\s*(%|percent|billion|million|thousand|bn|mn|[bmk])\b?/g;
+    const re = /(\$)?\s*([\d,]+(?:\.\d+)?)\s*(%|percent|billion|million|thousand|bn|mn|[bmk])?/g;
     let m;
     while ((m = re.exec(cell)) !== null) {
       const value = parseFloat(m[2].replace(/,/g, ''));
