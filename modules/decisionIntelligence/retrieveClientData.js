@@ -113,6 +113,14 @@ function detectTargetModules(question) {
     "import", "export", "customs",
     "halal certification", "safety opinion", "draft regulation",
     "reclassif", "notified", "notification",
+    // Regulator / agency names — needed for questions like
+    // "Has the Nuclear Regulatory Commission proposed anything recently?"
+    "commission", "nrc", "nuclear regulatory", "nuclear regulator",
+    "regulator", "regulatory body", "regulatory commission",
+    "atomic energy", "nuclear safety", "nuclear safety authority",
+    "energy commission", "energy regulator",
+    "securities commission", "competition commission",
+    "central bank",
   ];
   if (policyKeywords.some(k => q.includes(k))) matched.add(POLICY_MODULE_ID);
 
@@ -125,6 +133,7 @@ function detectTargetModules(question) {
     "patent", "patents",
     "launch pipeline", "upcoming",
   ];
+
   if (foKeywords.some(k => q.includes(k))) matched.add(FORWARD_OUTLOOK_MODULE_ID);
 
   const mdKeywords = [
