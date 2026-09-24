@@ -6,6 +6,7 @@ const { removeSameTopicArticles } = require('./topicDedup');
 const { filterLowQualityArticles } = require('./qualityFilter');
 const { pushToProcessedQueue } = require('./processedQueue');
 const { startJobTracking, updateJobStage, markFullyCompleted, failJobTracking } = require('./jobStatusTracker');
+const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./llmRelevanceProcessor');
 const { acquireLLMSlot, releaseLLMSlot } = require('./concurrencyLimiter');
 
 // CHANGED: runPipeline now takes moduleId, threads it through dedup calls
