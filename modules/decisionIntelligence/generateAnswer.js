@@ -123,6 +123,75 @@ function extractChartFromReport(report) {
   };
 }
 
+/**
+ * Numeric hallucination guard.
+ * For every numeric cell in the report's key_movement_analysis table,
+ * check whether that number (or the same value in a slightly different
+ * format) appears anywhere in the retrieved context text. If the majority
+ * of numbers are NOT present in the context, the table is likely
+ * hallucinated — strip it and replace with a note.
+ */
+function guardNumericTable(report, contextText) {
+  if (!report || !report.key_movement_analysis) return report;
+  const table = report.key_movement_analysis;
+  if (!table.rows || !table.rows.length) return report;
+
+  const extractNumbers = (s) =>
+    (String(s).match(/\d+(?:\.\d+)?/g) || []).map(n => parseFloat(n));
+
+  // Normalise the context into a Set of number strings we can compare
+  // loosely (handles "25%" vs "25" vs "$25.0B" vs "25.00").
+  const contextNumbers = new Set();
+  for (const n of extractNumbers(contextText)) {
+    contextNumbers.add(String(n));
+    contextNumbers.add(String(n.toFixed(0)));
+    contextNumbers.add(String(n.toFixed(1)));
+  }
+
+  // Flatten all data cells (skip header row; skip the first column,
+  // which is usually a label like "Cloud Infrastructure")
+  let totalNumericCells = 0;
+  let matchedNumericCells = 0;
+  const cellHasNumber = [];
+
+  for (const row of table.rows) {
+    for (let i = 1; i < row.cells.length; i++) {
+      const cell = String(row.cells[i] ?? '');
+      const nums = extractNumbers(cell);
+      if (nums.length === 0) continue;
+      totalNumericCells++;
+      const anyMatch = nums.some(n =>
+        contextNumbers.has(String(n)) ||
+        contextNumbers.has(String(n.toFixed(0))) ||
+        contextNumbers.has(String(n.toFixed(1)))
+      );
+      if (anyMatch) matchedNumericCells++;
+      cellHasNumber.push({ rowIndex: table.rows.indexOf(row), colIndex: i, cell, matched: anyMatch });
+    }
+  }
+
+  // If no numeric cells at all, nothing to guard against.
+  if (totalNumericCells === 0) return report;
+
+  // If fewer than half of the numeric cells have their numbers appearing
+  // in the context, treat the whole table as hallucinated.
+  const matchRatio = matchedNumericCells / totalNumericCells;
+  if (matchRatio < 0.5) {
+    console.warn(
+      `[guardNumericTable] Table likely hallucinated: only ${matchedNumericCells}/${totalNumericCells} numeric cells had values present in context. Stripping table.`
+    );
+    const stripped = { ...report };
+    delete stripped.key_movement_analysis;
+    stripped._table_stripped = true;
+    stripped._table_strip_reason =
+      'Numeric values in the original table were not present in the retrieved data and could not be verified. ' +
+      'See the narrative sections for the qualitative analysis.';
+    return stripped;
+  }
+
+  return report;
+}
+
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'risk_analysis', 'five_forces']);
 
 const FRAMEWORK_PROMPT_IDS = {
@@ -420,14 +489,22 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
     };
   }
 
-  const sources = overrideSources
+    const sources = overrideSources
     ? overrideSources
     : await resolveSources(citedIndices, sourceManifest);
+
+  // ── Numeric hallucination guard ──────────────────────────────────────
+  // Strips the key_movement_analysis table if its numeric cells aren't
+  // traceable to the retrieved context. Runs BEFORE chart derivation so
+  // a stripped table never gets charted.
+  report = guardNumericTable(report, context);
+  // ─────────────────────────────────────────────────────────────────────
 
   // NEW: try to derive a chart from the report's table if possible.
   // Priority: chart from table when numbers are present, otherwise no chart.
   let chart = null;
   let chartMeta = null;
+  
   try {
     const chartSpec = extractChartFromReport(report);
     if (chartSpec) {
