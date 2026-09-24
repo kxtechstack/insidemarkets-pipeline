@@ -675,29 +675,38 @@ app.get('/report/:clientId', async (req, res) => {
 
     if (jobsErr) return res.status(500).json({ error: jobsErr.message });
 
-    // ── Fetch all logs touched that day ──────────────────────────────────
-    // We fetch both completed (via completed_at) AND failed/skipped (via
-    // processed_at). A row can appear in both categories conceptually,
-    // but status determines which bucket it lands in for this day.
-    const { data: completedLogs, error: completedErr } = await supabaseClient
-      .from('article_processing_log')
-      .select('id, submodule_id, status, completed_at')
-      .eq('client_id', clientId)
-      .eq('status', 'completed')
-      .gte('completed_at', startIso)
-      .lte('completed_at', endIso);
+    const jobIdsForDay = (jobs || []).map(j => j.job_id).filter(Boolean);
 
-    if (completedErr) return res.status(500).json({ error: completedErr.message });
+    // ── Fetch all logs belonging to THIS DAY'S jobs ──────────────────────
+    // CHANGED: attribute logs by job_id (which day the job STARTED), not by
+    // when the log row was written. A job that started on day X but got
+    // resumed/retried and finished on day X+1 must still count against day
+    // X -- otherwise its qualified count sits on one day and its completed
+    // count sits on another, making both days' Failed numbers wrong.
+    let completedLogs = [];
+    let nonCompletedLogs = [];
 
-    const { data: nonCompletedLogs, error: nonCompletedErr } = await supabaseClient
-      .from('article_processing_log')
-      .select('id, submodule_id, status, processed_at')
-      .eq('client_id', clientId)
-      .in('status', ['failed', 'skipped', 'retrying'])
-      .gte('processed_at', startIso)
-      .lte('processed_at', endIso);
+    if (jobIdsForDay.length > 0) {
+      const { data: cLogs, error: completedErr } = await supabaseClient
+        .from('article_processing_log')
+        .select('id, submodule_id, status, completed_at, job_id')
+        .eq('client_id', clientId)
+        .eq('status', 'completed')
+        .in('job_id', jobIdsForDay);
 
-    if (nonCompletedErr) return res.status(500).json({ error: nonCompletedErr.message });
+      if (completedErr) return res.status(500).json({ error: completedErr.message });
+      completedLogs = cLogs || [];
+
+      const { data: ncLogs, error: nonCompletedErr } = await supabaseClient
+        .from('article_processing_log')
+        .select('id, submodule_id, status, processed_at, job_id')
+        .eq('client_id', clientId)
+        .in('status', ['failed', 'skipped', 'retrying', 'permanently_failed'])
+        .in('job_id', jobIdsForDay);
+
+      if (nonCompletedErr) return res.status(500).json({ error: nonCompletedErr.message });
+      nonCompletedLogs = ncLogs || [];
+    }
 
     const allLogs = [...(completedLogs || []), ...(nonCompletedLogs || [])];
 
