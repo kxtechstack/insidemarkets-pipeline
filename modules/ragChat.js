@@ -180,8 +180,15 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
       };
       const moduleLabel = MODULE_LABELS[moduleId] || 'this module';
 
+      // Prefer the LLM-generated message from classifyIntent — it's the same
+      // natural, contextual reply the DI tab uses. Fall back to a module-aware
+      // canned reply only if the classifier didn't produce one.
+      const llmMessage = (intentResult.message || '').trim();
+
       let reply;
-      if (intentResult.intent === 'greeting') {
+      if (llmMessage) {
+        reply = llmMessage;
+      } else if (intentResult.intent === 'greeting') {
         reply = `Hi! Ask me anything about ${moduleLabel} — I'll pull from the signals in this tab.`;
       } else if (intentResult.intent === 'clarification') {
         reply = `Could you clarify what you'd like to know about ${moduleLabel}? Try asking about recent developments, key players, or trends.`;
