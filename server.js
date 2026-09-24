@@ -636,8 +636,10 @@ app.get('/report/:clientId', async (req, res) => {
     // ── Aggregate: totals ────────────────────────────────────────────────
     const totalFetched = (jobs || []).reduce((sum, j) => sum + (j.count_fetched || 0), 0);
     const totalStored = (completedLogs || []).length;
-    const totalFailed = (nonCompletedLogs || []).filter(l => l.status === 'failed').length;
     const totalSkipped = (nonCompletedLogs || []).filter(l => l.status === 'skipped').length;
+    // totalFailed is computed further down, AFTER submoduleAgg's attributable
+    // failed counts are calculated -- so it matches the per-module breakdown
+    // instead of only counting explicit 'failed' log rows.
 
     // ── Aggregate: per-module ────────────────────────────────────────────
     const moduleAgg = {}; // moduleId → { fetched, stored, failed, skipped }
@@ -724,6 +726,11 @@ app.get('/report/:clientId', async (req, res) => {
       );
       entry.failed = Math.max(entry.failed || 0, attributable);
     }
+
+    // NEW: total failed = sum of every submodule's (already-corrected)
+    // failed count, so the top summary card matches the per-module breakdown
+    // exactly instead of undercounting via raw log status alone.
+    const totalFailed = Object.values(submoduleAgg).reduce((sum, s) => sum + (s.failed || 0), 0);
 
     return res.json({
       date,
