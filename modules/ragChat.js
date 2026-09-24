@@ -24,6 +24,15 @@ const RAG_MODULE_PROMPTS = {
   '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'rag_chat_forward_outlook_v1',      // Forward Outlook
 };
 
+function stripCitationMarkers(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .trim();
+}
+
 // ── Shared formatting contract injected into every RAG prompt ────────────────
 const SHARED_FORMATTING_RULES = `FORMATTING RULES — apply to every answer without exception:
 
@@ -316,7 +325,7 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     }])
   ).values()];
 
-  return { answer: cleanedAnswer, sources };
+  return { answer: stripCitationMarkers(cleanedAnswer), sources };
 };
 
 module.exports = { askQuestion };

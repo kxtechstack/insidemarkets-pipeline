@@ -315,7 +315,7 @@ async function generateInferenceAnswer(question, searchResults) {
       return {
         report: {
           title: question,
-          bodyText: cleanBody || 'Could not generate a structured report.',
+          bodyText: stripCitationMarkers(cleanBody) || 'Could not generate a structured report.',
         },
         sources,
       };
@@ -387,7 +387,7 @@ async function generateInferenceAnswer(question, searchResults) {
   report = guardNumericTable(report, context);
   // ─────────────────────────────────────────────────────────────────────
 
-  return { report, sources };
+  return { report: stripCitationsDeep(report), sources };
 }
 
 module.exports = { generateInferenceAnswer };

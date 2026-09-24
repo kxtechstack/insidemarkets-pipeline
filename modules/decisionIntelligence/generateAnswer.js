@@ -34,6 +34,35 @@ const MODULE_NAMES = {
   '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'Market Dynamics',
   '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'Forward Outlook',
 };
+
+/**
+ * Removes all [N] citation markers from a text string. Used because the
+ * product decided not to show source numbers in the answer body — sources
+ * appear only in the panel at the bottom.
+ */
+function stripCitationMarkers(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .trim();
+}
+
+/**
+ * Recursively strips [N] markers from every string in a JSON-like value.
+ */
+function stripCitationsDeep(value) {
+  if (typeof value === 'string') return stripCitationMarkers(value);
+  if (Array.isArray(value)) return value.map(stripCitationsDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = stripCitationsDeep(value[k]);
+    return out;
+  }
+  return value;
+}
+
 /**
  * Given a report's key_movement_analysis table, try to find a column that
  * has numeric values we can chart. Returns { type, title, dataKey, data }
@@ -440,7 +469,7 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
   return {
     report: {
       title: `${intent.questionCategory.toUpperCase()} -- ${question}`,
-      bodyText: cleanBody,
+      bodyText: stripCitationMarkers(cleanBody),
     },
     sources,
     clientContextCount: (clientResults || []).length,
@@ -489,7 +518,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
       // Fall back to text-only, keep the retrieved sources visible
       const sources = await resolveSources(citedIndices, sourceManifest);
       return {
-        report: { title: question, bodyText: cleanBody || 'Could not generate a structured report.' },
+        report: { title: question, bodyText: stripCitationMarkers(cleanBody) || 'Could not generate a structured report.' },
         sources,
       };
     }
@@ -585,7 +614,13 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
     console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
   }
 
-  return { report, sources, chart, chartMeta, clientContextCount: (clientResults || []).length };
+  return {
+    report: stripCitationsDeep(report),
+    sources,
+    chart,
+    chartMeta,
+    clientContextCount: (clientResults || []).length,
+  };
 }
 
 /**
