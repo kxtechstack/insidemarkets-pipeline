@@ -148,37 +148,45 @@ function guardNumericTable(report, contextText) {
     contextNumbers.add(String(n.toFixed(1)));
   }
 
-  // Flatten all data cells (skip header row; skip the first column,
-  // which is usually a label like "Cloud Infrastructure")
+  // Sanity filter: years like 2020-2035 are extremely common in context
+  // and shouldn't count as a "match" on their own. A cell with only a
+  // year is not a numeric claim we need to verify.
+  const isYearLike = (n) => n >= 2000 && n <= 2099 && Number.isInteger(n);
+
+  // A cell "matches" only if ALL its non-year numbers are present in the
+  // context. If any non-year number is missing, the cell is untrusted.
   let totalNumericCells = 0;
-  let matchedNumericCells = 0;
-  const cellHasNumber = [];
+  let trustedCells = 0;
 
   for (const row of table.rows) {
     for (let i = 1; i < row.cells.length; i++) {
       const cell = String(row.cells[i] ?? '');
-      const nums = extractNumbers(cell);
+      const nums = extractNumbers(cell).filter(n => !isYearLike(n));
+
+      // Cells with only years (or no numbers) aren't numerical claims.
       if (nums.length === 0) continue;
+
       totalNumericCells++;
-      const anyMatch = nums.some(n =>
+
+      const allPresent = nums.every(n =>
         contextNumbers.has(String(n)) ||
         contextNumbers.has(String(n.toFixed(0))) ||
         contextNumbers.has(String(n.toFixed(1)))
       );
-      if (anyMatch) matchedNumericCells++;
-      cellHasNumber.push({ rowIndex: table.rows.indexOf(row), colIndex: i, cell, matched: anyMatch });
+
+      if (allPresent) trustedCells++;
     }
   }
 
-  // If no numeric cells at all, nothing to guard against.
+  // If there are no numerical claims at all, nothing to guard against.
   if (totalNumericCells === 0) return report;
 
-  // If fewer than half of the numeric cells have their numbers appearing
-  // in the context, treat the whole table as hallucinated.
-  const matchRatio = matchedNumericCells / totalNumericCells;
-  if (matchRatio < 0.5) {
+  // If fewer than 50% of the numeric cells have ALL their numbers present
+  // in the context, treat the table as hallucinated and strip it.
+  const trustRatio = trustedCells / totalNumericCells;
+  if (trustRatio < 0.5) {
     console.warn(
-      `[guardNumericTable] Table likely hallucinated: only ${matchedNumericCells}/${totalNumericCells} numeric cells had values present in context. Stripping table.`
+      `[guardNumericTable] Table likely hallucinated: only ${trustedCells}/${totalNumericCells} numeric cells had all their non-year values present in context. Stripping table.`
     );
     const stripped = { ...report };
     delete stripped.key_movement_analysis;
@@ -504,7 +512,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
   // Priority: chart from table when numbers are present, otherwise no chart.
   let chart = null;
   let chartMeta = null;
-  
+
   try {
     const chartSpec = extractChartFromReport(report);
     if (chartSpec) {
