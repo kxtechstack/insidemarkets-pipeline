@@ -180,21 +180,37 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
       };
       const moduleLabel = MODULE_LABELS[moduleId] || 'this module';
 
+      // Module-specific topic descriptions — used for off-topic replies so
+      // the user is told what THIS tab covers, not "market intelligence" in general.
+      const MODULE_TOPICS = {
+        '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960':
+          'policy, regulations, licensing, and compliance',
+        '55c5ee19-bfca-468b-81b3-b89ca4f303c8':
+          'funding, investments, competitors, and market movements',
+        '2eb989fd-0ea0-4320-b73a-f7eb8b970473':
+          'emerging trends, innovations, and forward-looking developments',
+      };
+      const moduleTopics = MODULE_TOPICS[moduleId] || 'market intelligence';
+
       // Prefer the LLM-generated message from classifyIntent — it's the same
-      // natural, contextual reply the DI tab uses. Fall back to a module-aware
-      // canned reply only if the classifier didn't produce one.
+      // natural, contextual reply the DI tab uses. Off-topic is special-cased
+      // so the reply names what THIS tab covers instead of "market intelligence".
       const llmMessage = (intentResult.message || '').trim();
 
       let reply;
-      if (llmMessage) {
+      if (intentResult.intent === 'off_topic') {
+        reply =
+          `I'm built to help with ${moduleLabel} — ${moduleTopics}. ` +
+          `I can't answer off-topic questions here. Is there something about ` +
+          `${moduleTopics.split(',')[0].trim()} I can help you dig into?`;
+      } else if (llmMessage) {
         reply = llmMessage;
       } else if (intentResult.intent === 'greeting') {
         reply = `Hi! Ask me anything about ${moduleLabel} — I'll pull from the signals in this tab.`;
       } else if (intentResult.intent === 'clarification') {
         reply = `Could you clarify what you'd like to know about ${moduleLabel}? Try asking about recent developments, key players, or trends.`;
       } else {
-        // off_topic
-        reply = `I can only answer questions about ${moduleLabel}. Try asking about recent developments, key players, or trends in this area.`;
+        reply = `I can only answer questions about ${moduleLabel}.`;
       }
 
       console.log(`[RAG] intent=${intentResult.intent} — short-circuiting before retrieval`);
