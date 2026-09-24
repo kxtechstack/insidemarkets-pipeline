@@ -37,42 +37,107 @@ function guardNumericTable(report, contextText) {
   const table = report.key_movement_analysis;
   if (!table.rows || !table.rows.length) return report;
 
-  const extractNumbers = (s) =>
-    (String(s).match(/\d+(?:\.\d+)?/g) || []).map(n => parseFloat(n));
+  // Normalize text: lowercase, collapse whitespace.
+  const normContext = String(contextText).toLowerCase().replace(/\s+/g, ' ');
 
-  const contextNumbers = new Set();
-  for (const n of extractNumbers(contextText)) {
-    contextNumbers.add(String(n));
-    contextNumbers.add(String(n.toFixed(0)));
-    contextNumbers.add(String(n.toFixed(1)));
+  // For each cell, we check if its specific numeric claim (with unit) exists
+  // in the context. "5%" only matches "5%" or "5 percent" in context — never
+  // a bare "5" elsewhere. Same for "$5M", "5 billion", "5M", etc.
+  const cellClaimExists = (cellText) => {
+    const cell = String(cellText).toLowerCase().trim();
+
+    // Extract numeric+unit claims from the cell, e.g. "5%", "$3.2M",
+    // "20 billion", "4.5 percent". Each claim is a { value, unit } pair.
+    const claims = [];
+
+    // Pattern: optional $, number (with optional commas/decimals), optional unit.
+    // Units we recognize: %, percent, b/billion, m/million, k/thousand.
+    const re = /(\$)?\s*([\d,]+(?:\.\d+)?)\s*(%|percent|billion|million|thousand|bn|mn|[bmk])\b?/g;
+    let m;
+    while ((m = re.exec(cell)) !== null) {
+      const value = parseFloat(m[2].replace(/,/g, ''));
+      if (isNaN(value)) continue;
+
+      // Years are not claims we verify.
+      if (value >= 2000 && value <= 2099 && Number.isInteger(value) && !m[1] && !m[3]) continue;
+
+      let unit = (m[3] || '').toLowerCase();
+      if (unit === 'percent') unit = '%';
+      if (unit === 'billion' || unit === 'bn') unit = 'b';
+      if (unit === 'million' || unit === 'mn') unit = 'm';
+      if (unit === 'thousand') unit = 'k';
+
+      claims.push({ value, unit, hasDollar: !!m[1] });
+    }
+
+    // If a cell has NO numeric claims, it can't be validated — accept it.
+    if (!claims.length) return true;
+
+    // Every claim must appear in the normalized context with a compatible
+    // unit. Bare "5" in context does NOT validate "5%".
+    return claims.every(({ value, unit, hasDollar }) => {
+      // Escape the value for regex (handles the decimal point).
+      const valueStr = String(value);
+      const valueStrNoCommas = valueStr.replace(/,/g, '');
+      const valueStrWithCommas = value.toLocaleString('en-US');
+
+      // Build the "with unit" patterns.
+      const valuePatterns = [valueStr, valueStrNoCommas, valueStrWithCommas];
+      let unitPatterns = [''];
+
+      if (unit === '%') unitPatterns = ['%', ' percent', ' pct'];
+      else if (unit === 'b') unitPatterns = ['b', 'bn', ' billion'];
+      else if (unit === 'm') unitPatterns = ['m', 'mn', ' million'];
+      else if (unit === 'k') unitPatterns = ['k', ' thousand'];
+      else if (!unit) {
+        // Cell had no unit (bare integer/decimal). Require the value to
+        // appear in context as a standalone word or with a recognized unit
+        // — a bare "5" in "5 rows" doesn't validate "5" as a claim.
+        // We require a unit of some kind OR the number >= 100 (unlikely
+        // to be a coincidence).
+        if (value < 100) return false;
+      }
+
+      // Try to find the value with each unit variant in the context.
+      return valuePatterns.some(vp => {
+        return unitPatterns.some(up => {
+          const prefix = hasDollar ? '\\$?\\s*' : '';
+          const re2 = new RegExp(`${prefix}${escapeRegex(vp)}${escapeRegex(up)}(?!\\d)`, 'i');
+          return re2.test(normContext);
+        });
+      });
+    });
+  };
+
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  const isYearLike = (n) => n >= 2000 && n <= 2099 && Number.isInteger(n);
-
-  let totalNumericCells = 0;
-  let trustedCells = 0;
+  // Count total claims and trusted claims.
+  let totalClaimCells = 0;
+  let trustedClaimCells = 0;
 
   for (const row of table.rows) {
     for (let i = 1; i < row.cells.length; i++) {
-      const cell = String(row.cells[i] ?? '');
-      const nums = extractNumbers(cell).filter(n => !isYearLike(n));
-      if (nums.length === 0) continue;
-      totalNumericCells++;
-      const allPresent = nums.every(n =>
-        contextNumbers.has(String(n)) ||
-        contextNumbers.has(String(n.toFixed(0))) ||
-        contextNumbers.has(String(n.toFixed(1)))
-      );
-      if (allPresent) trustedCells++;
+      const cell = String(row.cells[i] ?? '').trim();
+      if (!cell) continue;
+
+      const hasDigits = /\d/.test(cell);
+      if (!hasDigits) continue;
+
+      totalClaimCells++;
+      if (cellClaimExists(cell)) trustedClaimCells++;
     }
   }
 
-  if (totalNumericCells === 0) return report;
+  if (totalClaimCells === 0) return report;
 
-  const trustRatio = trustedCells / totalNumericCells;
+  const trustRatio = trustedClaimCells / totalClaimCells;
+  console.log(`[guardNumericTable:inference] ratio=${trustedClaimCells}/${totalClaimCells}`);
+
   if (trustRatio < 0.5) {
     console.warn(
-      `[guardNumericTable:inference] Table likely hallucinated: only ${trustedCells}/${totalNumericCells} numeric cells had all their non-year values present in context. Stripping table.`
+      `[guardNumericTable:inference] Table likely hallucinated: only ${trustedClaimCells}/${totalClaimCells} numeric cells had their value+unit present in context. Stripping table.`
     );
     const stripped = { ...report };
     delete stripped.key_movement_analysis;
