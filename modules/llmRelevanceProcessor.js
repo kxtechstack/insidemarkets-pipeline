@@ -37,7 +37,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
-const { pullProcessedBatch, getProcessedQueueLength } = require('./processedQueue');
+const { pullProcessedBatch, getProcessedQueueLength, pullProcessedBatchReliable, clearFromProcessing, recoverProcessingList } = require('./processedQueue');
 const { refreshLock } = require('./queueManager');
 const { matchSignalToTrend } = require('./trendClustering');
 const { commitUrlSeen } = require('./deduplicator');
@@ -1028,7 +1028,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
 
   for (const article of articles) {
     console.log(`[LLMProcessor] Classifying: "${article.title}"`);
-    
+
     // NEW: mark this article as actively retrying BEFORE classification starts,
     // so the frontend's 5s poll picks up "Retrying (N)" immediately instead of
     // only after the article finishes. Only matters when this is a re-run of
@@ -1184,13 +1184,17 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
   };
 };
 
-// ── Batch processing from Redis queue ───────────────────────────────────────
-// CHANGED: added moduleId parameter, threaded through to processArticlesForRelevance
 async function processQueueInBatches(queueKey, clientId, industry, jobId, moduleId, submoduleId, batchSize = LLM_BATCH_SIZE) {
+  const processingKey = queueKey.replace(/^processed:/, 'processing:');
+
+  // NEW: recover anything left stranded by a previous crashed/stalled run
+  // of THIS job before pulling any new work.
+  await recoverProcessingList(queueKey, processingKey);
+
   let totalRelevant = 0;
   let totalIrrelevant = 0;
   let remaining = await getProcessedQueueLength(queueKey);
-  let consecutiveEmptyProgressBatches = 0; // NEW — tracks batches with zero real progress
+  let consecutiveEmptyProgressBatches = 0;
 
   console.log(`[LLMProcessor] Starting batch processing of ${queueKey} (${remaining} articles, batches of ${batchSize})`);
 
@@ -1198,19 +1202,30 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
   while (remaining > 0) {
     console.log(`\n[LLMProcessor] --- Batch ${batchNumber} (${remaining} remaining) ---`);
 
-    const batch = await pullProcessedBatch(queueKey, batchSize);
+    // CHANGED: reliable pull -- items move into the processing list, not
+    // just removed from the queue outright.
+    const pulled = await pullProcessedBatchReliable(queueKey, processingKey, batchSize);
+    const batch = pulled.map(p => p.article);
+
     let result;
     try {
       result = await processArticlesForRelevance(batch, clientId, industry, jobId, moduleId, submoduleId);
+      // Whole batch returned without throwing -- every article in it has a
+      // final logged outcome (completed/skipped/failed) or was explicitly
+      // re-queued below via technicalFailureArticles. Safe to clear all of
+      // them from the processing list now.
+      for (const p of pulled) {
+        await clearFromProcessing(processingKey, p.raw);
+      }
     } catch (batchErr) {
-      // NEW: circuit breaker abort -- stop the whole batch loop and hand
-      // control back to pipelineRunner, which will pause the job and let
-      // the rate-limit watcher resume it later.
       if (batchErr.name === 'RateLimitAbortError') {
         console.log(`[LLMProcessor] Circuit breaker tripped — aborting batch processing.`);
-        // Re-queue this batch's unprocessed articles so a future resume
-        // picks them up.
-        const { redis } = require('./queueManager');
+        // Clear the whole pulled batch from processing (we're re-queueing
+        // the unprocessed ones explicitly onto the main queue instead, so
+        // nothing should be left claiming to be "in flight").
+        for (const p of pulled) {
+          await clearFromProcessing(processingKey, p.raw);
+        }
         for (const article of (batchErr.unprocessedArticles || [])) {
           await redis.rpush(queueKey, JSON.stringify(article));
         }
@@ -1222,8 +1237,14 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
         };
       }
 
-      // Any other error: keep the old behavior (skip this batch, continue)
-      console.error(`[LLMProcessor] Batch ${batchNumber} failed, skipping to next batch: ${batchErr.message}`);
+      // Any other unexpected error: don't lose the batch -- clear it from
+      // processing and push the whole thing back onto the main queue so a
+      // future run retries it, then move on.
+      console.error(`[LLMProcessor] Batch ${batchNumber} failed, re-queueing and skipping to next batch: ${batchErr.message}`);
+      for (const p of pulled) {
+        await clearFromProcessing(processingKey, p.raw);
+        await redis.rpush(queueKey, p.raw);
+      }
       remaining = await getProcessedQueueLength(queueKey);
       batchNumber++;
       continue;
@@ -1232,13 +1253,7 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;
 
-    // NEW: if this batch had technical failures but didn't trip the breaker
-    // (e.g. batch size < threshold), push those articles back onto the queue
-    // so they aren't silently lost. A future resume or run will pick them up.
     if (Array.isArray(result.technicalFailureArticles) && result.technicalFailureArticles.length > 0) {
-      // NEW: if this batch made zero real progress (every article in it
-      // technically failed), count it toward the breaker. A batch with at
-      // least one relevant/irrelevant result resets the counter.
       const madeNoProgress = result.relevant === 0 && result.irrelevant === result.technicalFailureArticles.length;
       consecutiveEmptyProgressBatches = madeNoProgress ? consecutiveEmptyProgressBatches + 1 : 0;
 
@@ -1252,13 +1267,12 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
         };
       }
 
-      const { redis } = require('./queueManager');
       for (const article of result.technicalFailureArticles) {
         await redis.rpush(queueKey, JSON.stringify(article));
       }
       console.log(`[LLMProcessor] Re-queued ${result.technicalFailureArticles.length} technically-failed article(s) for a future resume`);
     } else {
-      consecutiveEmptyProgressBatches = 0; // NEW — a clean batch resets the counter
+      consecutiveEmptyProgressBatches = 0;
     }
 
     remaining = await getProcessedQueueLength(queueKey);

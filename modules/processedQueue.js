@@ -54,8 +54,52 @@ const pullProcessedBatch = async (queueKey, batchSize = 10) => {
   return batch;
 };
 
+// ── Reliable pull with crash recovery ────────────────────────────────────────
+// Moves items from the main queue into a per-job "processing" list using
+// RPOPLPUSH instead of a destructive LPOP. If the process crashes or stalls
+// mid-batch, the article is still sitting in the processing list -- not
+// lost -- and recoverProcessingList() below moves it back to the main
+// queue on the next run.
+const pullProcessedBatchReliable = async (queueKey, processingKey, batchSize = 10) => {
+  const pulled = [];
+  for (let i = 0; i < batchSize; i++) {
+    const raw = await redis.rpoplpush(queueKey, processingKey);
+    if (!raw) break;
+    const article = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    pulled.push({ raw, article });
+  }
+  return pulled;
+};
+
+// Call once an article's outcome (completed/skipped/failed) has been
+// successfully logged -- removes it from the processing list so it's no
+// longer considered "in flight."
+const clearFromProcessing = async (processingKey, rawItem) => {
+  await redis.lrem(processingKey, 1, rawItem);
+};
+
+// Call BEFORE pulling any new batch for a job. Recovers any articles left
+// stranded in the processing list by a previous crashed/stalled attempt
+// (stale-job-watcher kill, container restart, unhandled exception) by
+// pushing them back onto the main queue so they get picked up again
+// instead of silently vanishing.
+const recoverProcessingList = async (queueKey, processingKey) => {
+  const leftover = await redis.lrange(processingKey, 0, -1);
+  if (leftover.length > 0) {
+    console.log(`[ProcessedQueue] Recovering ${leftover.length} in-flight article(s) from a previous crashed attempt`);
+    for (const item of leftover) {
+      await redis.rpush(queueKey, item);
+    }
+    await redis.del(processingKey);
+  }
+  return leftover.length;
+};
+
 module.exports = {
   pushToProcessedQueue,
   getProcessedQueueLength,
   pullProcessedBatch,
+  pullProcessedBatchReliable,
+  clearFromProcessing,
+  recoverProcessingList
 };
