@@ -555,6 +555,8 @@ const promoteCandidate = async (trendId, industry) => {
         sector: mergedResult.sector,
         last_named_signal_count: memberCount,
       }).eq('id', existingTrendId);
+    } else {
+      console.log(`  [Promotion] Naming refresh failed on merge for trend ${existingTrendId} — existing name kept, no NULL risk here since it was already active/named.`);
     }
 
     console.log(`  [Promotion] Merged into existing trend ${existingTrendId}: "${mergedResult?.name}"`);
@@ -591,21 +593,40 @@ const promoteCandidate = async (trendId, industry) => {
     return { status: 'error', error: error.message };
   }
 
-  const result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
-  if (result) {
-    const memberCountAtNaming = (await getMemberArticleIds(trendId)).length;
-    await supabase.from('trend_clusters').update({
-      name: result.name,
-      summary: result.summary,
-      business_impact: result.business_impact,
-      impact: result.impact,
-      sector: result.sector,
-      last_named_signal_count: memberCountAtNaming,
-    }).eq('id', trendId);
+  let result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
+  if (!result) {
+    console.log(`  [Promotion] Naming failed for trend ${trendId}, retrying once...`);
+    result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
   }
 
+  if (!result) {
+    const articleIds = await getMemberArticleIds(trendId);
+    const { data: sigs } = await supabase
+      .from('trend_signals')
+      .select('organization, signal_title')
+      .in('id', articleIds);
+    result = {
+      name: deriveFallbackName(sigs || []),
+      summary: null,
+      business_impact: [],
+      impact: 'Medium',
+      sector: 'Unknown',
+    };
+    console.log(`  [Promotion] Naming failed twice for trend ${trendId} — using deterministic fallback name: "${result.name}"`);
+  }
+
+  const memberCountAtNaming = (await getMemberArticleIds(trendId)).length;
+  await supabase.from('trend_clusters').update({
+    name: result.name,
+    summary: result.summary,
+    business_impact: result.business_impact,
+    impact: result.impact,
+    sector: result.sector,
+    last_named_signal_count: memberCountAtNaming,
+  }).eq('id', trendId);
+
   console.log(`  [Promotion] Trend ${trendId} promoted to active with centroid ${centroidPointId}`);
-  return { status: 'promoted', centroidPointId, name: result?.name };
+  return { status: 'promoted', centroidPointId, name: result.name };
 };
 
 // Helper — gets the list of article_ids currently in a trend
@@ -801,6 +822,17 @@ const repairAndParseJson = (rawContent) => {
   }
 };
 
+// Builds a deterministic, never-null trend name from the raw signal data
+// itself, for use whenever the LLM naming call fails or returns nothing
+// usable. Never returns the literal string "Unnamed Trend".
+const deriveFallbackName = (signals) => {
+  const orgs = [...new Set((signals || []).map(s => s.organization).filter(Boolean))];
+  const firstTitle = signals && signals[0]?.signal_title;
+  if (orgs.length > 0) return `${orgs.slice(0, 2).join(' & ')} — Emerging Trend`;
+  if (firstTitle) return firstTitle.slice(0, 60);
+  return `Trend ${new Date().toISOString().slice(0, 10)}`;
+};
+
 // Generates the trend name, summary, business impact bullets, and impact
 // rating — ALL in ONE combined LLM call, using every signal in the cluster
 // PLUS the client's ICP context. This cuts a full LLM round-trip out of
@@ -855,7 +887,7 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
     const parsed = repairAndParseJson(rawContent);
 
     let result = {
-      name: parsed.name || 'Unnamed Trend',
+      name: parsed.name || deriveFallbackName(signalsForWriteup),
       summary: parsed.summary || null,
       business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
       impact: parsed.impact || 'Medium',
@@ -1295,4 +1327,4 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
 };
 
 
-  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid, calculateTrendConfidenceScore };
+  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid, calculateTrendConfidenceScore, promoteCandidate };
