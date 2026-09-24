@@ -905,6 +905,25 @@ app.get('/failed-count/:clientId', async (req, res) => {
   }
 });
 
+// NEW: quick check for whether any pipeline jobs are currently running for
+// this client — used by the frontend to know when a retry (which can touch
+// both article-level failures AND whole stuck jobs) has truly finished.
+app.get('/active-jobs-count/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { count, error } = await supabaseClient
+      .from('pipeline_job_status')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_id', clientId)
+      .eq('status', 'running');
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ count: count || 0 });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/schedules/client/:clientId', async (req, res) => {
   const { clientId } = req.params;
   const { scheduleTime, source, frequency } = req.body;
