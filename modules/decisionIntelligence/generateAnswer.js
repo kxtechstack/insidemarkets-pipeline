@@ -445,31 +445,105 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
 
   const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults);
   const questionForLlm = sanitizeQuestionForLLM(question, intent.unresolvedMentions || []);
-  const citationInstruction =
-    '\n\nBEFORE YOUR MAIN ANSWER, on the very first line, output exactly:\n' +
-    'CITED_SOURCES: <comma-separated context indices you relied on, e.g. 1,4,7>\n' +
-    'If you relied on no sources, output: CITED_SOURCES: none\n' +
-    'Then a blank line, then your normal answer. Do not mention CITED_SOURCES in the visible answer.\n';
-
-  const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}${citationInstruction}`;
+  const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}`;
 
   let raw = '';
   try {
     raw = await callLLM(
       [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      { temperature: 0.1, max_tokens: 1600, timeout: 180000 }
+      { temperature: 0.1, max_tokens: 1800, timeout: 180000 }
     );
   } catch (err) {
     return { report: { title: 'Report unavailable', bodyText: `LLM call failed: ${err.message}` }, sources: [] };
   }
 
   const { citedIndices, cleanBody } = extractCitedSources(raw);
-  const sources = await resolveSources(citedIndices, sourceManifest);
+
+  let parsed;
+  try {
+    parsed = parseJsonReport(cleanBody);
+  } catch (err) {
+    try {
+      const retryRaw = await callLLM(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt + '\n\nIMPORTANT: Your previous response was not valid JSON. Respond again with CITED_SOURCES line then pure JSON only.' },
+        ],
+        { temperature: 0, max_tokens: 1800, timeout: 180000 }
+      );
+      const retry = extractCitedSources(retryRaw);
+      parsed = parseJsonReport(retry.cleanBody);
+    } catch (err2) {
+      const sources = await resolveSources(citedIndices, sourceManifest);
+      return {
+        report: { title: `${intent.questionCategory.toUpperCase()} -- ${question}`, bodyText: stripCitationMarkers(cleanBody) },
+        sources,
+        clientContextCount: (clientResults || []).length,
+      };
+    }
+  }
+
+  const bodyJson = JSON.stringify(parsed);
+  const mergedIndices = new Set(
+    [
+      ...citedIndices,
+      ...[...bodyJson.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1], 10)),
+    ].filter(n => !isNaN(n) && n >= 1 && n <= sourceManifest.length)
+  );
+
+  const sources = await resolveSources(mergedIndices, sourceManifest);
+
+  const SECTION_CONFIG = {
+    pestle: [
+      ['Political', 'political'],
+      ['Economic', 'economic'],
+      ['Social', 'social'],
+      ['Technological', 'technological'],
+      ['Legal', 'legal'],
+      ['Environmental', 'environmental'],
+    ],
+    swot: [
+      ['Strengths', 'strengths'],
+      ['Weaknesses', 'weaknesses'],
+      ['Opportunities', 'opportunities'],
+      ['Threats', 'threats'],
+    ],
+    five_forces: [
+      ['Threat of New Entrants', 'threat_of_new_entrants'],
+      ['Bargaining Power of Suppliers', 'bargaining_power_of_suppliers'],
+      ['Rivalry Among Existing Competitors', 'rivalry'],
+      ['Bargaining Power of Buyers', 'bargaining_power_of_buyers'],
+      ['Threat of Substitute Products', 'threat_of_substitutes'],
+    ],
+    risk_analysis: [
+      ['Operational Risks', 'operational_risks'],
+      ['Financial Risks', 'financial_risks'],
+      ['Regulatory & Legal Risks', 'regulatory_legal_risks'],
+      ['Market & Competitive Risks', 'market_competitive_risks'],
+    ],
+  };
+
+  const sections = SECTION_CONFIG[intent.questionCategory] || [];
+  const lines = [];
+  for (const [label, key] of sections) {
+    lines.push(label);
+    const bullets = Array.isArray(parsed[key]) ? parsed[key] : [];
+    if (bullets.length === 0) {
+      lines.push('- Not disclosed in the retrieved signals.');
+    } else {
+      for (const b of bullets) lines.push(`- ${b}`);
+    }
+    lines.push('');
+  }
+  if (parsed.bottom_line) {
+    lines.push('Bottom Line');
+    lines.push(parsed.bottom_line);
+  }
 
   return {
     report: {
       title: `${intent.questionCategory.toUpperCase()} -- ${question}`,
-      bodyText: stripCitationMarkers(cleanBody),
+      bodyText: stripCitationMarkers(lines.join('\n')),
     },
     sources,
     clientContextCount: (clientResults || []).length,
