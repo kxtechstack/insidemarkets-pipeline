@@ -141,11 +141,12 @@ const cleanRagAnswer = (raw) => {
   }
 
   // 3. Strip leaked inline citation markers the LLM snuck in
-  out = out
-    .replace(/\s*\((?:Signal|Article|Source|Ref|Reference)\s*\d+\)/gi, '')
-    .replace(/\s*\[(?:Signal|Article|Source|Ref|Reference)\s*\d+\]/gi, '')
-    .replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\]/g, '')          // bare [1] or [1,3]
-    .replace(/\s*\((?:see|ref\.?|refer to)\s+(?:Signal|Article|Source)\s*\d+\)/gi, '');
+out = out
+  .replace(/\s*\((?:Signal|Article|Source|Ref|Reference)\s*\d+\)/gi, '')
+  .replace(/\s*\[(?:Signal|Article|Source|Ref|Reference)\s*\d+\]/gi, '')
+  .replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\]/g, '')
+  .replace(/\s*\((?:see|ref\.?|refer to)\s+(?:Signal|Article|Source)\s*\d+\)/gi, '')
+  .replace(/\b(?:Signal|Article|Source|Reference)s?\s+\d+\b/gi, '');   // ← NEW LINE
 
   // 4. HTML + markdown table → bullet fallback (belt & braces)
   out = out
@@ -242,9 +243,18 @@ const askQuestion = async (question, clientId, industry, moduleId) => {
     citedResults = filteredResults.slice(0, 3);
   }
 
+  // Sanitize titles coming out of Qdrant — some chunks have been stored with
+  // leading "••Title:" markers or trailing bullet characters. Strip them so
+  // the sources panel always shows a clean article title.
+  const cleanTitle = (t) =>
+    (t || '')
+      .replace(/^[•\-\*\s]*Title:\s*/i, '')
+      .replace(/[•\*\s]+$/g, '')
+      .trim();
+
   const sources = [...new Map(
     citedResults.map(r => [r.payload.url, {
-      title: r.payload.title,
+      title: cleanTitle(r.payload.title),
       url:   r.payload.url,
     }])
   ).values()];
