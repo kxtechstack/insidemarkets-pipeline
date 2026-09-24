@@ -6,7 +6,7 @@ const { removeSameTopicArticles } = require('./topicDedup');
 const { filterLowQualityArticles } = require('./qualityFilter');
 const { pushToProcessedQueue } = require('./processedQueue');
 const { startJobTracking, updateJobStage, markFullyCompleted, failJobTracking } = require('./jobStatusTracker');
-const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./llmRelevanceProcessor');
+const { acquireLLMSlot, releaseLLMSlot } = require('./concurrencyLimiter');
 
 // CHANGED: runPipeline now takes moduleId, threads it through dedup calls
 // and processQueueInBatches. Also tracks currentStage so a crash logs the
@@ -111,13 +111,27 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
       status: 'llm_processing',
       total: sorted.length,
       processedQueueKey,
-      message: `Running LLM relevance classification on ${qualityCheckedArticles.length} articles for industry: ${industry}...`
+      message: `Waiting for LLM slot...`
     });
     currentStage = 'llm_processing'; // CHANGED
 
+    await acquireLLMSlot(jobId); // NEW — waits here if too many jobs are already classifying
+
+    await setStatus(jobId, {
+      status: 'llm_processing',
+      total: sorted.length,
+      processedQueueKey,
+      message: `Running LLM relevance classification on ${qualityCheckedArticles.length} articles for industry: ${industry}...`
+    });
+
     // Step 6 - LLM relevance classification + signal extraction
     // CHANGED: processQueueInBatches now takes moduleId before submoduleId
-    const llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
+    let llmResult;
+    try {
+      llmResult = await processQueueInBatches(processedQueueKey, clientId, industry, jobId, moduleId, submoduleId);
+    } finally {
+      releaseLLMSlot(jobId); // NEW — always release, even on throw
+    }
 
     // NEW: circuit breaker abort -- LLM failed N times in a row, so we
     // stopped trying. Pause the job (don't mark complete) and let the
@@ -278,14 +292,20 @@ const resumePipelineRun = async (jobId) => {
   });
 
   try {
-    const llmResult = await processQueueInBatches(
-      processedQueueKey,
-      job.client_id,
-      job.industry || 'General',
-      jobId,
-      job.module_id,
-      job.submodule_id
-    );
+    await acquireLLMSlot(jobId); // NEW
+    let llmResult;
+    try {
+      llmResult = await processQueueInBatches(
+        processedQueueKey,
+        job.client_id,
+        job.industry || 'General',
+        jobId,
+        job.module_id,
+        job.submodule_id
+      );
+    } finally {
+      releaseLLMSlot(jobId); // NEW
+    }
 
     if (llmResult.aborted) {
       // Still rate-limited. Re-pause with the next backoff.
