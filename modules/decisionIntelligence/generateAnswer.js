@@ -494,8 +494,8 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
       };
     }
   }
-
-  const bodyJson = JSON.stringify(parsed);
+    console.log('[FRAMEWORK PARSED JSON]', JSON.stringify(parsed, null, 2));
+    const bodyJson = JSON.stringify(parsed);
   const mergedIndices = new Set(
     [
       ...citedIndices,
