@@ -4,6 +4,25 @@ const exa = new Exa(process.env.EXA_API_KEY);
 
 const daysAgoISO = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
+// ---------- Published-date sanitization ----------
+const FUTURE_DATE_GRACE_MS = 2 * 24 * 60 * 60 * 1000;
+
+const sanitizePublishedDate = (rawDate, source, url) => {
+  if (!rawDate) return null;
+
+  const parsed = new Date(rawDate);
+  if (isNaN(parsed.getTime())) {
+    console.log(`[DateSanitize] Unparseable publishedDate "${rawDate}" from ${source} (${url}) -- dropping`);
+    return null;
+  }
+
+  if (parsed.getTime() > Date.now() + FUTURE_DATE_GRACE_MS) {
+    console.log(`[DateSanitize] Rejected future publishedDate "${rawDate}" from ${source} (${url}) -- dropping`);
+    return null;
+  }
+
+  return parsed.toISOString();
+};
 
 
 
@@ -124,7 +143,12 @@ const fetchArticles = async (source, promptText, lookbackDays = 90) => {
   if (!fetcher) {
     throw new Error(`Unknown source: "${source}". Expected one of: ${Object.keys(fetchers).join(', ')}`);
   }
-  return fetcher(promptText, lookbackDays);
+  const articles = await fetcher(promptText, lookbackDays);
+
+  return articles.map(article => ({
+    ...article,
+    publishedDate: sanitizePublishedDate(article.publishedDate, source, article.url),
+  }));
 };
 
-module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles };
+module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles, sanitizePublishedDate };
