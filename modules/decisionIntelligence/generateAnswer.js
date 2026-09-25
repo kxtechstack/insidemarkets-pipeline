@@ -43,9 +43,9 @@ const MODULE_NAMES = {
 function stripCitationMarkers(text) {
   if (!text) return text;
   return String(text)
-    .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\s+([.,;:!?])/g, '$1')
+    .replace(/[ \t]*\[\d+(?:\s*,\s*\d+)*\]/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+([.,;:!?])/g, '$1')
     .trim();
 }
 
