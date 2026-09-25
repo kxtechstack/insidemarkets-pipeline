@@ -745,4 +745,4 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
   return generateQualitativeReport(question, intent, chunks, facts, clientResults);
 }
 
-module.exports = { generateAnswer };
+module.exports = { generateAnswer, stripCitationsDeep, stripCitationMarkers };

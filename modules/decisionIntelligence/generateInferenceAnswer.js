@@ -12,6 +12,7 @@
 
 const { callLLM } = require('../llmClient');
 const { createClient } = require('@supabase/supabase-js');
+const { stripCitationsDeep, stripCitationMarkers } = require('./generateAnswer');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const INFERENCE_PROMPT_ID = 'decision_intelligence_inference_v2';
