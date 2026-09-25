@@ -435,6 +435,18 @@ async function resolveSources(citedIndices, sourceManifest) {
 }
 
 /**
+ * The LLM sometimes ignores the "never use ##" instruction and jams a
+ * heading marker onto the end of the previous sentence with no newline
+ * at all — e.g. "...renewable energy development. ## Opportunities".
+ * This forces every "#" heading marker onto its own new paragraph so
+ * react-markdown actually renders it as a heading instead of literal text.
+ */
+function normalizeHeadings(text) {
+  if (!text) return text;
+  return text.replace(/([^\n])\s*(#{1,6}\s+)/g, '$1\n\n$2');
+}
+
+/**
  * Framework questions: keep the existing text prompt, but ask the LLM
  * to prefix its answer with CITED_SOURCES so we can resolve sources.
  * Returns { report: { title, bodyText }, sources }.
