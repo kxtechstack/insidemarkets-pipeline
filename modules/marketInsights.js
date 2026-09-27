@@ -39,7 +39,7 @@ const cosineSimilarity = (a, b) => {
 // Deliberately strict -- this is what stops "same sentence template,
 // different company" false merges. Same-company matching below never uses
 // this at all, so it can never block a same-company merge.
-const CARD_SIMILARITY_THRESHOLD = 0.68;
+const CARD_SIMILARITY_THRESHOLD = 0.55;
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -351,6 +351,10 @@ const calculateRelevanceLevel = (signalCount) => {
 const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, articleEmbedding, organization) => {
   // TIER 1 — exact organization match
   if (organization && organization !== 'Unknown') {
+    // Tier 1: same organization → always reuse the most recent card.
+    // Removed the signal_id filter -- two articles about the same company
+    // often get classified into different signal_ids by the LLM, but they
+    // belong on the same card.
     const { data: orgSignal } = await supabase
       .from('market_dynamics_signals')
       .select('insight_id')
@@ -358,7 +362,6 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
       .eq('module_id', moduleId)
       .eq('submodule_id', submoduleId)
       .eq('organization', organization)
-      .eq('signal_id', signalId)
       .not('insight_id', 'is', null)
       .order('published_date', { ascending: false })
       .limit(1)
@@ -371,7 +374,7 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
         .eq('id', orgSignal.insight_id)
         .single();
       if (card) {
-        console.log(`  [CardMatch] TIER1 org match for "${organization}" -> card ${card.id}`);
+        console.log(`  [CardMatch] TIER1 org match for "${organization}" -> card ${card.id} | title="${card.title}" | was_signals=${card.signal_count}`);
         return card;
       }
     }
@@ -399,16 +402,10 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
   for (const candidate of searchResult) {
     if (candidate.score < CARD_SIMILARITY_THRESHOLD) break;
 
-    // require same signal_id -- narrows the pool so unrelated signal types
-    // in the same submodule can't collide on shared boilerplate phrasing
-    const { data: candSignal } = await supabase
-      .from('market_dynamics_signals')
-      .select('signal_id')
-      .eq('insight_id', candidate.payload.insight_id)
-      .limit(1)
-      .maybeSingle();
-
-    if (!candSignal || candSignal.signal_id !== signalId) continue;
+    // No signal_id requirement -- the submodule scope + embedding
+    // similarity + 0.55 threshold is narrow enough on its own. Requiring
+    // the same signal_id was rejecting valid matches because the LLM
+    // assigns different signal_ids to articles about the same theme.
 
     console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${candidate.payload.insight_id} signal match confirmed`);
 
