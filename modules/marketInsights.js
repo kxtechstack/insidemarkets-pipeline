@@ -355,7 +355,7 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
     // Removed the signal_id filter -- two articles about the same company
     // often get classified into different signal_ids by the LLM, but they
     // belong on the same card.
-    const { data: orgSignal } = await supabase
+    const { data: orgSignal, error: orgSignalError } = await supabase
       .from('market_dynamics_signals')
       .select('insight_id')
       .eq('client_id', clientId)
@@ -366,6 +366,11 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
       .order('published_date', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    if (orgSignalError) {
+      console.log(`  [CardMatch] TIER1 QUERY ERROR for "${organization}":`, orgSignalError.message, orgSignalError.details || '');
+    }
+    console.log(`  [CardMatch] TIER1 lookup params: client=${clientId} module=${moduleId} submodule=${submoduleId} org="${organization}" -> found=${!!(orgSignal && orgSignal.insight_id)}`);
 
     if (orgSignal && orgSignal.insight_id) {
       const { data: card } = await supabase
