@@ -205,7 +205,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
       allResults.push(...results);
     }
 
-    const SCORE_FLOOR = Number(process.env.DI_SCORE_FLOOR) || 0.55;
+    const SCORE_FLOOR = Number(process.env.DI_SCORE_FLOOR) || 0.53;
     const filtered = await keepVisibleResults(
       allResults.filter(r => r.score >= SCORE_FLOOR),
       clientId
@@ -236,7 +236,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   // NEW: log every retrieved chunk with its score, so we can see exactly
   // what's passing the current 0.20 threshold before deciding whether to
   // change it.
-  const effectiveFloor = Number(process.env.DI_SCORE_FLOOR) || 0.55;
+  const effectiveFloor = Number(process.env.DI_SCORE_FLOOR) || 0.53;
   console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays === null ? 'no filter' : bestWindowDays + 'd'} | floor=${effectiveFloor} | ${chosen.length} result(s)`);
   chosen.forEach((r, i) => {
     console.log(`  [${i + 1}] score=${r.score.toFixed(3)} | module=${r.payload.module_id} | title="${r.payload.title}"`);
