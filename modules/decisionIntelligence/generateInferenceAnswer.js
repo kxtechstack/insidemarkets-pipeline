@@ -378,9 +378,30 @@ async function generateInferenceAnswer(question, searchResults) {
     };
   }
 
-  const sources = overrideSources
+    const sources = overrideSources
     ? overrideSources
     : resolveSources(citedIndices, sourceManifest);
+
+  // ── Faithfulness guard ────────────────────────────────────────────
+  // LLMs sometimes cite every retrieved chunk whether or not they
+  // actually used it. Filter sources down to ones whose title or a
+  // distinctive phrase from the chunk actually appears in the report
+  // body. Anything that doesn't appear is dropped from the sources list.
+  const reportTextLower = JSON.stringify(report || {}).toLowerCase();
+  const verifiedSources = sources.filter((s) => {
+    // Always keep SEC sources -- we don't have their text inline.
+    if (s.type === 'sec') return true;
+    const manifestEntry = sourceManifest.find(m => m.index === s.index);
+    const chunkText = (manifestEntry?.text || '').toLowerCase();
+    // Take a distinctive 30-char slice of the chunk and check if any
+    // 5-word window from it appears in the report output.
+    const words = chunkText.split(/\s+/).filter(w => w.length > 4);
+    if (words.length < 3) return false;
+    // Check whether at least 3 distinctive words from the chunk appear
+    // in the report body text.
+    const matched = words.filter(w => reportTextLower.includes(w));
+    return matched.length >= 3;
+  });
 
   // ── Numeric hallucination guard ──────────────────────────────────────
   // Same guard used in generateAnswer.js — strips the table if its
@@ -388,7 +409,10 @@ async function generateInferenceAnswer(question, searchResults) {
   report = guardNumericTable(report, context);
   // ─────────────────────────────────────────────────────────────────────
 
-  return { report: stripCitationsDeep(report), sources };
+  return {
+    report: stripCitationsDeep(report),
+    sources: verifiedSources.length > 0 ? verifiedSources : sources,
+  };
 }
 
 module.exports = { generateInferenceAnswer };

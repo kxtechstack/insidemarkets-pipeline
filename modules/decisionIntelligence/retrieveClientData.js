@@ -206,7 +206,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
     }
 
     const filtered = await keepVisibleResults(
-      allResults.filter(r => r.score >= 0.20),
+      allResults.filter(r => r.score >= 0.35),
       clientId
     );
 
