@@ -35,11 +35,25 @@ const cosineSimilarity = (a, b) => {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-// Used ONLY for cross-company topic matching (different org, same signal).
-// Deliberately strict -- this is what stops "same sentence template,
-// different company" false merges. Same-company matching below never uses
-// this at all, so it can never block a same-company merge.
-const CARD_SIMILARITY_THRESHOLD = 0.62;
+// Base threshold for cross-company topic matching in Tier 2. Anything
+// below this is a different topic entirely; anything above is a
+// candidate merge that then has to clear the dynamic threshold below.
+const CARD_SIMILARITY_THRESHOLD = 0.55;
+
+// As a card grows, raise the bar for accepting new members. A 55-member
+// card should be very hard to extend; a 3-member card should be easy.
+// This prevents runaway drift where the centroid magnetically attracts
+// every article with shared vocabulary (e.g. all macro-economic articles
+// collapsing into one card). Increases linearly from 0 (small card) to
+// +0.15 (card with 60+ signals).
+const MAX_EXTRA_THRESHOLD = 0.15;
+const computeDynamicThreshold = (existingSignalCount) => {
+  const growthPenalty = Math.min(
+    MAX_EXTRA_THRESHOLD,
+    (existingSignalCount / 60) * MAX_EXTRA_THRESHOLD
+  );
+  return CARD_SIMILARITY_THRESHOLD + growthPenalty;
+};
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -342,12 +356,10 @@ const calculateRelevanceLevel = (signalCount) => {
 // signals should never split apart just because the LLM phrased two
 // articles differently -- this guarantees they never do.
 //
-// TIER 2 — SAME SIGNAL, different company (topic clustering):
-// Only runs if Tier 1 found nothing. Restricts candidates to cards that
-// share the SAME signal_id (not just the same submodule -- submodule is
-// too broad and was letting unrelated signal types collide). Requires a
-// STRICT similarity score (see CARD_SIMILARITY_THRESHOLD) since this is
-// where "same sentence template, different company" false merges happen.
+// TIER 2 — SAME THEME, different company (topic clustering):
+// Only runs if Tier 1 found nothing. Uses embedding similarity between
+// the incoming article and each candidate card's centroid, with a
+// dynamic threshold that rises as the candidate card grows.
 const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, articleEmbedding, organization) => {
   // TIER 1 — exact organization match
   if (organization && organization !== 'Unknown') {
@@ -385,7 +397,7 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
     }
   }
 
-  // TIER 2 — same signal, embedding similarity, strict threshold
+  // TIER 2 — cross-company theme matching with dynamic threshold
   const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
     vector: articleEmbedding,
     filter: {
@@ -405,21 +417,23 @@ const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, ar
   }
 
   for (const candidate of searchResult) {
-    if (candidate.score < CARD_SIMILARITY_THRESHOLD) break;
-
-    // No signal_id requirement -- the submodule scope + embedding
-    // similarity + 0.55 threshold is narrow enough on its own. Requiring
-    // the same signal_id was rejecting valid matches because the LLM
-    // assigns different signal_ids to articles about the same theme.
-
-    console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} threshold=${CARD_SIMILARITY_THRESHOLD} card=${candidate.payload.insight_id} signal match confirmed`);
-
+    // Fetch the candidate card first so we can compute its dynamic threshold.
     const { data: card } = await supabase
       .from('market_insights')
       .select('*')
       .eq('id', candidate.payload.insight_id)
       .single();
-    if (card) return card;
+    if (!card) continue;
+
+    const dynamicThreshold = computeDynamicThreshold(card.signal_count || 1);
+
+    if (candidate.score < dynamicThreshold) {
+      console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} below dynamic threshold=${dynamicThreshold.toFixed(3)} (card has ${card.signal_count} signals) — skipping`);
+      continue;
+    }
+
+    console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} dynamic_threshold=${dynamicThreshold.toFixed(3)} (card has ${card.signal_count} signals) card=${candidate.payload.insight_id}`);
+    return card;
   }
 
   console.log(`  [CardMatch] No match in either tier — creating new card`);
