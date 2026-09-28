@@ -151,13 +151,22 @@ const extractFromFile = async (source) => {
     throw new Error('No storage_path or url_or_path set for this file source');
   }
 
+  console.log(`[CustomSourceExtractor] Sending ${fileBuffer.length} bytes to Unstructured.io (strategy: hi_res)`);
+
   const result = await unstructuredClient.general.partition({
     partitionParameters: {
       files: {
         content: fileBuffer,
         fileName: fileName,
       },
-      strategy: 'auto',
+      // CHANGED: 'auto' falls back to a fast text-only extraction on
+      // visually complex pages (chart-heavy decks, image-heavy PDFs). For
+      // the NIQ-style reports this yielded only ~18k chars from 33 pages.
+      // 'hi_res' uses layout detection + OCR, which recovers content that
+      // lives inside charts, images, and vector graphics. Slower and more
+      // Unstructured credits per file, but the difference is significant
+      // for design-heavy PDFs.
+      strategy: 'hi_res',
     },
   });
 
