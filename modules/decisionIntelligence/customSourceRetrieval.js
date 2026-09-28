@@ -17,11 +17,6 @@
  *
  * NOTE: no `industry`, `module_id`, `url`, `article_id`, or `published_date`
  * on these payloads. So this function filters by client_id ONLY.
- *
- * Score floor: measured live -- the genuinely-relevant hit for a real
- * question scored 0.427, with relevant-but-weaker hits in the 0.33-0.39
- * range. Random noise sits below ~0.25. Default floor of 0.30 catches
- * the good hits without flooding the LLM with noise.
  */
 
 const { QdrantClient } = require('@qdrant/js-client-rest');
@@ -36,18 +31,9 @@ const qdrant = new QdrantClient({
 const CUSTOM_SOURCE_COLLECTION =
   process.env.CUSTOM_SOURCE_QDRANT_COLLECTION || 'custom_source_content';
 
-const DEFAULT_MIN_SCORE = Number(process.env.CUSTOM_SOURCE_SCORE_FLOOR) || 0.30;
-const DEFAULT_LIMIT = Number(process.env.CUSTOM_SOURCE_TOP_K) || 3;
+const DEFAULT_MIN_SCORE = Number(process.env.CUSTOM_SOURCE_SCORE_FLOOR) || 0.28;
+const DEFAULT_LIMIT = Number(process.env.CUSTOM_SOURCE_TOP_K) || 5;
 
-/**
- * @param {string} question
- * @param {string} clientId
- * @param {number} [limit]      max chunks to return (default 3)
- * @param {number} [minScore]   cosine similarity floor (default 0.30)
- * @returns {Promise<Array>}    array of { id, score, payload } -- same shape
- *                              as retrieveClientData's return, so downstream
- *                              code can treat them uniformly
- */
 async function retrieveCustomSourceData(
   question,
   clientId,
@@ -59,8 +45,6 @@ async function retrieveCustomSourceData(
   try {
     const vector = await embedText(question);
 
-    // Over-fetch, then dedupe by content_id so one document can't dominate
-    // the context with several near-identical chunks.
     const hits = await qdrant.search(CUSTOM_SOURCE_COLLECTION, {
       vector,
       limit: limit * 3,
@@ -72,13 +56,32 @@ async function retrieveCustomSourceData(
 
     const passing = hits.filter((h) => h.score >= minScore);
 
-    const seenContentIds = new Set();
+    // Dedupe by (content_id, chunk_index) PROXIMITY, not by content_id alone.
+    // A single uploaded document shares one content_id across all its
+    // chunks -- deduping by content_id alone collapses the entire document
+    // to a single chunk, which loses most of the content. Instead, keep
+    // multiple chunks from the same document, skipping only ADJACENT
+    // chunks (index N and N+1) which are near-duplicates because of the
+    // 50-word chunk overlap.
+    const seenKeys = new Set();
     const deduped = [];
     for (const h of passing) {
       const cid = h.payload?.content_id;
-      if (!cid) continue;
-      if (seenContentIds.has(cid)) continue;
-      seenContentIds.add(cid);
+      const ci = h.payload?.chunk_index;
+      if (cid === undefined || ci === undefined) continue;
+
+      const thisKey = `${cid}:${ci}`;
+      const prevKey = `${cid}:${ci - 1}`;
+      const nextKey = `${cid}:${ci + 1}`;
+
+      if (
+        seenKeys.has(thisKey) ||
+        seenKeys.has(prevKey) ||
+        seenKeys.has(nextKey)
+      ) {
+        continue;
+      }
+      seenKeys.add(thisKey);
       deduped.push(h);
       if (deduped.length >= limit) break;
     }
@@ -97,7 +100,6 @@ async function retrieveCustomSourceData(
 
     return deduped;
   } catch (err) {
-    // Never throw -- a custom-source hiccup must not break the chat.
     console.log(`[customSourceRetrieval] Search failed: ${err.message}`);
     return [];
   }
