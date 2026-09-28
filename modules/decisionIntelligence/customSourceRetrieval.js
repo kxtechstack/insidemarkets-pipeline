@@ -47,11 +47,24 @@ async function retrieveCustomSourceData(
 
     const hits = await qdrant.search(CUSTOM_SOURCE_COLLECTION, {
       vector,
-      limit: limit * 3,
+      limit: Math.max(limit * 3, 50),   // DEBUG: pull more so we can see where low-scoring chunks sit
       filter: {
         must: [{ key: 'client_id', match: { value: clientId } }],
       },
       with_payload: true,
+    });
+
+        // DEBUG: log every raw hit from Qdrant, before any filter, so we can
+    // see exactly what scores each chunk got and whether a specific chunk
+    // (e.g. chunk 9) is even in the top results.
+    console.log(`[customSourceRetrieval] RAW QDRANT HITS (top ${hits.length}, before any filter):`);
+    hits.forEach((h, i) => {
+      console.log(
+        `  RAW[${i + 1}] score=${h.score.toFixed(4)} | ` +
+        `chunk ${h.payload?.chunk_index} | ` +
+        `source="${h.payload?.source_name}" | ` +
+        `preview="${(h.payload?.chunk_text || '').slice(0, 80)}..."`
+      );
     });
 
     const passing = hits.filter((h) => h.score >= minScore);
