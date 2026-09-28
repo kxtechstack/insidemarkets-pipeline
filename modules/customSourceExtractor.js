@@ -37,36 +37,40 @@ const cleanPdfText = (raw) => {
 
   let text = raw;
 
-  // 1. Drop repeated boilerplate lines that appear on every page
+  // 1. Drop repeated boilerplate lines
   text = text
     .replace(/^.*Confidential and proprietary.*$/gim, '')
     .replace(/^.*©\s*\d{4}\s*Nielsen.*$/gim, '')
     .replace(/^.*All Rights Reserved.*$/gim, '')
     .replace(/^Page\s+\d+\s*$/gim, '')
-    .replace(/^\s*\d{1,3}\s*$/gm, '');   // standalone page numbers
+    .replace(/^\s*\d{1,3}\s*$/gm, '');
 
-  // 2. Drop lines that are purely decorative / icon-adjacent
-  //    (mostly punctuation, single chars, or garbage after stripping)
+  // 2. Strip INLINE noise sequences. These are runs of short tokens
+  //    mixed with symbols that appear in the middle of otherwise-clean
+  //    lines (e.g. "Lotion Sun Care AL T e A R : *G Digital Shelf...").
+  //    Pattern: 4+ consecutive short tokens (1-3 chars each) possibly
+  //    with punctuation, appearing as a contiguous run.
+  text = text.replace(
+    /\b(?:[A-Za-z*"~:;.,!?]{1,3}\s+){3,}[A-Za-z*"~:;.,!?]{1,3}\b/g,
+    ''
+  );
+
+  // 3. Drop whole lines that are mostly punctuation or very short tokens
   text = text
     .split('\n')
     .filter(line => {
       const t = line.trim();
-      if (!t) return true;                          // keep blank lines (paragraph breaks)
-      if (t.length < 3) return false;               // drop 1-2 char lines
-      // drop lines that are >50% non-alphanumeric (visual noise)
+      if (!t) return true;
+      if (t.length < 3) return false;
       const alnum = (t.match(/[A-Za-z0-9]/g) || []).length;
       if (alnum / t.length < 0.5) return false;
-      // drop runs of single letters like "AL T e A R"
-      const singleLetterRun = /\b([a-zA-Z]\s+){4,}[a-zA-Z]\b/;
-      if (singleLetterRun.test(t)) return false;
       return true;
     })
     .join('\n');
 
-  // 3. Collapse multiple blank lines
-  text = text.replace(/\n{3,}/g, '\n\n');
+  // 4. Collapse whitespace / blank lines
+  text = text.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n');
 
-  // 4. Trim
   return text.trim();
 };
 

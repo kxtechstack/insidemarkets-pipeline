@@ -198,10 +198,7 @@ const processCustomSource = async (source, extracted) => {
     // are preserved exactly by the existing synthesis prompt.
     const synthesizedChunks = [];
     for (let i = 0; i < rawChunks.length; i++) {
-      const rewritten = await synthesizeContent(
-        `${extracted.title} (part ${i + 1} of ${rawChunks.length})`,
-        rawChunks[i]
-      );
+      const rewritten = await synthesizeContent(extracted.title, rawChunks[i]);
       synthesizedChunks.push(rewritten);
     }
 
