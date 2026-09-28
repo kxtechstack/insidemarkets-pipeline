@@ -310,7 +310,9 @@ async function loadPrompt(promptId) {
  * right source. Returns { text, sourceManifest } where sourceManifest
  * is an array of { index, kind, payload } in the same order.
  */
-function buildNumberedContext(chunks, facts, clientResults) {
+const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 1500;
+
+function buildNumberedContext(chunks, facts, clientResults, customSourceResults = []) {
   const items = [];
   let runningLen = 0;
   let secLen = 0;
@@ -344,6 +346,27 @@ function buildNumberedContext(chunks, facts, clientResults) {
     if (clientLen + block.length > MAX_CLIENT_CONTEXT_CHARS) break;
     items.push({ kind: 'client', text: block, payload: p, qdrantPointId: r.id != null ? String(r.id) : null });
     clientLen += block.length;
+    runningLen += block.length;
+  }
+
+  // Custom-source items (appended AFTER client items, capped)
+  let customLen = 0;
+  for (const r of customSourceResults || []) {
+    const p = r.payload || {};
+    let text = p.chunk_text || '';
+    if (text.length > ITEM_MAX_CHARS) {
+      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+    }
+    const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
+    const block = `${header}\n${text}`;
+    if (customLen + block.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) break;
+    items.push({
+      kind: 'custom_source',
+      payload: p,
+      qdrantPointId: r.id != null ? String(r.id) : null,
+      text: block,
+    });
+    customLen += block.length;
     runningLen += block.length;
   }
 
@@ -420,6 +443,25 @@ async function resolveSources(citedIndices, sourceManifest) {
         item_code: s.payload.item_code,
       };
     }
+
+    // NEW: custom-source citation -- distinct shape, no signal_id,
+    // no module, no article_id. The frontend renders these as document
+    // chips rather than signal cards.
+    if (s.kind === 'custom_source') {
+      const p = s.payload || {};
+      return {
+        index: s.index,
+        type: 'custom_source',
+        source_id: p.source_id || null,
+        source_name: p.source_name || p.title || 'Uploaded document',
+        source_type: p.source_type || null,
+        title: p.title || p.source_name || 'Uploaded document',
+        content_id: p.content_id || null,
+        chunk_index: p.chunk_index ?? null,
+        url: null,
+      };
+    }
+
     // Client signal
     const p = s.payload || {};
     return {
@@ -451,11 +493,11 @@ function normalizeHeadings(text) {
  * to prefix its answer with CITED_SOURCES so we can resolve sources.
  * Returns { report: { title, bodyText }, sources }.
  */
-async function generateFrameworkReport(question, intent, chunks, facts, clientResults) {
+async function generateFrameworkReport(question, intent, chunks, facts, clientResults, customSourceResults = []) {
   const promptId = FRAMEWORK_PROMPT_IDS[intent.questionCategory];
   const systemPrompt = await loadPrompt(promptId);
 
-  const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults);
+  const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults, customSourceResults);
   const questionForLlm = sanitizeQuestionForLLM(question, intent.unresolvedMentions || []);
   const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}`;
 
@@ -566,7 +608,7 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
  * Open-ended qualitative DI: JSON schema prompt.
  * Returns { report: {...json...}, sources }.
  */
-async function generateQualitativeReport(question, intent, chunks, facts, clientResults) {
+async function generateQualitativeReport(question, intent, chunks, facts, clientResults, customSourceResults = []) {
   const systemPrompt = await loadPrompt(QUALITATIVE_PROMPT_ID);
 
   const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults);
@@ -712,7 +754,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
 /**
  * Main entry point. Returns { report, sources }.
  */
-async function generateAnswer(question, intent, chunks, facts, clientId = null, industry = null) {
+async function generateAnswer(question, intent, chunks, facts, clientId = null, industry = null, customSourceResults = []) {
   // --- 1. Numeric path: no LLM ---
   if (intent.dataType === 'quantitative' && facts && facts.length) {
     const text = buildNumericAnswer(facts);
@@ -738,11 +780,11 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
 
   // --- 2. Framework path ---
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) {
-    return generateFrameworkReport(question, intent, chunks, facts, clientResults);
+    return generateFrameworkReport(question, intent, chunks, facts, clientResults, customSourceResults);
   }
 
   // --- 3. Qualitative / open-ended path ---
-  return generateQualitativeReport(question, intent, chunks, facts, clientResults);
+  return generateQualitativeReport(question, intent, chunks, facts, clientResults, customSourceResults);
 }
 
 module.exports = { generateAnswer, stripCitationsDeep, stripCitationMarkers };
