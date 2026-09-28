@@ -384,11 +384,88 @@ const formatScopeForPrompt = (enabledSignals) => {
   return output.trim();
 };
 
+/**
+ * Second-pass disambiguation. Called only when the primary classifier
+ * returned a valid is_relevant=true but failed to give a usable
+ * signal_number. Asks the LLM to pick the single best signal from the
+ * client's enabled set based on the article's title and summary.
+ *
+ * Returns the matching signal object from `enabledSignals` (with
+ * signal_id, submodule_id, signal_name) or null if none fits.
+ */
+const disambiguateSignal = async (classification, enabledSignals) => {
+  if (!enabledSignals || enabledSignals.length === 0) return null;
+
+  const articleTitle = classification.signal_title || '';
+  const articleSummary = classification.summary || '';
+  const articleTopic = classification.topic_summary || '';
+  const articleText = `${articleTitle}\n${articleTopic}\n${articleSummary}`.trim();
+
+  if (!articleText) return null;
+
+  // Build a compact numbered list of enabled signals with definitions.
+  const signalList = enabledSignals
+    .map((s, i) => `${i + 1}. ${s.signal_name}\n   Definition: ${s.signal_definition || 'no definition provided'}`)
+    .join('\n\n');
+
+  const prompt = `You are a signal classifier. Read the article below, then choose the single best matching signal from the numbered list. Each signal has a name and a definition. The definition is the source of truth — not the name.
+
+If NO signal clearly matches the article's primary event, return 0.
+
+ARTICLE:
+${articleText}
+
+AVAILABLE SIGNALS:
+${signalList}
+
+Respond with ONLY a JSON object in this exact shape, nothing else:
+{
+  "signal_number": 1,
+  "reason": "one short sentence"
+}
+
+Use signal_number = 0 ONLY if truly nothing matches.`;
+
+  let raw;
+  try {
+    raw = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0, max_tokens: 200, timeout: 30000 }
+    );
+  } catch (err) {
+    return null;
+  }
+
+  // Extract JSON defensively.
+  let cleaned = (raw || '').trim();
+  const first = cleaned.indexOf('{');
+  if (first !== -1) {
+    let depth = 0, end = -1;
+    for (let i = first; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') depth++;
+      else if (cleaned[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end !== -1) cleaned = cleaned.slice(first, end + 1);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+
+  const idx = Number.isInteger(parsed.signal_number) ? parsed.signal_number - 1 : -1;
+  if (idx < 0 || idx >= enabledSignals.length) return null;
+
+  return enabledSignals[idx];
+};
+
 // NEW: Deterministic safety net — checks the LLM's chosen signal against the
 // client's actual enabled scope. If it picked something outside scope
 // (hallucinated or drifted), mark irrelevant instead of storing it silently
 // under an unmonitored signal.
-const applyMonitoringScopeValidation = (classification, enabledSignals) => {
+const applyMonitoringScopeValidation = async (classification, enabledSignals) => {
   // Case 1: Client has no enabled signals at all → genuinely irrelevant
   if (enabledSignals.length === 0) {
     console.log(`  [MonitoringScope] Client has 0 enabled signals — marking irrelevant`);
@@ -418,8 +495,28 @@ const applyMonitoringScopeValidation = (classification, enabledSignals) => {
     return { ...classification, signal_id: substringMatch.signal_id, submodule_id: substringMatch.submodule_id };
   }
 
-  console.log(`  [MonitoringScope] signal_number=${classification.signal_number} — no match found, keeping relevant with fallback submodule`);
-  return { ...classification, signal_id: null, submodule_id: enabledSignals[0].submodule_id };
+  // Second-pass disambiguation: ask the LLM to pick the best signal for
+  // this article, given only the enabled signals and the article's own
+  // title/summary. This is cheaper than the main classify call because
+  // we pass minimal context -- just the signals and the article text --
+  // and it runs only when the first pass failed to return a valid number.
+  try {
+    const disambiguated = await disambiguateSignal(classification, enabledSignals);
+    if (disambiguated) {
+      console.log(`  [MonitoringScope] signal_number=${classification.signal_number} — rescued via LLM disambiguation: "${disambiguated.signal_name}"`);
+      return { ...classification, signal_id: disambiguated.signal_id, submodule_id: disambiguated.submodule_id };
+    }
+  } catch (err) {
+    console.log(`  [MonitoringScope] disambiguation call failed: ${err.message}`);
+  }
+
+  console.log(`  [MonitoringScope] signal_number=${classification.signal_number} — no valid match after disambiguation, marking irrelevant`);
+  return {
+    ...classification,
+    is_relevant: false,
+    technical_failure: false,
+    reason: `No matching signal (LLM returned signal_number=${classification.signal_number}, disambiguation failed)`,
+  };
 };
 
 // NEW: Deterministic safety net — since small LLMs don't reliably follow
@@ -1066,7 +1163,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       classification = applySectorValidation(classification);
 
       if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
-        classification = applyMonitoringScopeValidation(classification, enabledSignals);
+        classification = await applyMonitoringScopeValidation(classification, enabledSignals);
         classification = applySignalCategoryValidation(classification);
       }
 
