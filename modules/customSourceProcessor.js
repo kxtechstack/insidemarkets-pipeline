@@ -177,21 +177,40 @@ const processCustomSource = async (source, extracted) => {
   try {
     await setupCustomCollection();
 
-    // Step 1 -- synthesize into original words
-    const synthesized = await synthesizeContent(extracted.title, extracted.text);
+    // Step 1 -- chunk the RAW extracted text FIRST.
+    //
+    // CHANGED: previously we truncated raw text to 5,000 chars BEFORE
+    // synthesizing, which meant any document longer than ~8 pages lost
+    // most of its content -- it never reached the LLM and never made it
+    // into Qdrant. Now we chunk first, so the whole document is covered.
+    const rawChunks = chunkText(extracted.text);
+    if (rawChunks.length === 0) {
+      throw new Error('No content left to chunk (raw extraction empty)');
+    }
 
-    // Step 2 -- chunk
-    const chunks = chunkText(synthesized);
-    if (chunks.length === 0) {
-      throw new Error('No content left to store after synthesis/chunking');
+    console.log(`[CustomSourceProcessor] "${source.source_name}" -> ${rawChunks.length} raw chunks to synthesize`);
+
+    // Step 2 -- synthesize EACH chunk into original wording.
+    //
+    // This preserves the copyright-safety property (no verbatim third-party
+    // text is ever stored) while still covering the entire document instead
+    // of just the first 5,000 chars. Numbers, product names, and metrics
+    // are preserved exactly by the existing synthesis prompt.
+    const synthesizedChunks = [];
+    for (let i = 0; i < rawChunks.length; i++) {
+      const rewritten = await synthesizeContent(
+        `${extracted.title} (part ${i + 1} of ${rawChunks.length})`,
+        rawChunks[i]
+      );
+      synthesizedChunks.push(rewritten);
     }
 
     const contentId = uuidv4();
 
-    // Step 3 -- embed + store each chunk in Qdrant
+    // Step 3 -- embed + store each synthesized chunk in Qdrant
     const points = [];
-    for (let i = 0; i < chunks.length; i++) {
-      const vector = await embedText(chunks[i]);
+    for (let i = 0; i < synthesizedChunks.length; i++) {
+      const vector = await embedText(synthesizedChunks[i]);
       points.push({
         id: uuidv4(),
         vector,
@@ -203,20 +222,21 @@ const processCustomSource = async (source, extracted) => {
           source_type: source.source_type,
           title: extracted.title,
           chunk_index: i,
-          chunk_text: chunks[i],
+          chunk_text: synthesizedChunks[i],
         },
       });
     }
     await qdrant.upsert(CUSTOM_COLLECTION, { points });
 
-    // Step 4 -- store full synthesized text in Postgres
+    // Step 4 -- store the full recombined synthesized text in Postgres
+    const reassembled = synthesizedChunks.join('\n\n');
     const { error: insertError } = await supabase.from('custom_source_content').insert({
       id: contentId,
       source_id: source.id,
       client_id: source.client_id,
       title: extracted.title,
-      synthesized_content: synthesized,
-      chunk_count: chunks.length,
+      synthesized_content: reassembled,
+      chunk_count: synthesizedChunks.length,
       qdrant_collection_name: CUSTOM_COLLECTION,
     });
     if (insertError) throw new Error(`Postgres insert failed: ${insertError.message}`);
@@ -225,8 +245,8 @@ const processCustomSource = async (source, extracted) => {
     await markRunStatus(source.id, 'success', contentId);
     await logRun(source, 'success', null, contentId);
 
-    console.log(`[CustomSourceProcessor] Done. Source "${source.source_name}" -> ${chunks.length} chunks stored.`);
-    return { success: true, contentId, chunkCount: chunks.length };
+    console.log(`[CustomSourceProcessor] Done. Source "${source.source_name}" -> ${synthesizedChunks.length} chunks stored.`);
+    return { success: true, contentId, chunkCount: synthesizedChunks.length };
 
   } catch (err) {
     console.error(`[CustomSourceProcessor] Failed for source "${source.source_name}":`, err.message);

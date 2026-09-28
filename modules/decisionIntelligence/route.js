@@ -20,7 +20,7 @@
  *   Inference: { type: 'inference', report: {...}, sources: [...] }
  *   Decision:  { type: 'decision', report: {...}, sources: [...], chart: base64|null, chartMeta: {...}|null }
  */
-
+const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules } = require('./retrieveClientData');
