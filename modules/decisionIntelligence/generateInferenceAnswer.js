@@ -169,7 +169,9 @@ async function loadInferencePrompt() {
  * Builds the numbered context for the LLM, plus a source manifest that
  * maps each index back to the original Qdrant payload.
  */
-function buildNumberedContext(searchResults) {
+const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 1500;
+
+function buildNumberedContext(searchResults, customSourceResults = []) {
   const items = [];
   let len = 0;
 
@@ -182,6 +184,7 @@ function buildNumberedContext(searchResults) {
     const part = `${p.title || 'Untitled'}\n${text}`;
     if (len + part.length > MAX_CONTEXT_CHARS) break;
     items.push({
+      kind: 'client',
       payload: p,
       qdrantPointId: r.id != null ? String(r.id) : null,
       text,
@@ -189,12 +192,33 @@ function buildNumberedContext(searchResults) {
     len += part.length;
   }
 
+  // NEW: append custom-source chunks AFTER client signals. They are
+  // capped by their own budget so they never crowd out client signals.
+  let customLen = 0;
+  for (const r of customSourceResults) {
+    const p = r.payload || {};
+    let text = p.chunk_text || '';
+    if (text.length > ITEM_MAX_CHARS) {
+      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+    }
+    const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
+    const part = `${header}\n${text}`;
+    if (customLen + part.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) break;
+    items.push({
+      kind: 'custom_source',
+      payload: p,
+      qdrantPointId: r.id != null ? String(r.id) : null,
+      text: part,
+    });
+    customLen += part.length;
+  }
+
   const sourceManifest = [];
   const numbered = [];
   items.forEach((item, idx) => {
     const n = idx + 1;
     numbered.push(`[${n}] ${item.text}`);
-    sourceManifest.push({ index: n, kind: 'client', ...item });
+    sourceManifest.push({ index: n, ...item });
   });
 
   return { text: numbered.join('\n\n'), sourceManifest };
@@ -237,6 +261,25 @@ function resolveSources(citedIndices, sourceManifest) {
     .filter(s => citedIndices.has(s.index))
     .map(s => {
       const p = s.payload || {};
+
+      // NEW: custom-source citations get their own shape -- they have no
+      // signal_id, module, or article_id, and the frontend will render
+      // them differently (a document chip instead of a signal card).
+      if (s.kind === 'custom_source') {
+        return {
+          index: s.index,
+          type: 'custom_source',
+          source_id: p.source_id || null,
+          source_name: p.source_name || p.title || 'Uploaded document',
+          source_type: p.source_type || null,
+          title: p.title || p.source_name || 'Uploaded document',
+          content_id: p.content_id || null,
+          chunk_index: p.chunk_index ?? null,
+          url: null,
+        };
+      }
+
+      // Existing client-signal citation shape
       return {
         index: s.index,
         type: 'client',
@@ -249,8 +292,8 @@ function resolveSources(citedIndices, sourceManifest) {
     });
 }
 
-async function generateInferenceAnswer(question, searchResults) {
-  if (!searchResults.length) {
+async function generateInferenceAnswer(question, searchResults, customSourceResults = []) {
+  if (!searchResults.length && !customSourceResults.length) {
     return {
       report: null,
       sources: [],
@@ -259,7 +302,7 @@ async function generateInferenceAnswer(question, searchResults) {
     };
   }
 
-  const { text: context, sourceManifest } = buildNumberedContext(searchResults);
+  const { text: context, sourceManifest } = buildNumberedContext(searchResults, customSourceResults);
 
   let systemPrompt;
   try {
@@ -329,7 +372,9 @@ async function generateInferenceAnswer(question, searchResults) {
   // articles and cite them directly.
   let overrideSources = null;
   if (report && report.no_data === true) {
-    const hasRealContext = searchResults && searchResults.length >= 5;
+    const hasRealContext =
+      (searchResults && searchResults.length >= 5) ||
+      (customSourceResults && customSourceResults.length > 0);
     if (!hasRealContext) {
       return {
         report: null,
@@ -391,6 +436,10 @@ async function generateInferenceAnswer(question, searchResults) {
   const verifiedSources = sources.filter((s) => {
     // Always keep SEC sources -- we don't have their text inline.
     if (s.type === 'sec') return true;
+    // NEW: always keep custom-source citations. They're the reason the
+    // user uploaded the document in the first place -- dropping them
+    // would make the answer look unsupported.
+    if (s.type === 'custom_source') return true;
     const manifestEntry = sourceManifest.find(m => m.index === s.index);
     const chunkText = (manifestEntry?.text || '').toLowerCase();
     // Take a distinctive 30-char slice of the chunk and check if any
