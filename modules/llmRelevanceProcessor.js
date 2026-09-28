@@ -237,6 +237,20 @@ const getSynthesisPromptTemplate = async () => {
   return data.prompt_template;
 };
 
+const getDisambiguationPromptTemplate = async () => {
+  const { data, error } = await supabase
+    .from('prompts')
+    .select('prompt_template')
+    .eq('id', 'market_dynamics_disambiguation_v1')
+    .eq('is_active', true)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Could not load disambiguation prompt: ${error?.message}`);
+  }
+
+  return data.prompt_template;
+};
 // NEW: Fetches this client's competitor/sector context from admin.client_icp,
 // and formats it into a short readable text block for the LLM prompt.
 // Returns null if the client has no ICP data — callers must handle that
@@ -408,29 +422,24 @@ const disambiguateSignal = async (classification, enabledSignals) => {
     .map((s, i) => `${i + 1}. ${s.signal_name}\n   Definition: ${s.signal_definition || 'no definition provided'}`)
     .join('\n\n');
 
-  const prompt = `You are a signal classifier. Read the article below, then choose the single best matching signal from the numbered list. Each signal has a name and a definition. The definition is the source of truth — not the name.
+  // Load the prompt template from Supabase (never hardcoded).
+  let promptTemplate;
+  try {
+    promptTemplate = await getDisambiguationPromptTemplate();
+  } catch (err) {
+    console.log(`  [Disambiguate] Could not load prompt: ${err.message}`);
+    return null;
+  }
 
-If NO signal clearly matches the article's primary event, return 0.
-
-ARTICLE:
-${articleText}
-
-AVAILABLE SIGNALS:
-${signalList}
-
-Respond with ONLY a JSON object in this exact shape, nothing else:
-{
-  "signal_number": 1,
-  "reason": "one short sentence"
-}
-
-Use signal_number = 0 ONLY if truly nothing matches.`;
+  const prompt = promptTemplate
+    .replace(/{article_text}/g, articleText)
+    .replace(/{signal_list}/g, signalList);
 
   let raw;
   try {
     raw = await callLLM(
       [{ role: 'user', content: prompt }],
-      { temperature: 0, max_tokens: 200, timeout: 30000 }
+      { temperature: 0.2, max_tokens: 200, timeout: 30000 }
     );
   } catch (err) {
     return null;
