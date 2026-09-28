@@ -24,6 +24,7 @@ const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules } = require('./retrieveClientData');
+const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -54,8 +55,16 @@ async function handleList(question, clientId, industry) {
  * Returns { type: 'inference', report: {...}, sources: [...] }
  */
 async function handleInference(question, clientId, industry) {
-  const searchResults = await retrieveClientData(question, clientId, industry);
-  const { report, sources, _empty, _reason } = await generateInferenceAnswer(question, searchResults);
+  const [searchResults, customSourceResults] = await Promise.all([
+    retrieveClientData(question, clientId, industry),
+    retrieveCustomSourceData(question, clientId),
+  ]);
+  console.log(`[handleInference] client=${clientId} | signals=${searchResults.length} | customSource=${customSourceResults.length}`);
+  const { report, sources, _empty, _reason } = await generateInferenceAnswer(
+    question,
+    searchResults,
+    customSourceResults
+  );
   if (_empty) {
     return {
       type: 'inference',
@@ -79,13 +88,18 @@ async function handleInference(question, clientId, industry) {
 async function handleDecision(question, clientId, industry) {
   const intent = await extractIntent(question, getAllCompanies);
 
-  // SEC retrieval only when a company is named in the question.
-  const { chunks, facts } = intent.tickers.length
-    ? await retrieveForIntent(question, intent)
-    : { chunks: [], facts: [] };
+  const [secRetrieval, customSourceResults] = await Promise.all([
+    intent.tickers.length
+      ? retrieveForIntent(question, intent)
+      : Promise.resolve({ chunks: [], facts: [] }),
+    retrieveCustomSourceData(question, clientId),
+  ]);
+  const { chunks, facts } = secRetrieval;
+
+  console.log(`[handleDecision] client=${clientId} | secChunks=${chunks.length} | facts=${facts.length} | customSource=${customSourceResults.length}`);
 
   const { report, sources, chart: autoChart, chartMeta: autoChartMeta, clientContextCount, _empty, _reason } = await generateAnswer(
-    question, intent, chunks, facts, clientId, industry
+    question, intent, chunks, facts, clientId, industry, customSourceResults
   );
 
   // If generateAnswer flagged the answer as empty (e.g. LLM said no_data),
@@ -130,7 +144,8 @@ async function handleDecision(question, clientId, industry) {
     (!chunks || chunks.length === 0) &&
     (!facts || facts.length === 0) &&
     (!sources || sources.length === 0) &&
-    (!clientContextCount || clientContextCount === 0);
+    (!clientContextCount || clientContextCount === 0) &&
+    (!customSourceResults || customSourceResults.length === 0);
 
   if (hadNoContext) {
     console.log(
