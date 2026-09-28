@@ -56,13 +56,13 @@ async function retrieveCustomSourceData(
 
     const passing = hits.filter((h) => h.score >= minScore);
 
-    // Dedupe by (content_id, chunk_index) PROXIMITY, not by content_id alone.
-    // A single uploaded document shares one content_id across all its
-    // chunks -- deduping by content_id alone collapses the entire document
-    // to a single chunk, which loses most of the content. Instead, keep
-    // multiple chunks from the same document, skipping only ADJACENT
-    // chunks (index N and N+1) which are near-duplicates because of the
-    // 50-word chunk overlap.
+    // Dedupe by exact (content_id, chunk_index) only. Previously we also
+    // skipped ADJACENT chunks (N+1, N-1) to avoid near-duplicate overlap,
+    // but that threw away the better-matching chunk whenever two adjacent
+    // chunks both scored well (e.g. chunk 8 wins over chunk 9, so chunk 9
+    // got dropped). Overlap between adjacent chunks is ~17% of text --
+    // not enough to warrant losing a relevant chunk. Only skip exact
+    // duplicates (same content_id AND same chunk_index).
     const seenKeys = new Set();
     const deduped = [];
     for (const h of passing) {
@@ -71,16 +71,7 @@ async function retrieveCustomSourceData(
       if (cid === undefined || ci === undefined) continue;
 
       const thisKey = `${cid}:${ci}`;
-      const prevKey = `${cid}:${ci - 1}`;
-      const nextKey = `${cid}:${ci + 1}`;
-
-      if (
-        seenKeys.has(thisKey) ||
-        seenKeys.has(prevKey) ||
-        seenKeys.has(nextKey)
-      ) {
-        continue;
-      }
+      if (seenKeys.has(thisKey)) continue;
       seenKeys.add(thisKey);
       deduped.push(h);
       if (deduped.length >= limit) break;
