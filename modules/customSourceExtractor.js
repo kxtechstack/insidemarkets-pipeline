@@ -159,14 +159,11 @@ const extractFromFile = async (source) => {
         content: fileBuffer,
         fileName: fileName,
       },
-      // CHANGED: 'auto' falls back to a fast text-only extraction on
-      // visually complex pages (chart-heavy decks, image-heavy PDFs). For
-      // the NIQ-style reports this yielded only ~18k chars from 33 pages.
-      // 'hi_res' uses layout detection + OCR, which recovers content that
-      // lives inside charts, images, and vector graphics. Slower and more
-      // Unstructured credits per file, but the difference is significant
-      // for design-heavy PDFs.
-      strategy: 'hi_res',
+      // 'auto' is the correct setting for our tier. 'hi_res' was tested
+      // and produced identical output (the free tier ignores the strategy
+      // parameter and always uses fast mode), so we stick with 'auto' to
+      // avoid wasting credits.
+      strategy: 'auto',
     },
   });
 
