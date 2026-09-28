@@ -882,6 +882,34 @@ app.post('/admin/users-last-signin', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+app.get('/admin/clients-last-active', async (req, res) => {
+  try {
+    const { data: cu, error: cuErr } = await supabaseClient
+      .schema('admin')
+      .from('client_users')
+      .select('client_id, email');
+    if (cuErr) return res.status(500).json({ error: cuErr.message });
+
+    const { data, error } = await supabaseClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    if (error) return res.status(500).json({ error: error.message });
+
+    const cuByEmail = {};
+    (cu || []).forEach(r => { cuByEmail[(r.email || '').toLowerCase()] = r.client_id; });
+
+    const result = {}; // clientId -> latest sign-in
+    for (const u of data.users) {
+      const clientId = u.user_metadata?.client_id || cuByEmail[(u.email || '').toLowerCase()];
+      if (!clientId || !u.last_sign_in_at) continue;
+      if (!result[clientId] || new Date(u.last_sign_in_at) > new Date(result[clientId])) {
+        result[clientId] = u.last_sign_in_at;
+      }
+    }
+    return res.json({ lastActive: result });
+  } catch (err) {
+    console.error('[ClientsLastActive] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // NEW: Returns the count of retryable failed articles for a client, optionally
 // scoped to one submodule. Used by the frontend to decide whether to show
