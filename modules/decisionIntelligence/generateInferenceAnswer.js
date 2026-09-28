@@ -275,7 +275,7 @@ function resolveSources(citedIndices, sourceManifest) {
           title: p.title || p.source_name || 'Uploaded document',
           content_id: p.content_id || null,
           chunk_index: p.chunk_index ?? null,
-          url: null,
+          url: p.source_url || null,
         };
       }
 
@@ -460,8 +460,24 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
 
   return {
     report: stripCitationsDeep(report),
-    sources: verifiedSources.length > 0 ? verifiedSources : sources,
+    sources: dedupeCustomSourceCitations(
+      verifiedSources.length > 0 ? verifiedSources : sources
+    ),
   };
+}
+
+function dedupeCustomSourceCitations(sources) {
+  if (!Array.isArray(sources)) return sources;
+  const out = [];
+  const seenSourceIds = new Set();
+  for (const s of sources) {
+    if (s.type === 'custom_source' && s.source_id) {
+      if (seenSourceIds.has(s.source_id)) continue;
+      seenSourceIds.add(s.source_id);
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 module.exports = { generateInferenceAnswer };

@@ -458,7 +458,7 @@ async function resolveSources(citedIndices, sourceManifest) {
         title: p.title || p.source_name || 'Uploaded document',
         content_id: p.content_id || null,
         chunk_index: p.chunk_index ?? null,
-        url: null,
+        url: p.source_url || null,
       };
     }
 
@@ -599,7 +599,7 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
       title: `${intent.questionCategory.toUpperCase()} -- ${question}`,
       bodyText: stripCitationMarkers(lines.join('\n')),
     },
-    sources,
+    sources: dedupeCustomSourceCitations(sources),
     clientContextCount: (clientResults || []).length,
   };
 }
@@ -744,7 +744,7 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
 
   return {
     report: stripCitationsDeep(report),
-    sources,
+    sources: dedupeCustomSourceCitations(sources),
     chart,
     chartMeta,
     clientContextCount: (clientResults || []).length,
@@ -785,6 +785,25 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
 
   // --- 3. Qualitative / open-ended path ---
   return generateQualitativeReport(question, intent, chunks, facts, clientResults, customSourceResults);
+}
+
+/**
+ * Collapses multiple custom-source citations from the SAME source_id
+ * into a single entry, so the frontend shows one chip per uploaded
+ * document (not one per retrieved chunk).
+ */
+function dedupeCustomSourceCitations(sources) {
+  if (!Array.isArray(sources)) return sources;
+  const out = [];
+  const seenSourceIds = new Set();
+  for (const s of sources) {
+    if (s.type === 'custom_source' && s.source_id) {
+      if (seenSourceIds.has(s.source_id)) continue;
+      seenSourceIds.add(s.source_id);
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 module.exports = { generateAnswer, stripCitationsDeep, stripCitationMarkers };
