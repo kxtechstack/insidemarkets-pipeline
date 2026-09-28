@@ -92,7 +92,7 @@ const synthesizeContent = async (title, rawText) => {
     let synthesized = await callLLM([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], { temperature: 0.1, max_tokens: 1800, timeout: 180000 });
+    ], { temperature: 0.1, max_tokens: 2400, timeout: 180000 });
 
     // Strip common preamble/closing patterns the model sometimes adds
     // despite instructions, as a safety net.

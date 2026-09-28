@@ -25,6 +25,51 @@ const unstructuredClient = new UnstructuredClient({
 
 const STORAGE_BUCKET = 'custom-source-files';
 
+// ── PDF text cleaner ─────────────────────────────────────────────────────
+// Unstructured.io returns PDF text that preserves the VISUAL layout of the
+// document -- headers, footers, sidebars, decorative icons, and standalone
+// labels all come through as separate "elements". When we join them with
+// newlines we get chunks like:
+//   "52 markets Neuroscience sg (a) E-Commerce Panel Bath & Shower..."
+// This function strips that layout noise so the LLM gets coherent prose.
+const cleanPdfText = (raw) => {
+  if (!raw) return '';
+
+  let text = raw;
+
+  // 1. Drop repeated boilerplate lines that appear on every page
+  text = text
+    .replace(/^.*Confidential and proprietary.*$/gim, '')
+    .replace(/^.*©\s*\d{4}\s*Nielsen.*$/gim, '')
+    .replace(/^.*All Rights Reserved.*$/gim, '')
+    .replace(/^Page\s+\d+\s*$/gim, '')
+    .replace(/^\s*\d{1,3}\s*$/gm, '');   // standalone page numbers
+
+  // 2. Drop lines that are purely decorative / icon-adjacent
+  //    (mostly punctuation, single chars, or garbage after stripping)
+  text = text
+    .split('\n')
+    .filter(line => {
+      const t = line.trim();
+      if (!t) return true;                          // keep blank lines (paragraph breaks)
+      if (t.length < 3) return false;               // drop 1-2 char lines
+      // drop lines that are >50% non-alphanumeric (visual noise)
+      const alnum = (t.match(/[A-Za-z0-9]/g) || []).length;
+      if (alnum / t.length < 0.5) return false;
+      // drop runs of single letters like "AL T e A R"
+      const singleLetterRun = /\b([a-zA-Z]\s+){4,}[a-zA-Z]\b/;
+      if (singleLetterRun.test(t)) return false;
+      return true;
+    })
+    .join('\n');
+
+  // 3. Collapse multiple blank lines
+  text = text.replace(/\n{3,}/g, '\n\n');
+
+  // 4. Trim
+  return text.trim();
+};
+
 // ---------- PLAIN TEXT ----------
 // Source already has the text stored directly in the DB row -- nothing to fetch.
 const extractFromText = async (source) => {
@@ -119,12 +164,21 @@ const extractFromFile = async (source) => {
   // unstructured.io's SDK returns the elements array directly (not wrapped
   // in a .elements property) -- handle both shapes just in case.
   const elements = Array.isArray(result) ? result : (result.elements || []);
-  const text = elements.map(el => el.text || '').filter(Boolean).join('\n\n');
+  const rawText = elements.map(el => el.text || '').filter(Boolean).join('\n\n');
 
-  if (!text || text.length < 20) {
+  if (!rawText || rawText.length < 20) {
     throw new Error('Unstructured.io returned little or no text for this file');
   }
 
+  // Strip PDF layout noise (headers, footers, decorative labels, icon runs)
+  // before handing text to the chunker + LLM.
+  const text = cleanPdfText(rawText);
+
+  if (!text || text.length < 20) {
+    throw new Error('Text was too noisy after cleanup -- nothing usable extracted');
+  }
+
+  console.log(`[CustomSourceExtractor] PDF text cleaned: ${rawText.length} -> ${text.length} chars`);
   return { title: source.source_name, text };
 };
 
@@ -144,4 +198,4 @@ const extractContent = async (source) => {
   return extractor(source);
 };
 
-module.exports = { extractContent, extractFromText, extractFromWebsite, extractFromFile };
+module.exports = { extractContent, extractFromText, extractFromWebsite, extractFromFile, cleanPdfText };
