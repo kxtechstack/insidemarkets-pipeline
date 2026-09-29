@@ -594,23 +594,10 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
     lines.push(parsed.bottom_line);
   }
 
-  let bodyText = stripCitationMarkers(lines.join('\n'));
-
-  // Append top-ranked chunk's raw data if the LLM ignored its specifics.
-  if (customSourceResults && customSourceResults.length > 0) {
-    const top = customSourceResults[0];
-    const topText = top?.payload?.chunk_text || '';
-    if (topText) {
-      const srcName = top?.payload?.source_name || 'Uploaded document';
-      const chunkIdx = top?.payload?.chunk_index ?? 0;
-      bodyText += `\n\n---\n\n**Primary Source Data — ${srcName} (chunk ${chunkIdx}, top-ranked match)**\n\n${topText.slice(0, 1500)}`;
-    }
-  }
-
   return {
     report: {
       title: `${intent.questionCategory.toUpperCase()} -- ${question}`,
-      bodyText,
+      bodyText: stripCitationMarkers(lines.join('\n')),
     },
     sources: dedupeCustomSourceCitations(sources),
     clientContextCount: (clientResults || []).length,
@@ -816,9 +803,6 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
   } catch (err) {
     console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
   }
-
-  // Append top-ranked chunk's raw data if the LLM ignored its specifics.
-  report = appendPrimarySourceData(report, customSourceResults);
 
   return {
     report: stripCitationsDeep(report),

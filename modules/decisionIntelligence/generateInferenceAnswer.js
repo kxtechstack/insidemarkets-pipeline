@@ -458,29 +458,6 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
   report = guardNumericTable(report, context);
   // ─────────────────────────────────────────────────────────────────────
 
-  // Append top-ranked chunk's raw data if the LLM ignored its specifics.
-  // This guarantees the user always sees the source's specific numbers,
-  // regardless of whether the model chose to use them.
-  if (customSourceResults && customSourceResults.length > 0 && report) {
-    const top = customSourceResults[0];
-    const topText = top?.payload?.chunk_text || '';
-    if (topText) {
-      const srcName = top?.payload?.source_name || 'Uploaded document';
-      const chunkIdx = top?.payload?.chunk_index ?? 0;
-      const suffix = `\n\n---\n\n**Primary Source Data — ${srcName} (chunk ${chunkIdx}, top-ranked match)**\n\n${topText.slice(0, 1500)}`;
-
-      if (typeof report.analysis === 'string') {
-        report.analysis += suffix;
-      } else if (Array.isArray(report.analysis)) {
-        report.analysis = [...report.analysis, suffix.trim()];
-      } else if (typeof report.outlook === 'string') {
-        report.outlook += suffix;
-      } else if (typeof report.bodyText === 'string') {
-        report.bodyText += suffix;
-      }
-    }
-  }
-
   return {
     report: stripCitationsDeep(report),
     sources: dedupeCustomSourceCitations(
