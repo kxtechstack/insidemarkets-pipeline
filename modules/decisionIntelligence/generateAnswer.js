@@ -594,14 +594,89 @@ async function generateFrameworkReport(question, intent, chunks, facts, clientRe
     lines.push(parsed.bottom_line);
   }
 
+  let bodyText = stripCitationMarkers(lines.join('\n'));
+
+  // Append top-ranked chunk's raw data if the LLM ignored its specifics.
+  if (customSourceResults && customSourceResults.length > 0) {
+    const top = customSourceResults[0];
+    const topText = top?.payload?.chunk_text || '';
+    if (topText) {
+      const srcName = top?.payload?.source_name || 'Uploaded document';
+      const chunkIdx = top?.payload?.chunk_index ?? 0;
+      bodyText += `\n\n---\n\n**Primary Source Data — ${srcName} (chunk ${chunkIdx}, top-ranked match)**\n\n${topText.slice(0, 1500)}`;
+    }
+  }
+
   return {
     report: {
       title: `${intent.questionCategory.toUpperCase()} -- ${question}`,
-      bodyText: stripCitationMarkers(lines.join('\n')),
+      bodyText,
     },
     sources: dedupeCustomSourceCitations(sources),
     clientContextCount: (clientResults || []).length,
   };
+}
+/**
+ * Deterministic fallback: if the LLM's report text doesn't already contain
+ * the distinctive numbers from the TOP-ranked retrieved chunk, append a
+ * "Primary Source Data" section with that chunk's raw text.
+ *
+ * This guarantees the user always sees the source material's specific data,
+ * even if the model chose to write about something else.
+ */
+function appendPrimarySourceData(report, customSourceResults) {
+  if (!report || !customSourceResults || customSourceResults.length === 0) return report;
+
+  const top = customSourceResults[0];
+  const topText = top?.payload?.chunk_text || '';
+  if (!topText) return report;
+
+  // Extract distinctive numbers from the top chunk.
+  const nums = new Set();
+  const re = /(\$)?\s*([\d,]+(?:\.\d+)?)\s*(%|billion|million|thousand|bn|mn|[bmk])?/gi;
+  let m;
+  while ((m = re.exec(topText)) !== null) {
+    const value = m[2].replace(/,/g, '');
+    if (!value) continue;
+    const v = parseFloat(value);
+    if (isNaN(v)) continue;
+    if (v >= 2000 && v <= 2099 && !m[1] && !m[3]) continue; // skip years
+    nums.add(value + (m[3] || ''));
+  }
+
+  // Check how many of these numbers already appear in the report text.
+  const reportStr = JSON.stringify(report).toLowerCase();
+  let presentCount = 0;
+  const distinctNums = [...nums];
+  for (const n of distinctNums) {
+    const plain = n.replace(/[%,]/g, '').toLowerCase();
+    if (reportStr.includes(plain)) presentCount++;
+  }
+
+  // If most distinctive numbers are already present, no need to append.
+  if (distinctNums.length > 0 && presentCount / distinctNums.length >= 0.3) {
+    return report;
+  }
+
+  // Otherwise, append a "Primary Source Data" section.
+  const sourceName = top?.payload?.source_name || 'Uploaded document';
+  const chunkIndex = top?.payload?.chunk_index ?? 0;
+
+  const suffix = `\n\n---\n\n**Primary Source Data — ${sourceName} (chunk ${chunkIndex}, top-ranked match)**\n\n${topText.slice(0, 1500)}`;
+
+  // Append to the last textual field we can find, so it renders at the bottom.
+  if (typeof report.analysis === 'string') {
+    report.analysis += suffix;
+  } else if (Array.isArray(report.analysis)) {
+    report.analysis = [...report.analysis, suffix.trim()];
+  } else if (typeof report.outlook === 'string') {
+    report.outlook += suffix;
+  } else if (typeof report.bottom_line === 'string') {
+    report.bottom_line += suffix;
+  } else if (typeof report.bodyText === 'string') {
+    report.bodyText += suffix;
+  }
+  return report;
 }
 
 /**
@@ -741,6 +816,9 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
   } catch (err) {
     console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
   }
+
+  // Append top-ranked chunk's raw data if the LLM ignored its specifics.
+  report = appendPrimarySourceData(report, customSourceResults);
 
   return {
     report: stripCitationsDeep(report),
