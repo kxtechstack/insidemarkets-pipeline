@@ -318,7 +318,7 @@ function buildNumberedContext(chunks, facts, clientResults, customSourceResults 
   let runningLen = 0;
   let secLen = 0;
 
-  // Verified financial facts first (SEC side)
+  // 1. Verified financial facts (SEC side) -- unchanged, keep at top
   if (facts && facts.length) {
     const factLines = facts.map(f => `- ${f.ticker} ${f.metric_name}: ${f.metric_value} ${f.unit} (FY${f.fiscal_year})`);
     const factBlock = 'VERIFIED FINANCIAL FACTS (structured, trust these over text):\n' + factLines.join('\n');
@@ -326,7 +326,7 @@ function buildNumberedContext(chunks, facts, clientResults, customSourceResults 
     runningLen += factBlock.length;
   }
 
-  // SEC chunks
+  // 2. SEC chunks -- unchanged, keep early
   for (const c of chunks) {
     const block = `[SEC] ${c.ticker} FY${c.fiscal_year} -- ${c.item_code}\n${(c.chunk_text || '').slice(0, ITEM_MAX_CHARS)}`;
     if (secLen + block.length > MAX_SEC_CONTEXT_CHARS) break;
@@ -335,40 +335,64 @@ function buildNumberedContext(chunks, facts, clientResults, customSourceResults 
     runningLen += block.length;
   }
 
-  // Client signals
-  let clientLen = 0;
-  for (const r of clientResults || []) {
-    const p = r.payload || {};
-    let text = p.chunk_text || p.summary || '';
-    if (text.length > ITEM_MAX_CHARS) {
-      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
-    }
-    const block = `[CLIENT] ${p.title || 'Untitled'}\n${text}`;
-    if (clientLen + block.length > MAX_CLIENT_CONTEXT_CHARS) break;
-    items.push({ kind: 'client', text: block, payload: p, qdrantPointId: r.id != null ? String(r.id) : null });
-    clientLen += block.length;
-    runningLen += block.length;
-  }
-
-  // Custom-source items (appended AFTER client items, capped)
-  let customLen = 0;
-  for (const r of customSourceResults || []) {
-    const p = r.payload || {};
-    let text = p.chunk_text || '';
-    if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
-      text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
-    }
-    const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
-    const block = `${header}\n${text}`;
-    if (customLen + block.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) break;
-    items.push({
-      kind: 'custom_source',
-      payload: p,
+  // 3. Merge client signals + custom sources into one array, sort by score.
+  // Source-type has NO priority -- the Qdrant score decides which chunks
+  // the LLM sees first.
+  const merged = [
+    ...(clientResults || []).map((r) => ({
+      kind: 'client',
+      score: r.score || 0,
+      payload: r.payload || {},
       qdrantPointId: r.id != null ? String(r.id) : null,
-      text: block,
-    });
-    customLen += block.length;
-    runningLen += block.length;
+    })),
+    ...(customSourceResults || []).map((r) => ({
+      kind: 'custom_source',
+      score: r.score || 0,
+      payload: r.payload || {},
+      qdrantPointId: r.id != null ? String(r.id) : null,
+    })),
+  ];
+  merged.sort((a, b) => b.score - a.score);
+
+  console.log(
+    '[buildNumberedContext] merged order:',
+    merged.slice(0, 8).map((m) => `${m.kind}(${m.score.toFixed(3)})`).join(' > ')
+  );
+
+  let clientLen = 0;
+  let customLen = 0;
+  for (const m of merged) {
+    const p = m.payload;
+    if (m.kind === 'custom_source') {
+      let text = p.chunk_text || '';
+      if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
+        text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
+      }
+      const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
+      const block = `${header}\n${text}`;
+      if (customLen + block.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) continue;
+      items.push({
+        kind: 'custom_source',
+        payload: p,
+        qdrantPointId: m.qdrantPointId,
+        text: block,
+      });
+      customLen += block.length;
+    } else {
+      let text = p.chunk_text || p.summary || '';
+      if (text.length > ITEM_MAX_CHARS) {
+        text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+      }
+      const block = `[CLIENT] ${p.title || 'Untitled'}\n${text}`;
+      if (clientLen + block.length > MAX_CLIENT_CONTEXT_CHARS) continue;
+      items.push({
+        kind: 'client',
+        payload: p,
+        qdrantPointId: m.qdrantPointId,
+        text: block,
+      });
+      clientLen += block.length;
+    }
   }
 
   // Number the visible items (skip the facts block, it's not citeable)

@@ -174,45 +174,66 @@ const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CON
 const CUSTOM_SOURCE_ITEM_MAX_CHARS = Number(process.env.CUSTOM_SOURCE_ITEM_MAX_CHARS) || 1600;
 
 function buildNumberedContext(searchResults, customSourceResults = []) {
+  // Merge client + custom sources into one array, then sort by Qdrant
+  // score (descending). Source-type has NO priority -- the score decides
+  // which chunks the LLM sees first.
+  const merged = [
+    ...searchResults.map((r) => ({
+      kind: 'client',
+      score: r.score || 0,
+      payload: r.payload || {},
+      qdrantPointId: r.id != null ? String(r.id) : null,
+    })),
+    ...customSourceResults.map((r) => ({
+      kind: 'custom_source',
+      score: r.score || 0,
+      payload: r.payload || {},
+      qdrantPointId: r.id != null ? String(r.id) : null,
+    })),
+  ];
+  merged.sort((a, b) => b.score - a.score);
+
+  console.log(
+    '[buildNumberedContext] merged order:',
+    merged.slice(0, 8).map((m) => `${m.kind}(${m.score.toFixed(3)})`).join(' > ')
+  );
+
   const items = [];
   let len = 0;
-
-  for (const r of searchResults) {
-    const p = r.payload || {};
-    let text = p.chunk_text || p.summary || '';
-    if (text.length > ITEM_MAX_CHARS) {
-      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
-    }
-    const part = `${p.title || 'Untitled'}\n${text}`;
-    if (len + part.length > MAX_CONTEXT_CHARS) break;
-    items.push({
-      kind: 'client',
-      payload: p,
-      qdrantPointId: r.id != null ? String(r.id) : null,
-      text,
-    });
-    len += part.length;
-  }
-
-  // NEW: append custom-source chunks AFTER client signals. They are
-  // capped by their own budget so they never crowd out client signals.
   let customLen = 0;
-  for (const r of customSourceResults) {
-    const p = r.payload || {};
-    let text = p.chunk_text || '';
-    if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
-      text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
+
+  for (const m of merged) {
+    const p = m.payload;
+    if (m.kind === 'custom_source') {
+      let text = p.chunk_text || '';
+      if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
+        text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
+      }
+      const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
+      const part = `${header}\n${text}`;
+      if (customLen + part.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) continue;
+      items.push({
+        kind: 'custom_source',
+        payload: p,
+        qdrantPointId: m.qdrantPointId,
+        text: part,
+      });
+      customLen += part.length;
+    } else {
+      let text = p.chunk_text || p.summary || '';
+      if (text.length > ITEM_MAX_CHARS) {
+        text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+      }
+      const part = `${p.title || 'Untitled'}\n${text}`;
+      if (len + part.length > MAX_CONTEXT_CHARS) continue;
+      items.push({
+        kind: 'client',
+        payload: p,
+        qdrantPointId: m.qdrantPointId,
+        text,
+      });
+      len += part.length;
     }
-    const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
-    const part = `${header}\n${text}`;
-    if (customLen + part.length > MAX_CUSTOM_SOURCE_CONTEXT_CHARS) break;
-    items.push({
-      kind: 'custom_source',
-      payload: p,
-      qdrantPointId: r.id != null ? String(r.id) : null,
-      text: part,
-    });
-    customLen += part.length;
   }
 
   const sourceManifest = [];
