@@ -18,7 +18,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const INFERENCE_PROMPT_ID = 'decision_intelligence_inference_v2';
 
 const MAX_CONTEXT_CHARS = 12000;
-const ITEM_MAX_CHARS = 400;
+const ITEM_MAX_CHARS = 1600;
 
 const MODULE_NAMES = {
   '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'Policy & Risk',
@@ -169,7 +169,8 @@ async function loadInferencePrompt() {
  * Builds the numbered context for the LLM, plus a source manifest that
  * maps each index back to the original Qdrant payload.
  */
-const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 1500;
+const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 6000;
+const CUSTOM_SOURCE_ITEM_MAX_CHARS = Number(process.env.CUSTOM_SOURCE_ITEM_MAX_CHARS) || 1600;
 
 function buildNumberedContext(searchResults, customSourceResults = []) {
   const items = [];
@@ -198,8 +199,8 @@ function buildNumberedContext(searchResults, customSourceResults = []) {
   for (const r of customSourceResults) {
     const p = r.payload || {};
     let text = p.chunk_text || '';
-    if (text.length > ITEM_MAX_CHARS) {
-      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+    if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
+      text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
     }
     const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
     const part = `${header}\n${text}`;

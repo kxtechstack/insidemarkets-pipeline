@@ -27,7 +27,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const MAX_CONTEXT_CHARS = 12000;
 const MAX_SEC_CONTEXT_CHARS = Math.floor(MAX_CONTEXT_CHARS * 0.6);
 const MAX_CLIENT_CONTEXT_CHARS = MAX_CONTEXT_CHARS - MAX_SEC_CONTEXT_CHARS;
-const ITEM_MAX_CHARS = 400;
+const ITEM_MAX_CHARS = 1600;
 
 const MODULE_NAMES = {
   '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'Policy & Risk',
@@ -310,7 +310,7 @@ async function loadPrompt(promptId) {
  * right source. Returns { text, sourceManifest } where sourceManifest
  * is an array of { index, kind, payload } in the same order.
  */
-const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 1500;
+const MAX_CUSTOM_SOURCE_CONTEXT_CHARS = Number(process.env.CUSTOM_SOURCE_MAX_CONTEXT_CHARS) || 6000;
 
 function buildNumberedContext(chunks, facts, clientResults, customSourceResults = []) {
   const items = [];
@@ -354,8 +354,8 @@ function buildNumberedContext(chunks, facts, clientResults, customSourceResults 
   for (const r of customSourceResults || []) {
     const p = r.payload || {};
     let text = p.chunk_text || '';
-    if (text.length > ITEM_MAX_CHARS) {
-      text = text.slice(0, ITEM_MAX_CHARS).trim() + '...';
+    if (text.length > CUSTOM_SOURCE_ITEM_MAX_CHARS) {
+      text = text.slice(0, CUSTOM_SOURCE_ITEM_MAX_CHARS).trim() + '...';
     }
     const header = `[UPLOADED DOCUMENT] ${p.source_name || p.title || 'Uploaded document'} (${p.source_type || 'file'}) — chunk ${p.chunk_index ?? '?'}`;
     const block = `${header}\n${text}`;
