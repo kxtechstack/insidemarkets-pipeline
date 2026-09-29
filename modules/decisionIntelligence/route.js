@@ -37,24 +37,40 @@ const {
 
 /**
  * Handles a 'list' question: client data only, no LLM.
- * FALLBACK: if no client signals match AND custom-source chunks do,
- * route to the Inference answer generator instead of returning an
- * empty list.
+ *
+ * FALLBACK: always fetch custom sources in parallel. If the client-signal
+ * list comes back thin (fewer than 3 items) BUT custom sources have hits,
+ * route to the Inference answer generator instead of returning a sparse
+ * or unhelpful list.
  */
 async function handleList(question, clientId, industry) {
   const modules = detectTargetModules(question);
-  const searchResults = await retrieveClientData(question, clientId, industry, 10, modules);
 
+  const [searchResults, customSourceResults] = await Promise.all([
+    retrieveClientData(question, clientId, industry, 10, modules),
+    retrieveCustomSourceData(question, clientId),
+  ]);
+
+  let clientItems = [];
   if (searchResults.length > 0) {
-    const items = await buildListAnswer(searchResults);
-    return { type: 'list', items };
+    try {
+      clientItems = await buildListAnswer(searchResults);
+    } catch (err) {
+      console.log(`[handleList] buildListAnswer failed: ${err.message}`);
+      clientItems = [];
+    }
   }
 
-  const customSourceResults = await retrieveCustomSourceData(question, clientId);
-  console.log(`[handleList] client=${clientId} | signals=0 | customSource=${customSourceResults.length}`);
+  const MIN_RICH_LIST_SIZE = 3;
+  const useCustomSources =
+    clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
 
-  if (customSourceResults.length === 0) {
-    return { type: 'list', items: [] };
+  console.log(
+    `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
+  );
+
+  if (!useCustomSources) {
+    return { type: 'list', items: clientItems };
   }
 
   const { report, sources, _empty, _reason } = await generateInferenceAnswer(
@@ -64,7 +80,7 @@ async function handleList(question, clientId, industry) {
   );
 
   if (_empty) {
-    return { type: 'inference', report: null, sources: [], _empty: true, _reason: _reason || null };
+    return { type: 'list', items: clientItems };
   }
 
   return { type: 'inference', report, sources };

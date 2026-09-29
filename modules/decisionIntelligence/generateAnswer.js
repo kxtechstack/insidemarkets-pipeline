@@ -843,7 +843,15 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
  */
 async function generateAnswer(question, intent, chunks, facts, clientId = null, industry = null, customSourceResults = []) {
   // --- 1. Numeric path: no LLM ---
-  if (intent.dataType === 'quantitative' && facts && facts.length) {
+  // CHANGED: only fire this when the question actually names one or more
+  // public companies. Without a named company, any "facts" would be from
+  // the SEC default fallback (random public companies) -- the bug that
+  // returned Netflix financials for a question about MEA fintech.
+  if (
+    intent.dataType === 'quantitative' &&
+    facts && facts.length &&
+    Array.isArray(intent.tickers) && intent.tickers.length > 0
+  ) {
     const text = buildNumericAnswer(facts);
     return {
       report: {
