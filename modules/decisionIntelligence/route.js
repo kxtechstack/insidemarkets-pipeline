@@ -37,16 +37,37 @@ const {
 
 /**
  * Handles a 'list' question: client data only, no LLM.
+ * FALLBACK: if no client signals match AND custom-source chunks do,
+ * route to the Inference answer generator instead of returning an
+ * empty list.
  */
 async function handleList(question, clientId, industry) {
-  // Scope retrieval to the module(s) the question is about -- a "policy
-  // changes" question shouldn't also return Forward Outlook or Market
-  // Dynamics signals that happen to match on generic words. Falls back
-  // to searching all modules if no keywords match.
   const modules = detectTargetModules(question);
   const searchResults = await retrieveClientData(question, clientId, industry, 10, modules);
-  const items = await buildListAnswer(searchResults);
-  return { type: 'list', items };
+
+  if (searchResults.length > 0) {
+    const items = await buildListAnswer(searchResults);
+    return { type: 'list', items };
+  }
+
+  const customSourceResults = await retrieveCustomSourceData(question, clientId);
+  console.log(`[handleList] client=${clientId} | signals=0 | customSource=${customSourceResults.length}`);
+
+  if (customSourceResults.length === 0) {
+    return { type: 'list', items: [] };
+  }
+
+  const { report, sources, _empty, _reason } = await generateInferenceAnswer(
+    question,
+    [],
+    customSourceResults
+  );
+
+  if (_empty) {
+    return { type: 'inference', report: null, sources: [], _empty: true, _reason: _reason || null };
+  }
+
+  return { type: 'inference', report, sources };
 }
 
 /**
