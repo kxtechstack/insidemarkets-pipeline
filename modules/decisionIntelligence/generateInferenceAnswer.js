@@ -20,6 +20,7 @@ const INFERENCE_PROMPT_ID = 'decision_intelligence_inference_v2';
 const MAX_CONTEXT_CHARS = 12000;
 const ITEM_MAX_CHARS = 1600;
 
+
 const MODULE_NAMES = {
   '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'Policy & Risk',
   '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'Market Dynamics',
