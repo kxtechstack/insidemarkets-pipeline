@@ -371,7 +371,7 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
   // meaningful number of articles, ignore the LLM's refusal -- it's
   // being overly cautious. Build a report from the top retrieved
   // articles and cite them directly.
-  let overrideSources = null;
+    let overrideSources = null;
   if (report && report.no_data === true) {
     const hasRealContext =
       (searchResults && searchResults.length >= 5) ||
@@ -384,12 +384,13 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
         _reason: report.reason || 'no relevant data',
       };
     }
-    console.log(`[generateInferenceAnswer] LLM refused but retrieval returned ${searchResults.length} results; overriding with retrieved sources`);
+    console.log(`[generateInferenceAnswer] LLM refused but retrieval returned ${searchResults.length} client + ${customSourceResults.length} custom results; overriding with retrieved sources`);
 
-    // Take the top 8 retrieved articles and cite them all
-    const top = searchResults.slice(0, 8);
-    const topIndices = top.map((_, i) => i + 1);
-    overrideSources = top.map((r, i) => ({
+    const topClient = searchResults.slice(0, 8);
+    const topCustom = customSourceResults.slice(0, 8);
+    const totalFound = searchResults.length + customSourceResults.length;
+
+    const clientOverride = topClient.map((r, i) => ({
       index: i + 1,
       type: 'client',
       title: r.payload?.title || 'Untitled',
@@ -399,28 +400,47 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
       qdrant_point_id: r.id != null ? String(r.id) : null,
     }));
 
+    const customOverride = topCustom.map((r, i) => ({
+      index: clientOverride.length + i + 1,
+      type: 'custom_source',
+      source_id: r.payload?.source_id || null,
+      source_name: r.payload?.source_name || r.payload?.title || 'Uploaded document',
+      source_type: r.payload?.source_type || null,
+      title: r.payload?.title || r.payload?.source_name || 'Uploaded document',
+      content_id: r.payload?.content_id || null,
+      chunk_index: r.payload?.chunk_index ?? null,
+      url: r.payload?.source_url || null,
+    }));
+
+    overrideSources = [...clientOverride, ...customOverride];
+
+    const topTitle = topClient[0]?.payload?.title || topCustom[0]?.payload?.source_name || 'Untitled';
+
     report = {
       title: question,
       outlook: [
-        `We surfaced ${searchResults.length} articles matching this question. Below is a summary of the top ${top.length} most relevant sources.`,
-        `Top article: "${top[0]?.payload?.title || 'Untitled'}".`,
+        `We surfaced ${totalFound} source(s) matching this question (${searchResults.length} signal(s), ${customSourceResults.length} uploaded document chunk(s)). Below is a summary of the most relevant sources.`,
+        `Top source: "${topTitle}".`,
       ],
       key_movement_analysis: {
         columns: ['Source', 'Module'],
-        rows: top.slice(0, 5).map(r => ({
-          cells: [
-            (r.payload?.title || 'Untitled').slice(0, 80),
-            MODULE_NAMES[r.payload?.module_id] || 'Unknown',
-          ],
-        })),
+        rows: [
+          ...topClient.slice(0, 5).map(r => ({
+            cells: [(r.payload?.title || 'Untitled').slice(0, 80), MODULE_NAMES[r.payload?.module_id] || 'Unknown'],
+          })),
+          ...topCustom.slice(0, 5).map(r => ({
+            cells: [(r.payload?.source_name || r.payload?.title || 'Untitled').slice(0, 80), 'Uploaded Document'],
+          })),
+        ],
       },
-      driving_factors: top.slice(0, 4).map(r =>
-        `${r.payload?.title || 'Untitled'} (relevance: ${(r.score * 100).toFixed(0)}%)`
-      ),
+      driving_factors: [
+        ...topClient.slice(0, 4).map(r => `${r.payload?.title || 'Untitled'} (relevance: ${(r.score * 100).toFixed(0)}%)`),
+        ...topCustom.slice(0, 4).map(r => `${r.payload?.source_name || r.payload?.title || 'Untitled'} (relevance: ${(r.score * 100).toFixed(0)}%)`),
+      ],
       what_to_watch: [
         'Review the full list of sources below for the complete context.'
       ],
-      bottom_line: `${searchResults.length} relevant articles found. Please review the sources for details.`,
+      bottom_line: `${totalFound} relevant source(s) found. Please review the sources for details.`,
     };
   }
 
