@@ -673,7 +673,7 @@ function appendPrimarySourceData(report, customSourceResults) {
 async function generateQualitativeReport(question, intent, chunks, facts, clientResults, customSourceResults = []) {
   const systemPrompt = await loadPrompt(QUALITATIVE_PROMPT_ID);
 
-  const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults);
+  const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults, customSourceResults);
   const questionForLlm = sanitizeQuestionForLLM(question, intent.unresolvedMentions || []);
   const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}`;
 
