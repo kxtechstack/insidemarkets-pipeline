@@ -43,7 +43,7 @@ const {
  * route to the Inference answer generator instead of returning a sparse
  * or unhelpful list.
  */
-async function handleList(question, clientId, industry) {
+async function handleList(question, clientId, industry, forceList = false) {
   const modules = detectTargetModules(question);
 
   const [searchResults, customSourceResults] = await Promise.all([
@@ -68,6 +68,24 @@ async function handleList(question, clientId, industry) {
   console.log(
     `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
   );
+
+  // If the user explicitly asked for a list (e.g. clicked a List card
+  // in the Question Library, or set type='list' in the request), we
+  // MUST return a list. Do NOT fall back to inference — that would
+  // change the response shape and surprise the frontend.
+  if (forceList) {
+    console.log(`[handleList] forceList=true — returning list even if empty`);
+    return { type: 'list', items: clientItems };
+  }
+
+  // If the user explicitly asked for a list (e.g. clicked a List card
+  // in the Question Library, or set type='list' in the request), we
+  // MUST return a list. Do NOT fall back to inference — that would
+  // change the response shape and surprise the frontend.
+  if (forceList) {
+    console.log(`[handleList] forceList=true — returning list even if empty`);
+    return { type: 'list', items: clientItems };
+  }
 
   if (!useCustomSources) {
     return { type: 'list', items: clientItems };
@@ -279,6 +297,7 @@ function registerDecisionIntelligenceRoute(app) {
       // 3. Classify (same as before)
       let type = providedType;
       let classifierReasoning = null;
+      const typeWasExplicit = Boolean(providedType); // frontend told us the type
       if (!type) {
         const classification = await classifyQuestion(question);
         type = classification.type;
@@ -292,7 +311,7 @@ function registerDecisionIntelligenceRoute(app) {
       // 4. Dispatch
       let result;
       if (type === 'list') {
-        result = await handleList(question, clientId, industry);
+        result = await handleList(question, clientId, industry, typeWasExplicit);
       } else if (type === 'inference') {
         result = await handleInference(question, clientId, industry);
       } else {
