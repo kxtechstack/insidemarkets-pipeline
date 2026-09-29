@@ -223,7 +223,32 @@ const processCustomSource = async (source, extracted) => {
         },
       });
     }
+
+    // Remove any previously stored points for this source BEFORE writing
+    // the new ones -- otherwise re-running a source (edit, re-upload,
+    // manual retry) leaves old and new chunks coexisting in Qdrant
+    // permanently, so retrieval silently mixes stale content with current.
+    try {
+      await qdrant.delete(CUSTOM_COLLECTION, {
+        filter: {
+          must: [{ key: 'source_id', match: { value: source.id } }],
+        },
+      });
+    } catch (err) {
+      console.log(`[CustomSourceProcessor] Failed to clear old points for source ${source.id}: ${err.message}`);
+    }
+
     await qdrant.upsert(CUSTOM_COLLECTION, { points });
+
+    // Remove any previous Postgres row(s) for this source too, so
+    // custom_source_content doesn't accumulate stale rows on re-run.
+    const { error: deleteOldRowError } = await supabase
+      .from('custom_source_content')
+      .delete()
+      .eq('source_id', source.id);
+    if (deleteOldRowError) {
+      console.log(`[CustomSourceProcessor] Failed to clear old Postgres row(s) for source ${source.id}: ${deleteOldRowError.message}`);
+    }
 
     // Step 4 -- store the full recombined synthesized text in Postgres
     const reassembled = synthesizedChunks.join('\n\n');
