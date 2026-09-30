@@ -28,6 +28,7 @@ const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
 const { enrichSourcesWithSignalIds } = require('./enrichSources');
+const { resolveCompanySet } = require('./resolveCompanySet');
 const {
   createConversation, appendMessage,
   listConversations, loadConversation, deleteConversation,
@@ -47,6 +48,14 @@ const {
  */
 async function handleList(question, clientId, industry, forceList = false) {
   const modules = detectTargetModules(question);
+
+    // Safety net: if the classifier routed a sector-set question to list,
+  // peek and delegate to handleDecision instead.
+  const setPeek = await resolveCompanySet(question);
+  if (setPeek) {
+    console.log(`[handleList] detected company-set question -- delegating to handleDecision`);
+    return await handleDecision(question, clientId, industry);
+  }
   const hasTimeWindow = Boolean(detectTimeWindow(question));
   const LIST_FLOOR = Number(process.env.LIST_SCORE_FLOOR) || 0.35;
 
@@ -162,10 +171,34 @@ async function handleInference(question, clientId, industry) {
 async function handleDecision(question, clientId, industry) {
   const intent = await extractIntent(question, getAllCompanies);
 
-  const [secRetrieval, customSourceResults] = await Promise.all([
-    intent.tickers.length
-      ? retrieveForIntent(question, intent)
-      : Promise.resolve({ chunks: [], facts: [] }),
+  // Three retrieval paths:
+  //   1. Specific ticker(s) named   -> SEC retrieval as before
+  //   2. Sector-set question        -> LLM extracts sector+metric, then query DB
+  //   3. Neither                    -> no SEC, fall through to LLM with custom sources
+  let secRetrieval;
+  if (intent.tickers.length > 0) {
+    secRetrieval = await retrieveForIntent(question, intent);
+  } else {
+    const setFilter = await resolveCompanySet(question);
+    if (setFilter) {
+      secRetrieval = await resolveCompanySetFacts(setFilter);
+      if (secRetrieval.facts.length > 0) {
+        intent.dataType = 'quantitative';
+        intent.questionCategory = 'comparison';
+        intent.metric = setFilter.metric;
+        intent.tickers = secRetrieval.facts.map((f) => f.ticker);
+        intent.isChartable = secRetrieval.facts.length >= 2;
+        console.log(
+          `[handleDecision] company-set resolved to ${secRetrieval.facts.length} facts ` +
+          `(sector=${setFilter.sector || 'any'}, metric=${setFilter.metric}, orderBy=${setFilter.orderBy})`
+        );
+      }
+    } else {
+      secRetrieval = { chunks: [], facts: [] };
+    }
+  }
+
+  const [customSourceResults] = await Promise.all([
     retrieveCustomSourceData(question, clientId),
   ]);
   const { chunks, facts } = secRetrieval;
@@ -490,6 +523,61 @@ function registerDecisionIntelligenceRoute(app) {
       return res.status(500).json({ error: err.message });
     }
   });
+}
+
+/**
+ * Given a parsed company-set filter, query companies + financial_facts
+ * and return the top-N facts matching the filter. Reads from Postgres,
+ * no LLM. Caps the candidate ticker list so a wide sector (Financials:
+ * 76 companies) doesn't retrieve an unreasonable number of facts.
+ */
+async function resolveCompanySetFacts(filter) {
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  let companyQuery = supabase.from('companies').select('ticker');
+  if (filter.sector) {
+    companyQuery = companyQuery.eq('sector', filter.sector);
+  }
+  companyQuery = companyQuery.limit(200);
+
+  const { data: candidates, error: candErr } = await companyQuery;
+  if (candErr || !candidates || candidates.length === 0) {
+    console.log(`[resolveCompanySetFacts] no candidates: ${candErr?.message || 'empty'}`);
+    return { chunks: [], facts: [] };
+  }
+  const tickers = candidates.map((c) => c.ticker);
+  console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
+
+  const { data: allFacts, error: factsErr } = await supabase
+    .from('financial_facts')
+    .select('*')
+    .in('ticker', tickers)
+    .eq('metric_name', filter.metric);
+
+  if (factsErr || !allFacts || allFacts.length === 0) {
+    console.log(`[resolveCompanySetFacts] no facts: ${factsErr?.message || 'empty'}`);
+    return { chunks: [], facts: [] };
+  }
+
+  const latestByTicker = {};
+  for (const f of allFacts) {
+    const existing = latestByTicker[f.ticker];
+    if (!existing || (f.fiscal_year || 0) > (existing.fiscal_year || 0)) {
+      latestByTicker[f.ticker] = f;
+    }
+  }
+
+  const sorted = Object.values(latestByTicker)
+    .filter((f) => f.metric_value !== null && f.metric_value !== undefined)
+    .sort((a, b) => {
+      const av = Number(a.metric_value);
+      const bv = Number(b.metric_value);
+      return filter.orderBy === 'asc' ? av - bv : bv - av;
+    })
+    .slice(0, filter.limit);
+
+  return { chunks: [], facts: sorted };
 }
 
 module.exports = { registerDecisionIntelligenceRoute };
