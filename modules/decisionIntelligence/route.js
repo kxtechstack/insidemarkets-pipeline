@@ -23,6 +23,7 @@
 const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
+const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
 const { getVerifiedSuggestions } = require('./suggestionEngine');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
