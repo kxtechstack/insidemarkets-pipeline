@@ -36,7 +36,7 @@ function buildNumericAnswer(facts) {
     return "Verified financial data for this question wasn't found.";
   }
 
-  const tickers = [...new Set(facts.map(f => f.ticker))].sort();
+  const tickers = [...new Set(facts.map(f => f.ticker))];
   const lines = [];
 
   for (const ticker of tickers) {

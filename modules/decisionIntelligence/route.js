@@ -1,25 +1,7 @@
 /**
  * modules/decisionIntelligence/route.js
- *
- * The real endpoint wiring the whole Decision Intelligence chat together.
- * Exports a function that attaches POST /decision-intelligence/chat onto
- * an existing Express app -- call registerDecisionIntelligenceRoute(app)
- * from server.js, same pattern as the other route groups there.
- *
- * Request body:
- *   {
- *     question: string,       required
- *     clientId: string,       required
- *     industry: string,       required
- *     type?: 'list' | 'inference' | 'decision'   OPTIONAL
- *     userId: string,         required (for chat history ownership)
- *   }
- *
- * Response shape (varies by type -- frontend branches on `type` in the response):
- *   List:      { type: 'list', items: [...] }
- *   Inference: { type: 'inference', report: {...}, sources: [...] }
- *   Decision:  { type: 'decision', report: {...}, sources: [...], chart: base64|null, chartMeta: {...}|null }
  */
+
 const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
@@ -37,25 +19,24 @@ const {
 
 
 /**
- * Handles a 'list' question: client data only, no LLM.
+ * Handles a 'list' question.
  *
- * For time-scoped questions ("last week", "this quarter"), progressively
- * widens the window (30d -> 90d -> all-time) ONLY when the exact window
- * comes back empty, and tells the user honestly that it widened -- never
- * silently substitutes older articles as if they matched the original
- * window, and never falls back to unrelated custom-source content for a
- * time-scoped question.
+ * Safety net: if the classifier routed a sector-set question to list,
+ * delegate to handleDecision.
+ *
+ * Time-scoped questions ("last week"): progressively widen the window
+ * (30d -> 90d -> all-time) ONLY when the exact window is empty, and tell
+ * the user honestly that it widened.
  */
 async function handleList(question, clientId, industry, forceList = false) {
-  const modules = detectTargetModules(question);
-
-    // Safety net: if the classifier routed a sector-set question to list,
-  // peek and delegate to handleDecision instead.
+  // Safety net -- company-set question that got routed to list.
   const setPeek = await resolveCompanySet(question);
   if (setPeek) {
     console.log(`[handleList] detected company-set question -- delegating to handleDecision`);
     return await handleDecision(question, clientId, industry);
   }
+
+  const modules = detectTargetModules(question);
   const hasTimeWindow = Boolean(detectTimeWindow(question));
   const LIST_FLOOR = Number(process.env.LIST_SCORE_FLOOR) || 0.35;
 
@@ -120,7 +101,7 @@ async function handleList(question, clientId, industry, forceList = false) {
     return { type: 'list', items: clientItems, ...(widenMessage ? { message: widenMessage } : {}) };
   }
 
-  const { report, sources, _empty, _reason } = await generateInferenceAnswer(
+  const { report, sources, _empty } = await generateInferenceAnswer(
     question,
     [],
     customSourceResults
@@ -135,7 +116,6 @@ async function handleList(question, clientId, industry, forceList = false) {
 
 /**
  * Handles an 'inference' question: client data + LLM synthesis.
- * Returns { type: 'inference', report: {...}, sources: [...] }
  */
 async function handleInference(question, clientId, industry) {
   const [searchResults, customSourceResults] = await Promise.all([
@@ -162,40 +142,39 @@ async function handleInference(question, clientId, industry) {
 
 /**
  * Handles a 'decision' question: SEC filings + client data.
- * Numeric questions -> verified facts + chart.
- * Framework questions (SWOT/PESTLE/etc.) -> text-based report + sources.
- * Open-ended qualitative questions -> structured JSON report + sources.
  *
- * Returns { type: 'decision', report, sources, chart, chartMeta }
+ * Company-set resolution runs FIRST -- if the question is a sector-set
+ * query ("top 5 US tech companies by revenue"), we use the LLM-driven
+ * filter + DB query, even if extractTickers incidentally matched a
+ * generic word in the question.
  */
 async function handleDecision(question, clientId, industry) {
   const intent = await extractIntent(question, getAllCompanies);
 
-  // Three retrieval paths:
-  //   1. Specific ticker(s) named   -> SEC retrieval as before
-  //   2. Sector-set question        -> LLM extracts sector+metric, then query DB
-  //   3. Neither                    -> no SEC, fall through to LLM with custom sources
   let secRetrieval;
-  if (intent.tickers.length > 0) {
+  const setFilter = await resolveCompanySet(question);
+
+  if (setFilter) {
+    secRetrieval = await resolveCompanySetFacts(setFilter);
+    if (secRetrieval.facts.length > 0) {
+      intent.dataType = 'quantitative';
+      intent.questionCategory = 'comparison';
+      intent.metric = setFilter.metric;
+      intent.tickers = secRetrieval.facts.map((f) => f.ticker);
+      intent.isChartable = secRetrieval.facts.length >= 2;
+      console.log(
+        `[handleDecision] company-set resolved to ${secRetrieval.facts.length} facts ` +
+        `(sector=${setFilter.sector || 'any'}, metric=${setFilter.metric}, orderBy=${setFilter.orderBy})`
+      );
+    } else {
+      secRetrieval = intent.tickers.length > 0
+        ? await retrieveForIntent(question, intent)
+        : { chunks: [], facts: [] };
+    }
+  } else if (intent.tickers.length > 0) {
     secRetrieval = await retrieveForIntent(question, intent);
   } else {
-    const setFilter = await resolveCompanySet(question);
-    if (setFilter) {
-      secRetrieval = await resolveCompanySetFacts(setFilter);
-      if (secRetrieval.facts.length > 0) {
-        intent.dataType = 'quantitative';
-        intent.questionCategory = 'comparison';
-        intent.metric = setFilter.metric;
-        intent.tickers = secRetrieval.facts.map((f) => f.ticker);
-        intent.isChartable = secRetrieval.facts.length >= 2;
-        console.log(
-          `[handleDecision] company-set resolved to ${secRetrieval.facts.length} facts ` +
-          `(sector=${setFilter.sector || 'any'}, metric=${setFilter.metric}, orderBy=${setFilter.orderBy})`
-        );
-      }
-    } else {
-      secRetrieval = { chunks: [], facts: [] };
-    }
+    secRetrieval = { chunks: [], facts: [] };
   }
 
   const [customSourceResults] = await Promise.all([
@@ -205,7 +184,11 @@ async function handleDecision(question, clientId, industry) {
 
   console.log(`[handleDecision] client=${clientId} | secChunks=${chunks.length} | facts=${facts.length} | customSource=${customSourceResults.length}`);
 
-  const { report, sources, chart: autoChart, chartMeta: autoChartMeta, clientContextCount, _empty, _reason } = await generateAnswer(
+  const {
+    report, sources,
+    chart: autoChart, chartMeta: autoChartMeta,
+    clientContextCount, _empty, _reason,
+  } = await generateAnswer(
     question, intent, chunks, facts, clientId, industry, customSourceResults
   );
 
@@ -254,6 +237,61 @@ async function handleDecision(question, clientId, industry) {
   return { type: 'decision', report, sources, chart, chartMeta };
 }
 
+/**
+ * Given a parsed company-set filter, query companies + financial_facts
+ * and return the top-N facts matching the filter. Reads from Postgres,
+ * no LLM.
+ */
+async function resolveCompanySetFacts(filter) {
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  let companyQuery = supabase.from('companies').select('ticker');
+  if (filter.sector) {
+    companyQuery = companyQuery.eq('sector', filter.sector);
+  }
+  companyQuery = companyQuery.limit(200);
+
+  const { data: candidates, error: candErr } = await companyQuery;
+  if (candErr || !candidates || candidates.length === 0) {
+    console.log(`[resolveCompanySetFacts] no candidates: ${candErr?.message || 'empty'}`);
+    return { chunks: [], facts: [] };
+  }
+  const tickers = candidates.map((c) => c.ticker);
+  console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
+
+  const { data: allFacts, error: factsErr } = await supabase
+    .from('financial_facts')
+    .select('*')
+    .in('ticker', tickers)
+    .eq('metric_name', filter.metric);
+
+  if (factsErr || !allFacts || allFacts.length === 0) {
+    console.log(`[resolveCompanySetFacts] no facts: ${factsErr?.message || 'empty'}`);
+    return { chunks: [], facts: [] };
+  }
+
+  const latestByTicker = {};
+  for (const f of allFacts) {
+    const existing = latestByTicker[f.ticker];
+    if (!existing || (f.fiscal_year || 0) > (existing.fiscal_year || 0)) {
+      latestByTicker[f.ticker] = f;
+    }
+  }
+
+  const sorted = Object.values(latestByTicker)
+    .filter((f) => f.metric_value !== null && f.metric_value !== undefined)
+    .sort((a, b) => {
+      const av = Number(a.metric_value);
+      const bv = Number(b.metric_value);
+      return filter.orderBy === 'asc' ? av - bv : bv - av;
+    })
+    .slice(0, filter.limit);
+
+  return { chunks: [], facts: sorted };
+}
+
+
 function registerDecisionIntelligenceRoute(app) {
 
   app.post('/decision-intelligence/chat', async (req, res) => {
@@ -291,10 +329,7 @@ function registerDecisionIntelligenceRoute(app) {
         let suggestions = [];
         try {
           const homeQs = await getSuggestedQuestions({
-            clientId,
-            surface: 'home',
-            industry,
-            companyName: null,
+            clientId, surface: 'home', industry, companyName: null,
           });
           suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
         } catch (err) {
@@ -314,11 +349,7 @@ function registerDecisionIntelligenceRoute(app) {
         };
 
         await appendMessage({
-          conversationId,
-          role: 'assistant',
-          content: reply,
-          type: 'list',
-          payload,
+          conversationId, role: 'assistant', content: reply, type: 'list', payload,
         });
 
         return res.json({ ...payload, conversationId });
@@ -376,7 +407,6 @@ function registerDecisionIntelligenceRoute(app) {
 
         if (result.type === 'inference' || result.type === 'decision') {
           const r = result.report || {};
-
           const outlookText = Array.isArray(r.outlook) ? r.outlook.join(' ') : (r.outlook || '');
           if (textSaysNoData(outlookText) || textSaysNoData(r.bodyText) || textSaysNoData(r.bottom_line)) {
             return true;
@@ -404,10 +434,7 @@ function registerDecisionIntelligenceRoute(app) {
         let suggestions = [];
         try {
           const homeQs = await getSuggestedQuestions({
-            clientId,
-            surface: 'home',
-            industry,
-            companyName: null,
+            clientId, surface: 'home', industry, companyName: null,
           });
           suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
         } catch (err) {
@@ -421,10 +448,9 @@ function registerDecisionIntelligenceRoute(app) {
           ];
         }
 
-        const reply =
-          result._reason
-            ? `I don't have relevant data on that in your current dataset (${result._reason}). Would you like to explore one of these instead?`
-            : "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?";
+        const reply = result._reason
+          ? `I don't have relevant data on that in your current dataset (${result._reason}). Would you like to explore one of these instead?`
+          : "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?";
 
         const enriched = {
           type: 'list',
@@ -435,11 +461,7 @@ function registerDecisionIntelligenceRoute(app) {
         };
 
         await appendMessage({
-          conversationId,
-          role: 'assistant',
-          content: reply,
-          type: 'list',
-          payload: enriched,
+          conversationId, role: 'assistant', content: reply, type: 'list', payload: enriched,
         });
 
         return res.json({ ...enriched, conversationId });
@@ -482,10 +504,7 @@ function registerDecisionIntelligenceRoute(app) {
     try {
       const { userId } = req.query;
       if (!userId) return res.status(400).json({ error: 'userId is required' });
-      const data = await loadConversation({
-        conversationId: req.params.id,
-        userId,
-      });
+      const data = await loadConversation({ conversationId: req.params.id, userId });
       return res.json(data);
     } catch (err) {
       console.error('[DI loadConversation] Error:', err.message);
@@ -513,71 +532,13 @@ function registerDecisionIntelligenceRoute(app) {
     try {
       const { userId } = req.query;
       if (!userId) return res.status(400).json({ error: 'userId is required' });
-      await deleteConversation({
-        conversationId: req.params.id,
-        userId,
-      });
+      await deleteConversation({ conversationId: req.params.id, userId });
       return res.json({ success: true });
     } catch (err) {
       console.error('[DI deleteConversation] Error:', err.message);
       return res.status(500).json({ error: err.message });
     }
   });
-}
-
-/**
- * Given a parsed company-set filter, query companies + financial_facts
- * and return the top-N facts matching the filter. Reads from Postgres,
- * no LLM. Caps the candidate ticker list so a wide sector (Financials:
- * 76 companies) doesn't retrieve an unreasonable number of facts.
- */
-async function resolveCompanySetFacts(filter) {
-  const { createClient } = require('@supabase/supabase-js');
-  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-  let companyQuery = supabase.from('companies').select('ticker');
-  if (filter.sector) {
-    companyQuery = companyQuery.eq('sector', filter.sector);
-  }
-  companyQuery = companyQuery.limit(200);
-
-  const { data: candidates, error: candErr } = await companyQuery;
-  if (candErr || !candidates || candidates.length === 0) {
-    console.log(`[resolveCompanySetFacts] no candidates: ${candErr?.message || 'empty'}`);
-    return { chunks: [], facts: [] };
-  }
-  const tickers = candidates.map((c) => c.ticker);
-  console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
-
-  const { data: allFacts, error: factsErr } = await supabase
-    .from('financial_facts')
-    .select('*')
-    .in('ticker', tickers)
-    .eq('metric_name', filter.metric);
-
-  if (factsErr || !allFacts || allFacts.length === 0) {
-    console.log(`[resolveCompanySetFacts] no facts: ${factsErr?.message || 'empty'}`);
-    return { chunks: [], facts: [] };
-  }
-
-  const latestByTicker = {};
-  for (const f of allFacts) {
-    const existing = latestByTicker[f.ticker];
-    if (!existing || (f.fiscal_year || 0) > (existing.fiscal_year || 0)) {
-      latestByTicker[f.ticker] = f;
-    }
-  }
-
-  const sorted = Object.values(latestByTicker)
-    .filter((f) => f.metric_value !== null && f.metric_value !== undefined)
-    .sort((a, b) => {
-      const av = Number(a.metric_value);
-      const bv = Number(b.metric_value);
-      return filter.orderBy === 'asc' ? av - bv : bv - av;
-    })
-    .slice(0, filter.limit);
-
-  return { chunks: [], facts: sorted };
 }
 
 module.exports = { registerDecisionIntelligenceRoute };
