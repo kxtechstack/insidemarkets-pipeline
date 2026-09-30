@@ -156,7 +156,7 @@ function detectTargetModules(question) {
  * Searches the client's own data across existing modules, with optional
  * time-window filtering and module scoping.
  */
-async function retrieveClientData(question, clientId, industry, limitPerModule = 10, modules = null) {
+async function retrieveClientData(question, clientId, industry, limitPerModule = 10, modules = null, scoreFloorOverride = null) {
   const timeWindow = detectTimeWindow(question);
   const topicQuery = stripTimeTokens(question);
   const questionVector = await embedText(topicQuery);
@@ -205,7 +205,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
       allResults.push(...results);
     }
 
-    const SCORE_FLOOR = Number(process.env.DI_SCORE_FLOOR) || 0.53;
+    const SCORE_FLOOR = scoreFloorOverride ?? (Number(process.env.DI_SCORE_FLOOR) || 0.53);
     const filtered = await keepVisibleResults(
       allResults.filter(r => r.score >= SCORE_FLOOR),
       clientId
