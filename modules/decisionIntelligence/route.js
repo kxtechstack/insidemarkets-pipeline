@@ -246,7 +246,7 @@ async function resolveCompanySetFacts(filter) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-  let companyQuery = supabase.from('companies').select('ticker');
+  let companyQuery = supabase.from('companies').select('ticker, company_name');
   if (filter.sector) {
     companyQuery = companyQuery.eq('sector', filter.sector);
   }
@@ -258,6 +258,8 @@ async function resolveCompanySetFacts(filter) {
     return { chunks: [], facts: [] };
   }
   const tickers = candidates.map((c) => c.ticker);
+  const nameByTicker = {};
+  candidates.forEach((c) => { nameByTicker[c.ticker] = c.company_name; });
   console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
 
   const { data: allFacts, error: factsErr } = await supabase
@@ -286,7 +288,11 @@ async function resolveCompanySetFacts(filter) {
       const bv = Number(b.metric_value);
       return filter.orderBy === 'asc' ? av - bv : bv - av;
     })
-    .slice(0, filter.limit);
+    .slice(0, filter.limit)
+    .map((f) => ({
+      ...f,
+      company_name: nameByTicker[f.ticker] || f.ticker,
+    }));
 
   return { chunks: [], facts: sorted };
 }
