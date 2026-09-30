@@ -876,15 +876,35 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
     facts && facts.length &&
     Array.isArray(intent.tickers) && intent.tickers.length > 0
   ) {
-    const text = buildNumericAnswer(facts);
-
-    // Build one SEC source chip per fact. Reads filings by filing_id so
-    // the URL points at the actual 10-K the number came from.
+    // ── 1. Enrich facts with company_name BEFORE formatting, so the
+    //       section headers use real names ("Apple Inc (AAPL)") instead
+    //       of repeating the ticker ("AAPL (AAPL)").
     let sources = [];
     try {
       const { createClient } = require('@supabase/supabase-js');
       const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+      const tickers = [...new Set(facts.map(f => f.ticker))];
+      const nameByTicker = {};
+      const cikByTicker = {};
+      if (tickers.length > 0) {
+        const { data: companies } = await supa
+          .from('companies')
+          .select('ticker, company_name, cik')
+          .in('ticker', tickers);
+        (companies || []).forEach(c => {
+          nameByTicker[c.ticker] = c.company_name;
+          cikByTicker[c.ticker] = c.cik;
+        });
+      }
+
+      // Attach company_name to every fact. buildNumericAnswer reads this.
+      facts = facts.map(f => ({
+        ...f,
+        company_name: nameByTicker[f.ticker] || f.ticker,
+      }));
+
+      // ── 2. Build source chips (uses the same nameByTicker + filings).
       const filingIds = [...new Set(facts.map(f => f.filing_id).filter(Boolean))];
       const filingById = {};
       if (filingIds.length > 0) {
@@ -895,29 +915,16 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
         (filings || []).forEach(r => { filingById[r.id] = r; });
       }
 
-      // Enrich with company names.
-      const tickers = [...new Set(facts.map(f => f.ticker))];
-      const nameByTicker = {};
-      if (tickers.length > 0) {
-        const { data: companies } = await supa
-          .from('companies')
-          .select('ticker, company_name, cik')
-          .in('ticker', tickers);
-        (companies || []).forEach(c => {
-          nameByTicker[c.ticker] = { name: c.company_name, cik: c.cik };
-        });
-      }
-
       sources = facts.map((f, idx) => {
         const filing = f.filing_id ? filingById[f.filing_id] : null;
-        const meta = nameByTicker[f.ticker] || {};
-        const url = filing?.source_url || (meta.cik
-          ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${meta.cik}&type=10-K&dateb=&owner=include&count=10`
+        const cik = cikByTicker[f.ticker];
+        const url = filing?.source_url || (cik
+          ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=10-K&dateb=&owner=include&count=10`
           : null);
         return {
           index: idx + 1,
           type: 'sec',
-          title: `${meta.name || f.ticker} (${f.ticker})`,
+          title: `${nameByTicker[f.ticker] || f.ticker} (${f.ticker})`,
           url,
           ticker: f.ticker,
           fiscal_year: f.fiscal_year,
@@ -925,18 +932,20 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
         };
       });
 
-      // Dedupe by ticker + fiscal_year so a company with multiple years of
-      // facts doesn't produce 5 identical chips for the same filing.
       const seen = new Set();
       sources = sources.filter(s => {
-        const key = `${s.ticker}:${s.fiscal_year}`;
+        const key = `${s.ticker}:${s.fiscal_year}:${s.item_code}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
     } catch (err) {
-      console.log(`[generateAnswer:numeric] source build failed: ${err.message}`);
+      console.log(`[generateAnswer:numeric] enrich/source build failed: ${err.message}`);
     }
+
+    // ── 3. Format the answer. NOW facts carry company_name, so headers
+    //       render as "Apple Inc (AAPL)".
+    const text = buildNumericAnswer(facts);
 
     return {
       report: {
