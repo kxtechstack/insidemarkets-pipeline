@@ -180,7 +180,7 @@ async function handleDecision(question, clientId, industry) {
   const [customSourceResults] = await Promise.all([
     retrieveCustomSourceData(question, clientId),
   ]);
-  const { chunks, facts } = secRetrieval;
+  const { chunks, facts, sources: secFactSources = [] } = secRetrieval;
 
   console.log(`[handleDecision] client=${clientId} | secChunks=${chunks.length} | facts=${facts.length} | customSource=${customSourceResults.length}`);
 
@@ -234,7 +234,18 @@ async function handleDecision(question, clientId, industry) {
     return { type: 'decision', report: null, sources: [], chart: null, chartMeta: null, _empty: true };
   }
 
-  return { type: 'decision', report, sources, chart, chartMeta };
+  // Merge SEC-fact sources (per-company filing URLs) with whatever sources
+  // the LLM cited. Dedupe by ticker so we don't show the same company twice.
+  const mergedSources = [...(sources || [])];
+  const seenKeys = new Set(mergedSources.map((s) => `${s.type || ''}:${s.ticker || s.article_id || s.url || s.index}`));
+  for (const s of secFactSources) {
+    const key = `${s.type}:${s.ticker}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    mergedSources.push(s);
+  }
+
+  return { type: 'decision', report, sources: mergedSources, chart, chartMeta };
 }
 
 /**
@@ -246,7 +257,8 @@ async function resolveCompanySetFacts(filter) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-  let companyQuery = supabase.from('companies').select('ticker, company_name');
+  // Step 1: candidate companies (ticker + name + cik, no join).
+  let companyQuery = supabase.from('companies').select('ticker, company_name, cik');
   if (filter.sector) {
     companyQuery = companyQuery.eq('sector', filter.sector);
   }
@@ -255,13 +267,19 @@ async function resolveCompanySetFacts(filter) {
   const { data: candidates, error: candErr } = await companyQuery;
   if (candErr || !candidates || candidates.length === 0) {
     console.log(`[resolveCompanySetFacts] no candidates: ${candErr?.message || 'empty'}`);
-    return { chunks: [], facts: [] };
+    return { chunks: [], facts: [], sources: [] };
   }
+
   const tickers = candidates.map((c) => c.ticker);
   const nameByTicker = {};
-  candidates.forEach((c) => { nameByTicker[c.ticker] = c.company_name; });
+  const cikByTicker = {};
+  candidates.forEach((c) => {
+    nameByTicker[c.ticker] = c.company_name;
+    cikByTicker[c.ticker] = c.cik;
+  });
   console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
 
+  // Step 2: financial facts for those tickers (no embedded join).
   const { data: allFacts, error: factsErr } = await supabase
     .from('financial_facts')
     .select('*')
@@ -270,9 +288,10 @@ async function resolveCompanySetFacts(filter) {
 
   if (factsErr || !allFacts || allFacts.length === 0) {
     console.log(`[resolveCompanySetFacts] no facts: ${factsErr?.message || 'empty'}`);
-    return { chunks: [], facts: [] };
+    return { chunks: [], facts: [], sources: [] };
   }
 
+  // Step 3: latest fiscal year per ticker.
   const latestByTicker = {};
   for (const f of allFacts) {
     const existing = latestByTicker[f.ticker];
@@ -281,20 +300,64 @@ async function resolveCompanySetFacts(filter) {
     }
   }
 
-  const sorted = Object.values(latestByTicker)
+  // Step 4: sort + top N.
+  const top = Object.values(latestByTicker)
     .filter((f) => f.metric_value !== null && f.metric_value !== undefined)
     .sort((a, b) => {
       const av = Number(a.metric_value);
       const bv = Number(b.metric_value);
       return filter.orderBy === 'asc' ? av - bv : bv - av;
     })
-    .slice(0, filter.limit)
-    .map((f) => ({
-      ...f,
-      company_name: nameByTicker[f.ticker] || f.ticker,
-    }));
+    .slice(0, filter.limit);
 
-  return { chunks: [], facts: sorted };
+  // Step 5: batch-fetch the filings for those top facts.
+  const filingIds = [...new Set(top.map((f) => f.filing_id).filter(Boolean))];
+  const filingById = {};
+  if (filingIds.length > 0) {
+    // Wildcard select so this works regardless of the exact column set.
+    const { data: filings, error: filingsErr } = await supabase
+      .from('filings')
+      .select('*')
+      .in('id', filingIds);
+    if (filingsErr) {
+      console.log(`[resolveCompanySetFacts] filings lookup failed: ${filingsErr.message}`);
+    } else {
+      (filings || []).forEach((row) => { filingById[row.id] = row; });
+    }
+  }
+
+  // Step 6: attach company_name + build a source per fact.
+  const facts = top.map((f) => ({
+    ...f,
+    company_name: nameByTicker[f.ticker] || f.ticker,
+  }));
+
+  const sources = top.map((f, idx) => {
+    const filing = f.filing_id ? filingById[f.filing_id] : null;
+    const cik = cikByTicker[f.ticker];
+    // Try common URL field names on the filing row.
+    const directUrl =
+      filing?.source_url ||
+      filing?.url ||
+      filing?.filing_url ||
+      filing?.sec_url ||
+      null;
+    const fallbackUrl = cik
+      ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=10-K&dateb=&owner=include&count=10`
+      : null;
+
+    return {
+      index: idx + 1,
+      type: 'sec',
+      title: `${nameByTicker[f.ticker] || f.ticker} (${f.ticker}) — FY${f.fiscal_year} ${filter.metric}`,
+      url: directUrl || fallbackUrl,
+      ticker: f.ticker,
+      fiscal_year: f.fiscal_year,
+      item_code: filter.metric,
+    };
+  });
+
+  return { chunks: [], facts, sources };
 }
 
 
