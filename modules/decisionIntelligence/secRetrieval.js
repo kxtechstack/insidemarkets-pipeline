@@ -337,10 +337,19 @@ async function extractIntent(question, getAllCompaniesFn) {
   const COMPOSITION_KEYWORDS = ['share', 'breakdown', 'composition', 'percentage',
     'proportion', 'split of', 'distribution', 'makeup', 'mix of'];
   const isCompositionQuestion = COMPOSITION_KEYWORDS.some(k => qLower.includes(k));
+    // Force qualitative for questions about business model / categorization /
+  // segment structure -- these are narrative, not numeric.
+  const isDescriptiveQuestion = ['categoriz', 'categoris', 'product segment',
+    'business segment', 'revenue breakdown', 'business model', 'business line',
+    'how does', 'what are the main', 'what are the core', 'core business',
+    'main products', 'product lines'].some(k => qLower.includes(k));
 
-  const qualitativeSections = new Set(['Item 1A', 'Item 3', 'Item 1']);
-  const dataType = (isFrameworkQuestion || (qualitativeSections.has(itemCode) && !isNumericQuestion))
-    ? 'qualitative' : 'quantitative';
+    const qualitativeSections = new Set(['Item 1A', 'Item 3', 'Item 1']);
+  const dataType = (
+    isFrameworkQuestion ||
+    isDescriptiveQuestion ||
+    (qualitativeSections.has(itemCode) && !isNumericQuestion)
+  ) ? 'qualitative' : 'quantitative';
 
   if (dataType === 'qualitative' && allYears.length === 0) {
     allYears = [LATEST_FISCAL_YEAR];

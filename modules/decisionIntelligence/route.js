@@ -521,6 +521,11 @@ function registerDecisionIntelligenceRoute(app) {
         /no insights? (are|is) available/i,
         /cannot (identify|determine|find|locate) (any )?(drivers|signals|information|developments?)/i,
         /no relevant information/i,
+        /not provided in the (given|provided|available) context/i,
+        /does not contain information about/i,
+        /no information (is )?(available|provided|present) (in|about)/i,
+        /not provided in the given context/i,
+        /information is not (available|provided|present)/i,
       ];
       const textSaysNoData = (text) =>
         typeof text === 'string' && NO_DATA_PATTERNS.some((p) => p.test(text));

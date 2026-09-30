@@ -853,6 +853,9 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
     console.log(`[generateAnswer] Auto-chart from table failed: ${err.message}`);
   }
 
+  // Guard: strip sentences that contain ungrounded numeric claims.
+  report = guardQualitativeNumbers(report, facts, context);
+
   return {
     report: stripCitationsDeep(report),
     sources: dedupeCustomSourceCitations(sources),
@@ -993,6 +996,107 @@ function dedupeCustomSourceCitations(sources) {
     out.push(s);
   }
   return out;
+}
+
+/**
+ * Hallucination guard for qualitative reports.
+ *
+ * Scans every string in the report for numeric claims (percentages,
+ * dollar amounts, large figures with units). Any sentence containing a
+ * specific-looking number that ISN'T in the retrieved financial_facts
+ * or the retrieved context text gets dropped.
+ *
+ * This is what prevents "Compare Apple and Microsoft financials" from
+ * returning fabricated revenue / margin / cash figures.
+ */
+function guardQualitativeNumbers(report, facts, contextText) {
+  if (!report) return report;
+
+  // Build the set of "known" numeric strings, sourced from:
+  //   (a) financial_facts values (formatted multiple ways)
+  //   (b) any number literally appearing in the retrieved context text
+  const knownNumbers = new Set();
+
+  for (const f of facts || []) {
+    if (f.metric_value === null || f.metric_value === undefined) continue;
+    const v = Number(f.metric_value);
+    if (isNaN(v)) continue;
+    knownNumbers.add(String(v));
+    knownNumbers.add(v.toLocaleString('en-US'));
+    if (Math.abs(v) >= 1e9) knownNumbers.add((v / 1e9).toFixed(2));
+    if (Math.abs(v) >= 1e6) knownNumbers.add((v / 1e6).toFixed(2));
+    if (Math.abs(v) >= 1e3) knownNumbers.add((v / 1e3).toFixed(2));
+  }
+
+  const ctx = String(contextText || '');
+  const ctxNums = ctx.match(/[\d][\d,.]*/g) || [];
+  for (const n of ctxNums) {
+    knownNumbers.add(n);
+    knownNumbers.add(n.replace(/,/g, ''));
+  }
+
+  const findNumbers = (text) => {
+    const out = [];
+    const re = /(\$)?\s*([\d,]+(?:\.\d+)?)\s*(%|percent|billion|million|trillion|bn|mn|[bmk])?/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const raw = m[2].replace(/,/g, '');
+      const v = parseFloat(raw);
+      if (isNaN(v)) continue;
+      if (v >= 2000 && v <= 2099 && Number.isInteger(v) && !m[1] && !m[3]) continue;
+      out.push({ raw, value: v, unit: (m[3] || '').toLowerCase(), hasDollar: !!m[1] });
+    }
+    return out;
+  };
+
+  const numberIsKnown = ({ raw, value }) => {
+    if (knownNumbers.has(raw)) return true;
+    if (knownNumbers.has(String(value))) return true;
+    if (knownNumbers.has(value.toLocaleString('en-US'))) return true;
+    if (Math.abs(value) >= 1e9 && knownNumbers.has((value / 1e9).toFixed(2))) return true;
+    if (Math.abs(value) >= 1e6 && knownNumbers.has((value / 1e6).toFixed(2))) return true;
+    if (Math.abs(value) >= 1e3 && knownNumbers.has((value / 1e3).toFixed(2))) return true;
+    return false;
+  };
+
+  const cleanText = (text) => {
+    if (typeof text !== 'string' || !text.trim()) return text;
+    const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+    const kept = sentences.filter((sentence) => {
+      const nums = findNumbers(sentence);
+      const hasSuspicious = nums.some((n) => {
+        const isSpecific =
+          n.unit === '%' || n.unit === 'percent' ||
+          n.unit === 'billion' || n.unit === 'million' || n.unit === 'trillion' ||
+          n.unit === 'b' || n.unit === 'm' || n.unit === 'bn' || n.unit === 'mn' ||
+          n.hasDollar;
+        return isSpecific && !numberIsKnown(n);
+      });
+      return !hasSuspicious;
+    });
+    return kept.join(' ').trim();
+  };
+
+  const cleanValue = (v) => {
+    if (typeof v === 'string') return cleanText(v);
+    if (Array.isArray(v)) {
+      return v.map(cleanValue).filter((x) => (typeof x === 'string' ? x.trim().length > 0 : x));
+    }
+    if (v && typeof v === 'object') {
+      const out = {};
+      for (const k of Object.keys(v)) out[k] = cleanValue(v[k]);
+      return out;
+    }
+    return v;
+  };
+
+  const originalSize = JSON.stringify(report).length;
+  const cleaned = cleanValue(report);
+  const cleanedSize = JSON.stringify(cleaned).length;
+  if (originalSize !== cleanedSize) {
+    console.log(`[guardQualitativeNumbers] Stripped ${originalSize - cleanedSize} chars of ungrounded numbers`);
+  }
+  return cleaned;
 }
 
 module.exports = { generateAnswer, stripCitationsDeep, stripCitationMarkers };
