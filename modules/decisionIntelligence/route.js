@@ -6,6 +6,7 @@ const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
+const { detectTargetCategories, applyCategoryFilter } = require('./categoryFilter');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -38,6 +39,7 @@ async function handleList(question, clientId, industry, forceList = false) {
 
   const modules = detectTargetModules(question);
   const hasTimeWindow = Boolean(detectTimeWindow(question));
+  const targetCategories = await detectTargetCategories(question, clientId);
   const LIST_FLOOR = Number(process.env.LIST_SCORE_FLOOR) || 0.35;
 
   const [searchResults, customSourceResults] = await Promise.all([
@@ -54,6 +56,7 @@ async function handleList(question, clientId, industry, forceList = false) {
       clientItems = [];
     }
   }
+  clientItems = applyCategoryFilter(clientItems, targetCategories);
 
   let widenedLabel = null;
   if (hasTimeWindow && clientItems.length === 0) {
@@ -67,13 +70,16 @@ async function handleList(question, clientId, industry, forceList = false) {
         question, clientId, industry, 10, modules, LIST_FLOOR, true, step.days
       );
       if (widenedResults.length > 0) {
+        let widenedItems = [];
         try {
-          clientItems = await buildListAnswer(widenedResults);
+          widenedItems = await buildListAnswer(widenedResults);
         } catch (err) {
           console.log(`[handleList] buildListAnswer failed on widen: ${err.message}`);
-          clientItems = [];
+          widenedItems = [];
         }
-        if (clientItems.length > 0) {
+        widenedItems = applyCategoryFilter(widenedItems, targetCategories);
+        if (widenedItems.length > 0) {
+          clientItems = widenedItems;
           widenedLabel = step.label;
           break;
         }
@@ -83,10 +89,10 @@ async function handleList(question, clientId, industry, forceList = false) {
 
   const MIN_RICH_LIST_SIZE = 3;
   const useCustomSources =
-    !hasTimeWindow && clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
+    !hasTimeWindow && targetCategories.length === 0 && clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
 
   console.log(
-    `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | widened=${widenedLabel || 'no'} | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
+    `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | categories=${targetCategories.join(',') || 'none'} | widened=${widenedLabel || 'no'} | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
   );
 
   const widenMessage = widenedLabel
