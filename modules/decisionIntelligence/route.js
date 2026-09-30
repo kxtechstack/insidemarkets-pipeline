@@ -24,7 +24,6 @@ const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
-const { getVerifiedSuggestions } = require('./suggestionEngine');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -39,16 +38,20 @@ const {
 /**
  * Handles a 'list' question: client data only, no LLM.
  *
- * FALLBACK: always fetch custom sources in parallel. If the client-signal
- * list comes back thin (fewer than 3 items) BUT custom sources have hits,
- * route to the Inference answer generator instead of returning a sparse
- * or unhelpful list.
+ * For time-scoped questions ("last week", "this quarter"), progressively
+ * widens the window (30d -> 90d -> all-time) ONLY when the exact window
+ * comes back empty, and tells the user honestly that it widened -- never
+ * silently substitutes older articles as if they matched the original
+ * window, and never falls back to unrelated custom-source content for a
+ * time-scoped question.
  */
 async function handleList(question, clientId, industry, forceList = false) {
   const modules = detectTargetModules(question);
+  const hasTimeWindow = Boolean(detectTimeWindow(question));
+  const LIST_FLOOR = Number(process.env.LIST_SCORE_FLOOR) || 0.35;
 
   const [searchResults, customSourceResults] = await Promise.all([
-    retrieveClientData(question, clientId, industry, 10, modules, Number(process.env.LIST_SCORE_FLOOR) || 0.35, true),
+    retrieveClientData(question, clientId, industry, 10, modules, LIST_FLOOR, true),
     retrieveCustomSourceData(question, clientId),
   ]);
 
@@ -62,35 +65,50 @@ async function handleList(question, clientId, industry, forceList = false) {
     }
   }
 
+  let widenedLabel = null;
+  if (hasTimeWindow && clientItems.length === 0) {
+    const widenSteps = [
+      { days: 30, label: 'the last 30 days' },
+      { days: 90, label: 'the last 90 days' },
+      { days: null, label: 'all available data' },
+    ];
+    for (const step of widenSteps) {
+      const widenedResults = await retrieveClientData(
+        question, clientId, industry, 10, modules, LIST_FLOOR, true, step.days
+      );
+      if (widenedResults.length > 0) {
+        try {
+          clientItems = await buildListAnswer(widenedResults);
+        } catch (err) {
+          console.log(`[handleList] buildListAnswer failed on widen: ${err.message}`);
+          clientItems = [];
+        }
+        if (clientItems.length > 0) {
+          widenedLabel = step.label;
+          break;
+        }
+      }
+    }
+  }
+
   const MIN_RICH_LIST_SIZE = 3;
-  const hasTimeWindow = Boolean(detectTimeWindow(question));
   const useCustomSources =
     !hasTimeWindow && clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
 
   console.log(
-    `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
+    `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | widened=${widenedLabel || 'no'} | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
   );
 
-  // If the user explicitly asked for a list (e.g. clicked a List card
-  // in the Question Library, or set type='list' in the request), we
-  // MUST return a list. Do NOT fall back to inference — that would
-  // change the response shape and surprise the frontend.
-  if (forceList) {
-    console.log(`[handleList] forceList=true — returning list even if empty`);
-    return { type: 'list', items: clientItems };
-  }
+  const widenMessage = widenedLabel
+    ? `No results in the requested time frame — showing matches from ${widenedLabel} instead.`
+    : null;
 
-  // If the user explicitly asked for a list (e.g. clicked a List card
-  // in the Question Library, or set type='list' in the request), we
-  // MUST return a list. Do NOT fall back to inference — that would
-  // change the response shape and surprise the frontend.
   if (forceList) {
-    console.log(`[handleList] forceList=true — returning list even if empty`);
-    return { type: 'list', items: clientItems };
+    return { type: 'list', items: clientItems, ...(widenMessage ? { message: widenMessage } : {}) };
   }
 
   if (!useCustomSources) {
-    return { type: 'list', items: clientItems };
+    return { type: 'list', items: clientItems, ...(widenMessage ? { message: widenMessage } : {}) };
   }
 
   const { report, sources, _empty, _reason } = await generateInferenceAnswer(
@@ -158,8 +176,6 @@ async function handleDecision(question, clientId, industry) {
     question, intent, chunks, facts, clientId, industry, customSourceResults
   );
 
-  // If generateAnswer flagged the answer as empty (e.g. LLM said no_data),
-  // short-circuit and let the caller show the "no data" redirect.
   if (_empty) {
     return {
       type: 'decision',
@@ -172,10 +188,6 @@ async function handleDecision(question, clientId, industry) {
     };
   }
 
-  // Chart priority:
-  //   1. Numeric path: chart from verified facts (highest priority)
-  //   2. Qualitative path: chart auto-derived from the report's table (if any)
-  //   3. No chart: just text
   let chart = autoChart || null;
   let chartMeta = autoChartMeta || null;
 
@@ -191,11 +203,7 @@ async function handleDecision(question, clientId, industry) {
       console.log(`[handleDecision] Chart rendering unavailable: ${err.message}`);
     }
   }
-  // HALLUCINATION GUARD: if we retrieved zero context (no chunks, no
-  // facts, no resolved sources), then anything the LLM produced is
-  // fabricated -- the report may look full and plausible, but none of
-  // it is grounded. Mark as empty so the handler responds with the
-  // "no data" message instead of showing invented content.
+
   const hadNoContext =
     (!chunks || chunks.length === 0) &&
     (!facts || facts.length === 0) &&
@@ -215,11 +223,6 @@ async function handleDecision(question, clientId, industry) {
 
 function registerDecisionIntelligenceRoute(app) {
 
-  // ------------------------------------------------------------------
-  // POST /decision-intelligence/chat
-  // Saves the user question AND the assistant answer to Supabase,
-  // returns the answer plus the conversationId.
-  // ------------------------------------------------------------------
   app.post('/decision-intelligence/chat', async (req, res) => {
     try {
       const {
@@ -235,7 +238,6 @@ function registerDecisionIntelligenceRoute(app) {
         });
       }
 
-      // 1. Resolve or create the conversation
       let conversationId = incomingConversationId;
       if (!conversationId) {
         conversationId = await createConversation({
@@ -243,23 +245,16 @@ function registerDecisionIntelligenceRoute(app) {
         });
       }
 
-      // 2. Save the user's question
       await appendMessage({
         conversationId,
         role: 'user',
         content: question,
       });
 
-                  // 2b. LLM-driven intent classification: greeting / off_topic /
-      // clarification / market_intelligence. Replaces the hardcoded
-      // greeting regex. If not market_intelligence, respond with the
-      // LLM-generated message plus optional suggestions and skip the
-      // full pipeline.
       const { classifyIntent } = require('./classifyIntent');
       const intentResult = await classifyIntent(question);
 
       if (intentResult.intent !== 'market_intelligence') {
-        // Fetch client's suggested questions to offer as next steps
         let suggestions = [];
         try {
           const homeQs = await getSuggestedQuestions({
@@ -296,10 +291,9 @@ function registerDecisionIntelligenceRoute(app) {
         return res.json({ ...payload, conversationId });
       }
 
-      // 3. Classify (same as before)
       let type = providedType;
       let classifierReasoning = null;
-      const typeWasExplicit = Boolean(providedType); // frontend told us the type
+      const typeWasExplicit = Boolean(providedType);
       if (!type) {
         const classification = await classifyQuestion(question);
         type = classification.type;
@@ -310,7 +304,6 @@ function registerDecisionIntelligenceRoute(app) {
         });
       }
 
-      // 4. Dispatch
       let result;
       if (type === 'list') {
         result = await handleList(question, clientId, industry, typeWasExplicit);
@@ -321,7 +314,7 @@ function registerDecisionIntelligenceRoute(app) {
       }
 
       if (classifierReasoning) result.classifierReasoning = classifierReasoning;
-            if (result.sources && result.sources.length) {
+      if (result.sources && result.sources.length) {
         try {
           result.sources = await enrichSourcesWithSignalIds(result.sources, clientId);
         } catch (err) {
@@ -329,10 +322,6 @@ function registerDecisionIntelligenceRoute(app) {
         }
       }
 
-      // 4b. Detect "no relevant data" outcomes and steer the user toward
-      // working questions. Only fires when the result is *truly* empty --
-      // if the LLM produced any content (even a "no data" narrative),
-      // we keep that instead of overriding it.
       const NO_DATA_PATTERNS = [
         /no (specific|relevant|publicly[\s-]?available|reported) (developments?|information|data|coverage|insights?)/i,
         /context (lacks|does not contain|does not provide|provides no)/i,
@@ -355,7 +344,6 @@ function registerDecisionIntelligenceRoute(app) {
         if (result.type === 'inference' || result.type === 'decision') {
           const r = result.report || {};
 
-          // If the LLM wrote a "no data" narrative, treat as empty.
           const outlookText = Array.isArray(r.outlook) ? r.outlook.join(' ') : (r.outlook || '');
           if (textSaysNoData(outlookText) || textSaysNoData(r.bodyText) || textSaysNoData(r.bottom_line)) {
             return true;
@@ -382,23 +370,15 @@ function registerDecisionIntelligenceRoute(app) {
       if (isEmptyResult) {
         let suggestions = [];
         try {
-          suggestions = await getVerifiedSuggestions(clientId, industry, 4);
+          const homeQs = await getSuggestedQuestions({
+            clientId,
+            surface: 'home',
+            industry,
+            companyName: null,
+          });
+          suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
         } catch (err) {
-          console.log(`[DI] getVerifiedSuggestions failed: ${err.message}`);
-        }
-
-        if (suggestions.length === 0) {
-          try {
-            const homeQs = await getSuggestedQuestions({
-              clientId,
-              surface: 'home',
-              industry,
-              companyName: null,
-            });
-            suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
-          } catch (err) {
-            console.log(`[DI] Failed to load suggestions for empty result: ${err.message}`);
-          }
+          console.log(`[DI] Failed to load suggestions for empty result: ${err.message}`);
         }
 
         if (suggestions.length === 0) {
@@ -432,7 +412,6 @@ function registerDecisionIntelligenceRoute(app) {
         return res.json({ ...enriched, conversationId });
       }
 
-      // 5. Save the assistant's answer
       const contentForSearch =
         result.type === 'list'
           ? `List: ${result.items?.length ?? 0} items`
@@ -446,7 +425,6 @@ function registerDecisionIntelligenceRoute(app) {
         payload: result,
       });
 
-      // 6. Return answer + conversationId
       return res.json({ ...result, conversationId });
 
     } catch (err) {
@@ -455,10 +433,6 @@ function registerDecisionIntelligenceRoute(app) {
     }
   });
 
-  // ------------------------------------------------------------------
-  // GET /decision-intelligence/conversations?userId=...
-  // List this user's chats (for the Previous Chats modal).
-  // ------------------------------------------------------------------
   app.get('/decision-intelligence/conversations', async (req, res) => {
     try {
       const { userId } = req.query;
@@ -471,10 +445,6 @@ function registerDecisionIntelligenceRoute(app) {
     }
   });
 
-  // ------------------------------------------------------------------
-  // GET /decision-intelligence/conversations/:id?userId=...
-  // Load one conversation + its messages.
-  // ------------------------------------------------------------------
   app.get('/decision-intelligence/conversations/:id', async (req, res) => {
     try {
       const { userId } = req.query;
@@ -490,9 +460,6 @@ function registerDecisionIntelligenceRoute(app) {
     }
   });
 
-  // ------------------------------------------------------------------
-  // GET /decision-intelligence/suggested-questions
-  // ------------------------------------------------------------------
   app.get('/decision-intelligence/suggested-questions', async (req, res) => {
     try {
       const { clientId, surface, category, industry, companyName } = req.query;
@@ -509,9 +476,6 @@ function registerDecisionIntelligenceRoute(app) {
     }
   });
 
-  // ------------------------------------------------------------------
-  // DELETE /decision-intelligence/conversations/:id?userId=...
-  // ------------------------------------------------------------------
   app.delete('/decision-intelligence/conversations/:id', async (req, res) => {
     try {
       const { userId } = req.query;
