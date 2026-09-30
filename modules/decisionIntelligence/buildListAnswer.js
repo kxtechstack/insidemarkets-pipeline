@@ -59,7 +59,7 @@ async function buildListAnswer(searchResults) {
     const ids = byModule[POLICY_MODULE_ID].map(x => x.articleId);
     const { data, error } = await supabase
       .from('policy_signals')
-      .select('id, article_id, signal_title, category, impact_level, country, summary, source_article_url')
+      .select('id, article_id, signal_title, category, impact_level, country, summary, source_article_url, source_published_date')
       .in('article_id', ids);
     if (error) throw error;
 
@@ -75,6 +75,7 @@ async function buildListAnswer(searchResults) {
           country: row.country,
           summary: row.summary,
           url: row.source_article_url,
+          publishedDate: row.source_published_date,
           module: 'Policy & Risk',
         });
       }
@@ -210,6 +211,12 @@ async function buildListAnswer(searchResults) {
       module: 'Unknown',
     });
   }
+
+  items.sort((a, b) => {
+    const da = a.publishedDate ? new Date(a.publishedDate).getTime() : 0;
+    const db = b.publishedDate ? new Date(b.publishedDate).getTime() : 0;
+    return db - da;
+  });
 
   return items;
 }

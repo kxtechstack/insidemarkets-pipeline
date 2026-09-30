@@ -156,7 +156,7 @@ function detectTargetModules(question) {
  * Searches the client's own data across existing modules, with optional
  * time-window filtering and module scoping.
  */
-async function retrieveClientData(question, clientId, industry, limitPerModule = 10, modules = null, scoreFloorOverride = null) {
+async function retrieveClientData(question, clientId, industry, limitPerModule = 10, modules = null, scoreFloorOverride = null, disableWidening = false) {
   const timeWindow = detectTimeWindow(question);
   const topicQuery = stripTimeTokens(question);
   const questionVector = await embedText(topicQuery);
@@ -167,7 +167,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   // 365d, then no filter. The first window that returns any hits above
   // the score floor wins.
   const windowsToTry = timeWindow
-    ? [timeWindow.days, 30, 90, 365, null]
+    ? (disableWidening ? [timeWindow.days] : [timeWindow.days, 30, 90, 365, null])
     : [null];
 
   // Keep widening until we have at least this many results, OR we've

@@ -47,7 +47,7 @@ async function handleList(question, clientId, industry, forceList = false) {
   const modules = detectTargetModules(question);
 
   const [searchResults, customSourceResults] = await Promise.all([
-    retrieveClientData(question, clientId, industry, 10, modules, Number(process.env.LIST_SCORE_FLOOR) || 0.35),
+    retrieveClientData(question, clientId, industry, 10, modules, Number(process.env.LIST_SCORE_FLOOR) || 0.35, true),
     retrieveCustomSourceData(question, clientId),
   ]);
 
