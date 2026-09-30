@@ -23,7 +23,7 @@
 const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
-const { retrieveClientData, detectTargetModules } = require('./retrieveClientData');
+const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -62,8 +62,9 @@ async function handleList(question, clientId, industry, forceList = false) {
   }
 
   const MIN_RICH_LIST_SIZE = 3;
+  const hasTimeWindow = Boolean(detectTimeWindow(question));
   const useCustomSources =
-    clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
+    !hasTimeWindow && clientItems.length < MIN_RICH_LIST_SIZE && customSourceResults.length > 0;
 
   console.log(
     `[handleList] client=${clientId} | signals=${searchResults.length} (${clientItems.length} items) | customSource=${customSourceResults.length} | route=${useCustomSources ? 'custom->inference' : 'list'}`
