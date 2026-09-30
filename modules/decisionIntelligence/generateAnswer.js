@@ -877,12 +877,73 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
     Array.isArray(intent.tickers) && intent.tickers.length > 0
   ) {
     const text = buildNumericAnswer(facts);
+
+    // Build one SEC source chip per fact. Reads filings by filing_id so
+    // the URL points at the actual 10-K the number came from.
+    let sources = [];
+    try {
+      const { createClient } = require('@supabase/supabase-js');
+      const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+      const filingIds = [...new Set(facts.map(f => f.filing_id).filter(Boolean))];
+      const filingById = {};
+      if (filingIds.length > 0) {
+        const { data: filings } = await supa
+          .from('filings')
+          .select('*')
+          .in('id', filingIds);
+        (filings || []).forEach(r => { filingById[r.id] = r; });
+      }
+
+      // Enrich with company names.
+      const tickers = [...new Set(facts.map(f => f.ticker))];
+      const nameByTicker = {};
+      if (tickers.length > 0) {
+        const { data: companies } = await supa
+          .from('companies')
+          .select('ticker, company_name, cik')
+          .in('ticker', tickers);
+        (companies || []).forEach(c => {
+          nameByTicker[c.ticker] = { name: c.company_name, cik: c.cik };
+        });
+      }
+
+      sources = facts.map((f, idx) => {
+        const filing = f.filing_id ? filingById[f.filing_id] : null;
+        const meta = nameByTicker[f.ticker] || {};
+        const url = filing?.source_url || (meta.cik
+          ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${meta.cik}&type=10-K&dateb=&owner=include&count=10`
+          : null);
+        return {
+          index: idx + 1,
+          type: 'sec',
+          title: `${meta.name || f.ticker} (${f.ticker})`,
+          url,
+          ticker: f.ticker,
+          fiscal_year: f.fiscal_year,
+          item_code: f.metric_name,
+        };
+      });
+
+      // Dedupe by ticker + fiscal_year so a company with multiple years of
+      // facts doesn't produce 5 identical chips for the same filing.
+      const seen = new Set();
+      sources = sources.filter(s => {
+        const key = `${s.ticker}:${s.fiscal_year}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    } catch (err) {
+      console.log(`[generateAnswer:numeric] source build failed: ${err.message}`);
+    }
+
     return {
       report: {
         title: question,
         bodyText: text,
       },
-      sources: [],
+      sources,
       clientContextCount: 0,
     };
   }
