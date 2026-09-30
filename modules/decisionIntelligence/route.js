@@ -207,13 +207,72 @@ async function handleDecision(question, clientId, industry) {
   let chart = autoChart || null;
   let chartMeta = autoChartMeta || null;
 
-  if (!chart && intent.dataType === 'quantitative' && facts.length && intent.isChartable) {
+  // Generate a chart whenever the numeric answer has more than one value --
+  // whether that's multiple companies (comparison) or multiple years for
+  // one company (trend). We keep the intent-based `decideChartFormat`
+  // logic for choosing chart type, but we no longer gate on
+  // `intent.isChartable` alone, because the classifier sometimes misses
+  // the trend shape for short questions like "Apple revenue".
+  const shouldChart =
+    !chart &&
+    intent.dataType === 'quantitative' &&
+    Array.isArray(facts) &&
+    facts.length > 1;
+
+  if (shouldChart) {
     try {
       const { decideChartFormat, renderChart } = require('./chartPipeline');
       const display = decideChartFormat(intent, facts);
+
       if (display.format === 'chart') {
         chart = await renderChart(display.chartData);
         chartMeta = { chartType: display.chartType };
+      } else {
+        // decideChartFormat returned 'text' but we have multiple values.
+        // Force-generate the chart with a sensible default so the user
+        // always gets a visual when there's more than one number.
+        // Sort facts by ticker+year so the chart has a stable shape.
+        const tickers = [...new Set(facts.map(f => f.ticker))];
+        const years = [...new Set(facts.map(f => f.fiscal_year))].sort();
+
+        // If one ticker, chart over years. If multiple tickers with one
+        // year each, chart over companies.
+        let chartData;
+        if (tickers.length === 1 && years.length > 1) {
+          const t = tickers[0];
+          chartData = {
+            type: 'line',
+            xAxis: 'year',
+            metricLabel: facts[0]?.metric_name || 'Value',
+            series: [{
+              name: t,
+              labels: years,
+              data: years.map(y => {
+                const f = facts.find(x => x.ticker === t && x.fiscal_year === y);
+                return f && f.metric_value !== null ? Number(f.metric_value) : null;
+              }),
+            }],
+          };
+        } else if (tickers.length > 1) {
+          chartData = {
+            type: 'bar',
+            xAxis: 'company',
+            metricLabel: facts[0]?.metric_name || 'Value',
+            series: tickers.map(t => {
+              const f = facts.find(x => x.ticker === t);
+              return {
+                name: t,
+                labels: [t],
+                data: [f && f.metric_value !== null ? Number(f.metric_value) : null],
+              };
+            }),
+          };
+        }
+
+        if (chartData) {
+          chart = await renderChart(chartData);
+          chartMeta = { chartType: chartData.type };
+        }
       }
     } catch (err) {
       console.log(`[handleDecision] Chart rendering unavailable: ${err.message}`);
