@@ -7,6 +7,7 @@ const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetr
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
 const { detectTargetCategories, applyCategoryFilter } = require('./categoryFilter');
+const { getVerifiedSuggestions } = require('./suggestionEngine');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
@@ -572,12 +573,20 @@ function registerDecisionIntelligenceRoute(app) {
       if (isEmptyResult) {
         let suggestions = [];
         try {
-          const homeQs = await getSuggestedQuestions({
-            clientId, surface: 'home', industry, companyName: null,
-          });
-          suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
+          suggestions = await getVerifiedSuggestions(clientId, 4);
         } catch (err) {
-          console.log(`[DI] Failed to load suggestions for empty result: ${err.message}`);
+          console.log(`[DI] getVerifiedSuggestions failed: ${err.message}`);
+        }
+
+        if (suggestions.length === 0) {
+          try {
+            const homeQs = await getSuggestedQuestions({
+              clientId, surface: 'home', industry, companyName: null,
+            });
+            suggestions = (homeQs || []).slice(0, 4).map((q) => q.question).filter(Boolean);
+          } catch (err) {
+            console.log(`[DI] Failed to load suggestions for empty result: ${err.message}`);
+          }
         }
 
         if (suggestions.length === 0) {
