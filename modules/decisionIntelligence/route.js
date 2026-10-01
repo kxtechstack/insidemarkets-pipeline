@@ -344,24 +344,128 @@ async function handleDecision(question, clientId, industry) {
 }
 
 /**
+ * Given a subsector word (e.g. "cosmetic", "airline", "semiconductor"),
+ * asks the LLM to pick which of the available companies match it.
+ *
+ * Sends the LLM the FULL companies table as {ticker, company_name, sector}
+ * (compact -- ~30 KB for 500 rows), and gets back a JSON array of tickers.
+ *
+ * Returns { tickers: string[], reasoning: string } or null on failure.
+ */
+async function selectCompaniesForSubsector(subsectorTerm) {
+  const { callLLM } = require('../llmClient');
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  const { data: companies, error } = await supabase
+    .from('companies')
+    .select('ticker, company_name, sector')
+    .order('ticker');
+
+  if (error || !companies || companies.length === 0) {
+    console.log(`[selectCompaniesForSubsector] companies query failed: ${error?.message}`);
+    return null;
+  }
+
+  const companyList = companies
+    .map(c => `${c.ticker} | ${c.company_name} | ${c.sector}`)
+    .join('\n');
+
+  const prompt = `You are given a list of US-listed companies and a subsector term. Identify which companies in the list are PRIMARILY in that subsector.
+
+Subsector term: "${subsectorTerm}"
+
+Company list (format: TICKER | Name | Sector):
+${companyList}
+
+Instructions:
+- Return ONLY companies whose PRIMARY business is in the subsector term.
+- Do NOT include companies that merely sell or distribute products in that subsector among many other categories.
+- If the term is a product category (e.g. "cosmetic"), return companies that MAKE or are primarily KNOWN FOR that category.
+- If you are unsure about a company, exclude it.
+- Return AT MOST 20 tickers. Prefer the most relevant.
+
+Respond with ONLY this JSON, no other text:
+{
+  "tickers": ["TICKER1", "TICKER2", ...],
+  "reasoning": "one short sentence"
+}
+
+If no companies match, return: { "tickers": [], "reasoning": "no matches" }`;
+
+  try {
+    const raw = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0, max_tokens: 500, timeout: 45000 }
+    );
+
+    const cleaned = (raw || '').trim()
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/, '')
+      .replace(/```\s*$/, '')
+      .trim();
+
+    const parsed = JSON.parse(cleaned);
+    const tickers = Array.isArray(parsed.tickers)
+      ? parsed.tickers.map(t => String(t).toUpperCase().trim()).filter(Boolean).slice(0, 20)
+      : [];
+
+    console.log(
+      `[selectCompaniesForSubsector] "${subsectorTerm}" -> ${tickers.length} ticker(s) ` +
+      `[${tickers.join(', ')}] | ${parsed.reasoning || 'no reasoning'}`
+    );
+
+    return { tickers, reasoning: parsed.reasoning || '' };
+  } catch (err) {
+    console.log(`[selectCompaniesForSubsector] failed for "${subsectorTerm}": ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Given a parsed company-set filter, query companies + financial_facts
- * and return the top-N facts matching the filter. Reads from Postgres,
- * no LLM.
+ * and return the top-N facts matching the filter.
+ *
+ * If filter.subsectorTerm is set (e.g. "cosmetic"), the LLM picks which
+ * companies in our DB match the subsector FIRST, and the query is scoped
+ * to just those tickers.
  */
 async function resolveCompanySetFacts(filter) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-  // Guard: if the filter still has an unresolvedTerm at this point, the
-  // caller should have refused already -- but defend in depth.
+  // Guard: refuse when there was an unresolved term and no sector matched.
   if (filter.sector === null && filter.unresolvedTerm) {
     console.log(`[resolveCompanySetFacts] refusing unresolvedTerm="${filter.unresolvedTerm}" with sector=null`);
     return { chunks: [], facts: [], sources: [], _unresolved: filter.unresolvedTerm };
   }
 
-  // Step 1: candidate companies (ticker + name + cik, no join).
+  // ── Subsector path ────────────────────────────────────────────────────
+  let candidateTickers = null;
+
+  if (filter.subsectorTerm) {
+    const picked = await selectCompaniesForSubsector(filter.subsectorTerm);
+    if (!picked || picked.tickers.length === 0) {
+      console.log(
+        `[resolveCompanySetFacts] no companies matched subsector "${filter.subsectorTerm}" — returning empty`
+      );
+      return {
+        chunks: [], facts: [], sources: [],
+        _unresolved: filter.subsectorTerm,
+      };
+    }
+    candidateTickers = picked.tickers;
+    console.log(
+      `[resolveCompanySetFacts] subsector "${filter.subsectorTerm}" -> ${candidateTickers.length} ticker(s): ${candidateTickers.join(', ')}`
+    );
+  }
+
+  // ── Step 1: candidate companies ───────────────────────────────────────
   let companyQuery = supabase.from('companies').select('ticker, company_name, cik');
-  if (filter.sector) {
+
+  if (candidateTickers) {
+    companyQuery = companyQuery.in('ticker', candidateTickers);
+  } else if (filter.sector) {
     companyQuery = companyQuery.eq('sector', filter.sector);
   }
   companyQuery = companyQuery.limit(200);
@@ -372,16 +476,19 @@ async function resolveCompanySetFacts(filter) {
     return { chunks: [], facts: [], sources: [] };
   }
 
-  const tickers = candidates.map((c) => c.ticker);
+  const tickers = candidates.map(c => c.ticker);
   const nameByTicker = {};
   const cikByTicker = {};
-  candidates.forEach((c) => {
+  candidates.forEach(c => {
     nameByTicker[c.ticker] = c.company_name;
     cikByTicker[c.ticker] = c.cik;
   });
-  console.log(`[resolveCompanySetFacts] ${tickers.length} candidate tickers for sector=${filter.sector || 'any'}`);
+  console.log(
+    `[resolveCompanySetFacts] ${tickers.length} candidate tickers ` +
+    `(subsector=${filter.subsectorTerm || 'none'}, sector=${filter.sector || 'any'})`
+  );
 
-  // Step 2: financial facts for those tickers (no embedded join).
+  // ── Step 2: financial facts for those tickers ─────────────────────────
   const { data: allFacts, error: factsErr } = await supabase
     .from('financial_facts')
     .select('*')
@@ -393,7 +500,7 @@ async function resolveCompanySetFacts(filter) {
     return { chunks: [], facts: [], sources: [] };
   }
 
-  // Step 3: latest fiscal year per ticker.
+  // ── Step 3: latest fiscal year per ticker ─────────────────────────────
   const latestByTicker = {};
   for (const f of allFacts) {
     const existing = latestByTicker[f.ticker];
@@ -402,9 +509,9 @@ async function resolveCompanySetFacts(filter) {
     }
   }
 
-  // Step 4: sort + top N.
+  // ── Step 4: sort + top N ──────────────────────────────────────────────
   const top = Object.values(latestByTicker)
-    .filter((f) => f.metric_value !== null && f.metric_value !== undefined)
+    .filter(f => f.metric_value !== null && f.metric_value !== undefined)
     .sort((a, b) => {
       const av = Number(a.metric_value);
       const bv = Number(b.metric_value);
@@ -412,11 +519,10 @@ async function resolveCompanySetFacts(filter) {
     })
     .slice(0, filter.limit);
 
-  // Step 5: batch-fetch the filings for those top facts.
-  const filingIds = [...new Set(top.map((f) => f.filing_id).filter(Boolean))];
+  // ── Step 5: filings for those facts ───────────────────────────────────
+  const filingIds = [...new Set(top.map(f => f.filing_id).filter(Boolean))];
   const filingById = {};
   if (filingIds.length > 0) {
-    // Wildcard select so this works regardless of the exact column set.
     const { data: filings, error: filingsErr } = await supabase
       .from('filings')
       .select('*')
@@ -424,12 +530,12 @@ async function resolveCompanySetFacts(filter) {
     if (filingsErr) {
       console.log(`[resolveCompanySetFacts] filings lookup failed: ${filingsErr.message}`);
     } else {
-      (filings || []).forEach((row) => { filingById[row.id] = row; });
+      (filings || []).forEach(row => { filingById[row.id] = row; });
     }
   }
 
-  // Step 6: attach company_name + build a source per fact.
-  const facts = top.map((f) => ({
+  // ── Step 6: attach company_name + build sources ───────────────────────
+  const facts = top.map(f => ({
     ...f,
     company_name: nameByTicker[f.ticker] || f.ticker,
   }));
@@ -437,7 +543,6 @@ async function resolveCompanySetFacts(filter) {
   const sources = top.map((f, idx) => {
     const filing = f.filing_id ? filingById[f.filing_id] : null;
     const cik = cikByTicker[f.ticker];
-    // Try common URL field names on the filing row.
     const directUrl =
       filing?.source_url ||
       filing?.url ||
