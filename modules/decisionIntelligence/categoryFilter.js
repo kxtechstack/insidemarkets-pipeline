@@ -113,4 +113,58 @@ function applyCategoryFilter(items, targetCategories) {
   return items.filter(item => item.category && targetSet.has(item.category.toLowerCase()));
 }
 
-module.exports = { detectTargetCategories, applyCategoryFilter };
+
+async function queryItemsByCategory(clientId, targetCategories, limit = 10) {
+  if (!targetCategories || targetCategories.length === 0) return [];
+  const items = [];
+
+  try {
+    const { data } = await supabase
+      .from('policy_signals')
+      .select('id, signal_title, category, impact_level, country, summary, source_article_url, source_published_date')
+      .eq('client_id', clientId)
+      .in('category', targetCategories)
+      .order('source_published_date', { ascending: false })
+      .limit(limit);
+    (data || []).forEach(r => items.push({
+      id: r.id,
+      title: r.signal_title,
+      category: r.category,
+      impact: r.impact_level,
+      country: r.country,
+      summary: r.summary,
+      url: r.source_article_url,
+      publishedDate: r.source_published_date,
+      module: 'Policy & Risk',
+    }));
+  } catch (err) {
+    console.log(`[categoryFilter] direct policy_signals query failed: ${err.message}`);
+  }
+
+  try {
+    const { data } = await supabase
+      .from('market_dynamics_signals')
+      .select('id, signal_title, category, summary, source_url, country, published_date')
+      .eq('client_id', clientId)
+      .in('category', targetCategories)
+      .order('published_date', { ascending: false })
+      .limit(limit);
+    (data || []).forEach(r => items.push({
+      id: r.id,
+      title: r.signal_title,
+      category: r.category,
+      impact: null,
+      country: r.country,
+      summary: r.summary,
+      url: r.source_url,
+      publishedDate: r.published_date,
+      module: 'Market Dynamics',
+    }));
+  } catch (err) {
+    console.log(`[categoryFilter] direct market_dynamics_signals query failed: ${err.message}`);
+  }
+
+  items.sort((a, b) => new Date(b.publishedDate || 0) - new Date(a.publishedDate || 0));
+  return items.slice(0, limit);
+}
+module.exports = { detectTargetCategories, applyCategoryFilter, queryItemsByCategory };

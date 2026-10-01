@@ -6,7 +6,7 @@ const { retrieveCustomSourceData } = require('./customSourceRetrieval');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('./secRetrieval');
 const { generateAnswer } = require('./generateAnswer');
 const { retrieveClientData, detectTargetModules, detectTimeWindow } = require('./retrieveClientData');
-const { detectTargetCategories, applyCategoryFilter } = require('./categoryFilter');
+const { detectTargetCategories, applyCategoryFilter, queryItemsByCategory } = require('./categoryFilter');
 const { getVerifiedSuggestions } = require('./suggestionEngine');
 const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
@@ -59,6 +59,15 @@ async function handleList(question, clientId, industry, forceList = false) {
   }
   clientItems = applyCategoryFilter(clientItems, targetCategories);
 
+  
+  if (targetCategories.length > 0 && clientItems.length === 0) {
+    try {
+      clientItems = await queryItemsByCategory(clientId, targetCategories, 10);
+      console.log(`[handleList] semantic search found 0 matching-category items; direct category query found ${clientItems.length}`);
+    } catch (err) {
+      console.log(`[handleList] queryItemsByCategory failed: ${err.message}`);
+    }
+  }
   let widenedLabel = null;
   if (hasTimeWindow && clientItems.length === 0) {
     const widenSteps = [
