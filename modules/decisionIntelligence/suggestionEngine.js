@@ -51,7 +51,11 @@ async function getVerifiedSuggestions(clientId, limit = 4) {
     Object.entries(counts)
       .sort((a, b) => b[1] - a[1])
       .forEach(([category, count]) => {
-        candidates.push({ question: `What recent ${category.toLowerCase()} activity is happening in my market?`, count });
+        const lower = category.toLowerCase();
+        const question = lower.includes('activity')
+          ? `What recent ${lower} is happening in my market?`
+          : `What recent ${lower} activity is happening in my market?`;
+        candidates.push({ question, count });
       });
   } catch (err) {
     console.log(`[suggestionEngine] market_dynamics_signals query failed: ${err.message}`);
