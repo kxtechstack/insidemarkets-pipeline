@@ -87,7 +87,8 @@ If it does reference a company set for financial comparison, respond with JSON:
   "metric": "Revenue" | "NetIncome" | "TotalAssets" | "TotalLiabilities" | "CashFlow" | null,
   "orderBy": "desc" | "asc",
   "limit": 5,
-  "unresolved_term": null
+  "unresolved_term": null,
+  "subsector_term": null
 }
 
 RESOLUTION RULES:
@@ -97,10 +98,22 @@ RESOLUTION RULES:
    map it to one of the 11 sectors, set sector: null AND set unresolved_term to
    the exact word the user used (e.g. "cosmetic", "aerospace startups").
 3. If the question genuinely asks about companies ACROSS all sectors (e.g. "top 5
-   US companies by revenue" with no domain restriction), set sector: null AND
-   unresolved_term: null.
+   US companies by revenue" with no domain restriction), set sector: null,
+   unresolved_term: null, subsector_term: null.
 4. "tech" or "technology" -> "Information Technology".
 5. If the user names a specific company, respond { "isCompanySet": false }.
+
+SUBSECTOR_TERM RULE:
+- If the user's question contains a SPECIFIC subsector or product category word
+  (e.g. "cosmetic", "pharma", "airline", "semiconductor", "beauty", "software"),
+  set subsector_term to that exact word.
+- Even if the word maps cleanly to a sector via the mapping table, STILL set
+  subsector_term to that word. It will be used downstream to narrow to the
+  right companies within the sector.
+- If the question is broad ("top consumer companies", "top US companies"),
+  set subsector_term: null.
+- If subsector_term is set, you may leave sector as null -- the downstream
+  picker will handle the sector narrowing from the subsector word.
 
 If the question is about a specific named company (Apple, Microsoft), or does
 not reference a sector/company set for financial comparison, respond:
@@ -147,7 +160,7 @@ function stripFences(raw) {
 async function callClassifier(question) {
   const raw = await callLLM(
     [{ role: 'user', content: buildClassifierPrompt(question) }],
-    { temperature: 0, max_tokens: 300, timeout: 30000 }
+    { temperature: 0, max_tokens: 350, timeout: 30000 }
   );
   return JSON.parse(stripFences(raw));
 }
@@ -196,15 +209,15 @@ async function resolveCompanySet(question) {
     try {
       const disambig = await callDisambiguation(question, unresolvedTerm);
       if (disambig && VALID_SECTORS.has(disambig.sector)) {
-        sector = disambig.sector;
+        const resolvedSector = disambig.sector;
+        console.log(`[resolveCompanySet] layer-2 resolved "${unresolvedTerm}" -> ${resolvedSector} (${disambig.reasoning || 'no reasoning'})`);
+        sector = resolvedSector;
         unresolvedTerm = null;
-        console.log(`[resolveCompanySet] layer-2 resolved "${unresolvedTerm}" -> ${sector} (${disambig.reasoning || 'no reasoning'})`);
       } else {
         console.log(`[resolveCompanySet] layer-2 could not resolve "${unresolvedTerm}" -- returning null sector with unresolved marker`);
       }
     } catch (err) {
       console.log(`[resolveCompanySet] disambiguation failed: ${err.message}`);
-      // leave unresolvedTerm set so caller can refuse
     }
   }
 
@@ -212,12 +225,19 @@ async function resolveCompanySet(question) {
   const orderBy = parsed.orderBy === 'asc' ? 'asc' : 'desc';
   const limit = Math.min(Math.max(Number(parsed.limit) || 5, 1), 20);
 
+  // subsector_term is captured even when the sector resolved successfully.
+  const subsectorTerm =
+    typeof parsed.subsector_term === 'string' && parsed.subsector_term.trim()
+      ? parsed.subsector_term.trim()
+      : null;
+
   console.log(
     `[resolveCompanySet] resolved: sector=${sector || 'null'} metric=${metric} ` +
-    `orderBy=${orderBy} limit=${limit} unresolved=${unresolvedTerm || 'none'}`
+    `orderBy=${orderBy} limit=${limit} unresolved=${unresolvedTerm || 'none'} ` +
+    `subsector=${subsectorTerm || 'none'}`
   );
 
-  return { sector, metric, orderBy, limit, unresolvedTerm };
+  return { sector, metric, orderBy, limit, unresolvedTerm, subsectorTerm };
 }
 
 module.exports = { resolveCompanySet };
