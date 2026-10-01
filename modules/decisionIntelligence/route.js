@@ -170,6 +170,26 @@ async function handleDecision(question, clientId, industry) {
   let secRetrieval;
   const setFilter = await resolveCompanySet(question);
 
+  // ── Guard: refuse when sector could not be resolved AND the user's term
+  // was flagged as unmatched. Prevents the "top cosmetic companies" -> top-5-
+  // by-revenue bug where an unresolved term silently became sector=null and
+  // returned the biggest US companies across all sectors.
+  if (setFilter && setFilter.sector === null && setFilter.unresolvedTerm) {
+    console.log(
+      `[handleDecision] refusing: unresolved sector term "${setFilter.unresolvedTerm}" ` +
+      `-- no sector matched even after disambiguation`
+    );
+    return {
+      type: 'decision',
+      report: null,
+      sources: [],
+      chart: null,
+      chartMeta: null,
+      _empty: true,
+      _reason: `I couldn't match "${setFilter.unresolvedTerm}" to a sector in our SEC data. Try naming a broader category (e.g. "consumer staples", "health care", "information technology").`,
+    };
+  }
+
   if (setFilter) {
     secRetrieval = await resolveCompanySetFacts(setFilter);
     if (secRetrieval.facts.length > 0) {
@@ -331,6 +351,13 @@ async function handleDecision(question, clientId, industry) {
 async function resolveCompanySetFacts(filter) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  // Guard: if the filter still has an unresolvedTerm at this point, the
+  // caller should have refused already -- but defend in depth.
+  if (filter.sector === null && filter.unresolvedTerm) {
+    console.log(`[resolveCompanySetFacts] refusing unresolvedTerm="${filter.unresolvedTerm}" with sector=null`);
+    return { chunks: [], facts: [], sources: [], _unresolved: filter.unresolvedTerm };
+  }
 
   // Step 1: candidate companies (ticker + name + cik, no join).
   let companyQuery = supabase.from('companies').select('ticker, company_name, cik');
