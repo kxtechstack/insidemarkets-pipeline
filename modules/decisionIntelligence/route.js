@@ -378,20 +378,37 @@ Subsector term: "${subsectorTerm}"
 Company list (format: TICKER | Name | Sector):
 ${companyList}
 
-Instructions:
-- Return ONLY companies whose PRIMARY business is in the subsector term.
-- Do NOT include companies that merely sell or distribute products in that subsector among many other categories.
-- If the term is a product category (e.g. "cosmetic"), return companies that MAKE or are primarily KNOWN FOR that category.
-- If you are unsure about a company, exclude it.
-- Return AT MOST 20 tickers. Prefer the most relevant.
+STRICT RULES — apply every one:
+1. A company qualifies ONLY if the subsector is its PRIMARY business. If more than
+   half of its revenue comes from something else, EXCLUDE it.
+2. Do NOT include a company just because it owns a small subsidiary, division, or
+   brand in that subsector. Ownership of a related business is NOT sufficient.
+   Examples of what to exclude:
+     - A health insurance company that owns a dermatology clinic  -> EXCLUDE for "cosmetic"
+     - A conglomerate that has one beauty brand among dozens     -> EXCLUDE
+     - A retailer that sells cosmetics among many other products -> EXCLUDE
+3. Do NOT include a company just because the word appears in its name.
+4. Do NOT include a company if you are unsure whether the subsector is its
+   primary business. When in doubt, EXCLUDE.
+5. Return AT MOST 20 tickers.
+
+GOOD EXAMPLES:
+  "cosmetic" -> Estee Lauder (EL), Coty (COTY), e.l.f. Beauty (ELF), Ulta Beauty (ULTA), Bath & Body Works (BBWI)
+  "semiconductor" -> Nvidia (NVDA), AMD (AMD), Intel (INTC), Broadcom (AVGO), Qualcomm (QCOM)
+  "airline" -> Delta (DAL), United (UAL), American (AAL), Southwest (LUV)
+
+BAD EXAMPLES (do NOT do this):
+  "cosmetic" -> including a health insurer that owns a dermatology subsidiary
+  "cosmetic" -> including Amazon because it sells cosmetics online
+  "airline" -> including Boeing because it makes airplanes for airlines
 
 Respond with ONLY this JSON, no other text:
 {
   "tickers": ["TICKER1", "TICKER2", ...],
-  "reasoning": "one short sentence"
+  "reasoning": "one short sentence explaining the pick"
 }
 
-If no companies match, return: { "tickers": [], "reasoning": "no matches" }`;
+If no companies qualify, return: { "tickers": [], "reasoning": "no matches" }`;
 
   try {
     const raw = await callLLM(
