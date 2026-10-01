@@ -11,11 +11,29 @@ const { callLLM } = require('../llmClient');
  * a specific named company, or a general trend question).
  */
 async function resolveCompanySet(question) {
-  const prompt = `Analyze this question and determine if it references a SET of companies by category or sector (as opposed to a specific named company).
+  // Fast guard: questions phrased around the CLIENT'S OWN data ("my
+  // market", "my industry", "my sector", "my data") are never a
+  // cross-company SEC financial comparison, no matter what words like
+  // "corporate" or "companies" appear alongside them. Skip the LLM call
+  // entirely for these -- this is exactly the class of question that
+  // was previously misfiring into a generic top-5-by-revenue SEC query.
+  const q = (question || '').toLowerCase();
+  const ownDataPhrases = [
+    'my market', 'my industry', 'my sector', 'my data', 'my client',
+    'in my', 'our market', 'our industry', 'our sector',
+  ];
+  if (ownDataPhrases.some(p => q.includes(p))) {
+    console.log(`[resolveCompanySet] question refers to client's own data -- skipping company-set detection`);
+    return null;
+  }
+
+  const prompt = `Analyze this question and determine if it references a SET of companies by category or sector (as opposed to a specific named company), for the purpose of comparing their PUBLIC FINANCIAL FILINGS (SEC data).
 
 Question: "${question}"
 
-If it does, respond with JSON:
+IMPORTANT: Only answer true if the question is asking to compare named public companies' financial metrics (revenue, assets, etc.) across a sector. If the question is instead asking about "my market", "my industry", "my data", recent news, signals, trends, or activity the client has collected (even if it uses words like "corporate" or "companies" in passing), respond isCompanySet: false -- that is a different kind of question entirely, answered from the client's own collected data, not SEC filings.
+
+If it does reference a company set for financial comparison, respond with JSON:
 {
   "isCompanySet": true,
   "sector": "Information Technology" | "Financials" | "Health Care" | "Energy" | "Industrials" | "Consumer Discretionary" | "Consumer Staples" | "Utilities" | "Real Estate" | "Materials" | "Communication Services" | null,
@@ -24,7 +42,7 @@ If it does, respond with JSON:
   "limit": 5
 }
 
-If the question is about a specific named company (Apple, Microsoft), or does not reference a sector/company set, respond:
+If the question is about a specific named company (Apple, Microsoft), or does not reference a sector/company set for financial comparison, respond:
 { "isCompanySet": false }
 
 Sectors available: Information Technology, Financials, Health Care, Energy, Industrials, Consumer Discretionary, Consumer Staples, Utilities, Real Estate, Materials, Communication Services.
