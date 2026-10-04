@@ -13,6 +13,26 @@ const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
 const { enrichSourcesWithSignalIds } = require('./enrichSources');
 const { resolveCompanySet } = require('./resolveCompanySet');
+// ── Sector alias map ────────────────────────────────────────────────────────
+// Some companies in our DB were historically tagged under a legacy sector
+// name that differs from the canonical GICS name the LLM resolver uses.
+// This maps the canonical name -> ALL DB sector tags that mean the same
+// thing, so `.in('sector', [...])` picks up everything.
+//
+// DO NOT edit the companies table to normalize these — downstream tables
+// (financial_facts, filings, chunks_meta, Qdrant payloads) reference these
+// rows, and any DB write here risks breaking the SEC pipeline. Fix it here.
+const SECTOR_ALIASES = {
+  'Information Technology': ['Information Technology', 'Technology'],
+  // Add more as you discover them, e.g.:
+  // 'Health Care': ['Health Care', 'Healthcare'],
+  // 'Real Estate': ['Real Estate', 'REITs'],
+};
+
+function expandSectorAliases(sector) {
+  if (!sector) return null;
+  return SECTOR_ALIASES[sector] || [sector];
+}
 const {
   createConversation, appendMessage,
   listConversations, loadConversation, deleteConversation,
@@ -483,7 +503,14 @@ async function resolveCompanySetFacts(filter) {
   if (candidateTickers) {
     companyQuery = companyQuery.in('ticker', candidateTickers);
   } else if (filter.sector) {
-    companyQuery = companyQuery.eq('sector', filter.sector);
+    // Expand the LLM's canonical sector name to all DB tags that mean the
+    // same thing (e.g. "Information Technology" also matches legacy
+    // "Technology" rows). See SECTOR_ALIASES at the top of this file.
+    const dbSectors = expandSectorAliases(filter.sector);
+    companyQuery = companyQuery.in('sector', dbSectors);
+    console.log(
+      `[resolveCompanySetFacts] sector "${filter.sector}" expanded to DB tags: [${dbSectors.join(', ')}]`
+    );
   }
   companyQuery = companyQuery.limit(200);
 
