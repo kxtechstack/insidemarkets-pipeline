@@ -471,6 +471,261 @@ async function handleDecision(question, clientId, industry) {
   return { type: 'decision', report, sources: mergedSources, chart, chartMeta };
 }
 
+/**
+ * Given a subsector word (e.g. "cosmetic", "airline", "semiconductor"),
+ * decide which of the client's companies match it.
+ *
+ * Two paths:
+ *   1. If the subsector is in SUBSECTOR_ALLOWLISTS, we use the curated
+ *      ticker list directly. Deterministic, zero hallucinations.
+ *   2. Otherwise we ask the LLM to pick from the resolved sector's
+ *      companies only. We dedupe and salvage partial JSON.
+ */
+async function selectCompaniesForSubsector(subsectorTerm, sectorHint = null) {
+  // ── Path 1: allowlist ────────────────────────────────────────────────
+  const allowlist = findAllowlistTickers(subsectorTerm);
+  if (allowlist && allowlist.length > 0) {
+    console.log(
+      `[selectCompaniesForSubsector] "${subsectorTerm}" -> allowlist of ${allowlist.length} ticker(s): ${allowlist.join(', ')}`
+    );
+    return { tickers: allowlist, reasoning: 'curated allowlist', source: 'allowlist' };
+  }
+
+  // ── Path 2: LLM picker ───────────────────────────────────────────────
+  const { callLLM } = require('../llmClient');
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  let query = supabase.from('companies').select('ticker, company_name, sector').order('ticker');
+  if (sectorHint) {
+    const dbSectors = expandSectorAliases(sectorHint);
+    query = query.in('sector', dbSectors);
+  }
+  const { data: companies, error } = await query;
+
+  if (error || !companies || companies.length === 0) {
+    console.log(`[selectCompaniesForSubsector] companies query failed: ${error?.message}`);
+    return null;
+  }
+
+  const companyList = companies
+    .map(c => `${c.ticker} | ${c.company_name} | ${c.sector}`)
+    .join('\n');
+
+  const prompt = `You are given a list of US-listed companies and a subsector term. Identify which companies in the list are PRIMARILY in that subsector.
+
+Subsector term: "${subsectorTerm}"
+
+Company list (format: TICKER | Name | Sector):
+${companyList}
+
+STRICT RULES:
+1. A company qualifies ONLY if the subsector is its PRIMARY business.
+2. Do NOT include a company just because it owns a small subsidiary or brand
+   in that subsector.
+3. Do NOT include a company just because the word appears in its name.
+4. Do NOT include companies from an unrelated sector.
+5. Return AT MOST 20 tickers. Prefer the largest / most well-known ones.
+6. Return tickers SEPARATED, no duplicates.
+
+Respond with ONLY this JSON, no other text:
+{
+  "tickers": ["TICKER1", "TICKER2", ...],
+  "reasoning": "one short sentence"
+}
+
+If no companies qualify, return: { "tickers": [], "reasoning": "no matches" }`;
+
+  try {
+    const raw = await callLLM(
+      [{ role: 'user', content: prompt }],
+      { temperature: 0, max_tokens: 500, timeout: 45000 }
+    );
+
+    const cleaned = (raw || '').trim()
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/, '')
+      .replace(/```\s*$/, '')
+      .trim();
+
+    let tickers = [];
+    let reasoning = '';
+
+    try {
+      const parsed = JSON.parse(cleaned);
+      tickers = Array.isArray(parsed.tickers) ? parsed.tickers : [];
+      reasoning = parsed.reasoning || '';
+    } catch (parseErr) {
+      console.log(`  [selectCompaniesForSubsector] JSON parse failed (${parseErr.message}) — salvaging`);
+      const block = cleaned.match(/"tickers"\s*:\s*\[([^\]]*)/);
+      if (block) {
+        tickers = block[1]
+          .split(',')
+          .map(s => s.replace(/["'\s]/g, '').toUpperCase())
+          .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t));
+      }
+      const rMatch = cleaned.match(/"reasoning"\s*:\s*"([^"]*)/);
+      if (rMatch) reasoning = rMatch[1];
+      console.log(`  [selectCompaniesForSubsector] salvage recovered ${tickers.length} ticker(s)`);
+    }
+
+    const seen = new Set();
+    tickers = tickers
+      .map(t => String(t).toUpperCase().trim())
+      .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t))
+      .filter(t => {
+        if (seen.has(t)) return false;
+        seen.add(t);
+        return true;
+      })
+      .slice(0, 20);
+
+    console.log(
+      `[selectCompaniesForSubsector] "${subsectorTerm}" -> ${tickers.length} unique ticker(s) ` +
+      `[${tickers.join(', ')}] | ${reasoning || 'no reasoning'}`
+    );
+
+    return { tickers, reasoning, source: 'llm' };
+  } catch (err) {
+    console.log(`[selectCompaniesForSubsector] failed for "${subsectorTerm}": ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Given a parsed company-set filter, query companies + financial_facts
+ * and return the top-N facts matching the filter.
+ */
+async function resolveCompanySetFacts(filter) {
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  if (filter.sector === null && filter.unresolvedTerm) {
+    console.log(`[resolveCompanySetFacts] refusing unresolvedTerm="${filter.unresolvedTerm}" with sector=null`);
+    return { chunks: [], facts: [], sources: [], _unresolved: filter.unresolvedTerm };
+  }
+
+  let candidateTickers = null;
+
+  if (filter.subsectorTerm) {
+    const picked = await selectCompaniesForSubsector(filter.subsectorTerm, filter.sector);
+    if (!picked || picked.tickers.length === 0) {
+      console.log(
+        `[resolveCompanySetFacts] no companies matched subsector "${filter.subsectorTerm}" — returning empty`
+      );
+      return { chunks: [], facts: [], sources: [], _unresolved: filter.subsectorTerm };
+    }
+    candidateTickers = picked.tickers;
+    console.log(
+      `[resolveCompanySetFacts] subsector "${filter.subsectorTerm}" -> ${candidateTickers.length} ticker(s): ${candidateTickers.join(', ')}`
+    );
+  }
+
+  let companyQuery = supabase.from('companies').select('ticker, company_name, cik');
+
+  if (candidateTickers) {
+    companyQuery = companyQuery.in('ticker', candidateTickers);
+  } else if (filter.sector) {
+    const dbSectors = expandSectorAliases(filter.sector);
+    companyQuery = companyQuery.in('sector', dbSectors);
+    console.log(
+      `[resolveCompanySetFacts] sector "${filter.sector}" expanded to DB tags: [${dbSectors.join(', ')}]`
+    );
+  }
+  companyQuery = companyQuery.limit(200);
+
+  const { data: candidates, error: candErr } = await companyQuery;
+  if (candErr || !candidates || candidates.length === 0) {
+    console.log(`[resolveCompanySetFacts] no candidates: ${candErr?.message || 'empty'}`);
+    return { chunks: [], facts: [], sources: [] };
+  }
+
+  const tickers = candidates.map(c => c.ticker);
+  const nameByTicker = {};
+  const cikByTicker = {};
+  candidates.forEach(c => {
+    nameByTicker[c.ticker] = c.company_name;
+    cikByTicker[c.ticker] = c.cik;
+  });
+  console.log(
+    `[resolveCompanySetFacts] ${tickers.length} candidate tickers ` +
+    `(subsector=${filter.subsectorTerm || 'none'}, sector=${filter.sector || 'any'})`
+  );
+
+  const { data: allFacts, error: factsErr } = await supabase
+    .from('financial_facts')
+    .select('*')
+    .in('ticker', tickers)
+    .eq('metric_name', filter.metric);
+
+  if (factsErr || !allFacts || allFacts.length === 0) {
+    console.log(`[resolveCompanySetFacts] no facts: ${factsErr?.message || 'empty'}`);
+    return { chunks: [], facts: [], sources: [] };
+  }
+
+  const latestByTicker = {};
+  for (const f of allFacts) {
+    const existing = latestByTicker[f.ticker];
+    if (!existing || (f.fiscal_year || 0) > (existing.fiscal_year || 0)) {
+      latestByTicker[f.ticker] = f;
+    }
+  }
+
+  const top = Object.values(latestByTicker)
+    .filter(f => f.metric_value !== null && f.metric_value !== undefined)
+    .sort((a, b) => {
+      const av = Number(a.metric_value);
+      const bv = Number(b.metric_value);
+      return filter.orderBy === 'asc' ? av - bv : bv - av;
+    })
+    .slice(0, filter.limit);
+
+  const filingIds = [...new Set(top.map(f => f.filing_id).filter(Boolean))];
+  const filingById = {};
+  if (filingIds.length > 0) {
+    const { data: filings, error: filingsErr } = await supabase
+      .from('filings')
+      .select('*')
+      .in('id', filingIds);
+    if (filingsErr) {
+      console.log(`[resolveCompanySetFacts] filings lookup failed: ${filingsErr.message}`);
+    } else {
+      (filings || []).forEach(row => { filingById[row.id] = row; });
+    }
+  }
+
+  const facts = top.map(f => ({
+    ...f,
+    company_name: nameByTicker[f.ticker] || f.ticker,
+  }));
+
+  const sources = top.map((f, idx) => {
+    const filing = f.filing_id ? filingById[f.filing_id] : null;
+    const cik = cikByTicker[f.ticker];
+    const directUrl =
+      filing?.source_url ||
+      filing?.url ||
+      filing?.filing_url ||
+      filing?.sec_url ||
+      null;
+    const fallbackUrl = cik
+      ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=10-K&dateb=&owner=include&count=10`
+      : null;
+
+    return {
+      index: idx + 1,
+      type: 'sec',
+      title: `${nameByTicker[f.ticker] || f.ticker} (${f.ticker}) — FY${f.fiscal_year} ${filter.metric}`,
+      url: directUrl || fallbackUrl,
+      ticker: f.ticker,
+      fiscal_year: f.fiscal_year,
+      item_code: filter.metric,
+    };
+  });
+
+  return { chunks: [], facts, sources };
+}
+
 
 
 function registerDecisionIntelligenceRoute(app) {
