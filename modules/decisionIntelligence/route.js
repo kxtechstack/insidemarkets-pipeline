@@ -318,8 +318,11 @@ async function handleDecision(question, clientId, industry) {
     };
   }
 
+  let coverageInfo = null;
+
   if (setFilter) {
     secRetrieval = await resolveCompanySetFacts(setFilter);
+    coverageInfo = secRetrieval.coverageInfo || null;
     if (secRetrieval.facts.length > 0) {
       intent.dataType = 'quantitative';
       intent.questionCategory = 'comparison';
@@ -468,7 +471,16 @@ async function handleDecision(question, clientId, industry) {
     mergedSources.push(s);
   }
 
-  return { type: 'decision', report, sources: mergedSources, chart, chartMeta };
+  // Attach a human-readable note when the subsector had partial coverage.
+  let coverageNote = null;
+  if (coverageInfo && coverageInfo.returned != null && coverageInfo.considered > coverageInfo.returned) {
+    coverageNote =
+      `Showing ${coverageInfo.returned} of ${coverageInfo.considered} ` +
+      `companies our system tracks in "${coverageInfo.subsector}" ` +
+      `(others lack SEC filing data in our database).`;
+  }
+
+  return { type: 'decision', report, sources: mergedSources, chart, chartMeta, coverageNote };
 }
 
 /**
@@ -480,39 +492,55 @@ async function handleDecision(question, clientId, industry) {
  *      ticker list directly. Deterministic, zero hallucinations.
  *   2. Otherwise we ask the LLM to pick from the resolved sector's
  *      companies only. We dedupe and salvage partial JSON.
+ *
+ * Both paths are then INTERSECTED with what actually exists in `companies`,
+ * so we never pick a ticker the DB can't answer for. When a metric is
+ * supplied, we also intersect with `financial_facts` for that metric --
+ * a company with no revenue row shouldn't show up in a revenue answer.
+ *
+ * Returns {
+ *   tickers:    string[],      // tickers that exist AND have data
+ *   reasoning:  string,
+ *   source:     'allowlist'|'llm',
+ *   dropped:    string[],      // tickers we picked but couldn't use
+ *   totalConsidered: number    // how many were originally picked
+ * } or null on hard failure.
  */
-async function selectCompaniesForSubsector(subsectorTerm, sectorHint = null) {
-  // ── Path 1: allowlist ────────────────────────────────────────────────
-  const allowlist = findAllowlistTickers(subsectorTerm);
-  if (allowlist && allowlist.length > 0) {
-    console.log(
-      `[selectCompaniesForSubsector] "${subsectorTerm}" -> allowlist of ${allowlist.length} ticker(s): ${allowlist.join(', ')}`
-    );
-    return { tickers: allowlist, reasoning: 'curated allowlist', source: 'allowlist' };
-  }
-
-  // ── Path 2: LLM picker ───────────────────────────────────────────────
-  const { callLLM } = require('../llmClient');
+async function selectCompaniesForSubsector(subsectorTerm, sectorHint = null, metric = null) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-  let query = supabase.from('companies').select('ticker, company_name, sector').order('ticker');
-  if (sectorHint) {
-    const dbSectors = expandSectorAliases(sectorHint);
-    query = query.in('sector', dbSectors);
-  }
-  const { data: companies, error } = await query;
+  // ── Pick a candidate set ─────────────────────────────────────────────
+  let candidates = null;
+  let source = null;
+  let reasoning = '';
 
-  if (error || !companies || companies.length === 0) {
-    console.log(`[selectCompaniesForSubsector] companies query failed: ${error?.message}`);
-    return null;
-  }
+  const allowlist = findAllowlistTickers(subsectorTerm);
+  if (allowlist && allowlist.length > 0) {
+    candidates = allowlist;
+    source = 'allowlist';
+    reasoning = 'curated allowlist';
+  } else {
+    // LLM picker fallback
+    const { callLLM } = require('../llmClient');
 
-  const companyList = companies
-    .map(c => `${c.ticker} | ${c.company_name} | ${c.sector}`)
-    .join('\n');
+    let query = supabase.from('companies').select('ticker, company_name, sector').order('ticker');
+    if (sectorHint) {
+      const dbSectors = expandSectorAliases(sectorHint);
+      query = query.in('sector', dbSectors);
+    }
+    const { data: companies, error } = await query;
 
-  const prompt = `You are given a list of US-listed companies and a subsector term. Identify which companies in the list are PRIMARILY in that subsector.
+    if (error || !companies || companies.length === 0) {
+      console.log(`[selectCompaniesForSubsector] companies query failed: ${error?.message}`);
+      return null;
+    }
+
+    const companyList = companies
+      .map(c => `${c.ticker} | ${c.company_name} | ${c.sector}`)
+      .join('\n');
+
+    const prompt = `You are given a list of US-listed companies and a subsector term. Identify which companies in the list are PRIMARILY in that subsector.
 
 Subsector term: "${subsectorTerm}"
 
@@ -536,60 +564,105 @@ Respond with ONLY this JSON, no other text:
 
 If no companies qualify, return: { "tickers": [], "reasoning": "no matches" }`;
 
-  try {
-    const raw = await callLLM(
-      [{ role: 'user', content: prompt }],
-      { temperature: 0, max_tokens: 500, timeout: 45000 }
-    );
-
-    const cleaned = (raw || '').trim()
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/, '')
-      .replace(/```\s*$/, '')
-      .trim();
-
-    let tickers = [];
-    let reasoning = '';
-
     try {
-      const parsed = JSON.parse(cleaned);
-      tickers = Array.isArray(parsed.tickers) ? parsed.tickers : [];
-      reasoning = parsed.reasoning || '';
-    } catch (parseErr) {
-      console.log(`  [selectCompaniesForSubsector] JSON parse failed (${parseErr.message}) — salvaging`);
-      const block = cleaned.match(/"tickers"\s*:\s*\[([^\]]*)/);
-      if (block) {
-        tickers = block[1]
-          .split(',')
-          .map(s => s.replace(/["'\s]/g, '').toUpperCase())
-          .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t));
+      const raw = await callLLM(
+        [{ role: 'user', content: prompt }],
+        { temperature: 0, max_tokens: 500, timeout: 45000 }
+      );
+
+      const cleaned = (raw || '').trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/, '')
+        .replace(/```\s*$/, '')
+        .trim();
+
+      let picked = [];
+      try {
+        const parsed = JSON.parse(cleaned);
+        picked = Array.isArray(parsed.tickers) ? parsed.tickers : [];
+        reasoning = parsed.reasoning || '';
+      } catch (parseErr) {
+        console.log(`  [selectCompaniesForSubsector] JSON parse failed (${parseErr.message}) — salvaging`);
+        const block = cleaned.match(/"tickers"\s*:\s*\[([^\]]*)/);
+        if (block) {
+          picked = block[1]
+            .split(',')
+            .map(s => s.replace(/["'\s]/g, '').toUpperCase())
+            .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t));
+        }
+        const rMatch = cleaned.match(/"reasoning"\s*:\s*"([^"]*)/);
+        if (rMatch) reasoning = rMatch[1];
       }
-      const rMatch = cleaned.match(/"reasoning"\s*:\s*"([^"]*)/);
-      if (rMatch) reasoning = rMatch[1];
-      console.log(`  [selectCompaniesForSubsector] salvage recovered ${tickers.length} ticker(s)`);
+
+      const seen = new Set();
+      candidates = picked
+        .map(t => String(t).toUpperCase().trim())
+        .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t))
+        .filter(t => {
+          if (seen.has(t)) return false;
+          seen.add(t);
+          return true;
+        })
+        .slice(0, 20);
+      source = 'llm';
+    } catch (err) {
+      console.log(`[selectCompaniesForSubsector] failed for "${subsectorTerm}": ${err.message}`);
+      return null;
     }
-
-    const seen = new Set();
-    tickers = tickers
-      .map(t => String(t).toUpperCase().trim())
-      .filter(t => /^[A-Z][A-Z.]{0,5}$/.test(t))
-      .filter(t => {
-        if (seen.has(t)) return false;
-        seen.add(t);
-        return true;
-      })
-      .slice(0, 20);
-
-    console.log(
-      `[selectCompaniesForSubsector] "${subsectorTerm}" -> ${tickers.length} unique ticker(s) ` +
-      `[${tickers.join(', ')}] | ${reasoning || 'no reasoning'}`
-    );
-
-    return { tickers, reasoning, source: 'llm' };
-  } catch (err) {
-    console.log(`[selectCompaniesForSubsector] failed for "${subsectorTerm}": ${err.message}`);
-    return null;
   }
+
+  // ── Filter against `companies` AND (when metric provided) `financial_facts` ─
+  const totalConsidered = candidates.length;
+
+  if (totalConsidered === 0) {
+    console.log(`[selectCompaniesForSubsector] "${subsectorTerm}" -> 0 candidates from ${source}`);
+    return { tickers: [], reasoning, source, dropped: [], totalConsidered: 0 };
+  }
+
+  // Step A — does the ticker exist in `companies`?
+  const { data: existingCompanies, error: compErr } = await supabase
+    .from('companies')
+    .select('ticker')
+    .in('ticker', candidates);
+
+  if (compErr) {
+    console.log(`[selectCompaniesForSubsector] companies coverage check failed: ${compErr.message}`);
+    // Fall through with the raw candidate list — better to try than to fail.
+    return { tickers: candidates, reasoning, source, dropped: [], totalConsidered };
+  }
+
+  const inCompanies = new Set((existingCompanies || []).map(r => r.ticker));
+  let surviving = candidates.filter(t => inCompanies.has(t));
+  const droppedNotInDb = candidates.filter(t => !inCompanies.has(t));
+
+  // Step B — do they have facts for this metric?
+  let droppedNoFacts = [];
+  if (metric && surviving.length > 0) {
+    const { data: factRows, error: factErr } = await supabase
+      .from('financial_facts')
+      .select('ticker')
+      .in('ticker', surviving)
+      .eq('metric_name', metric);
+
+    if (factErr) {
+      console.log(`[selectCompaniesForSubsector] financial_facts coverage check failed: ${factErr.message}`);
+      // Keep survivors; don't drop on error.
+    } else {
+      const hasFacts = new Set((factRows || []).map(r => r.ticker));
+      droppedNoFacts = surviving.filter(t => !hasFacts.has(t));
+      surviving = surviving.filter(t => hasFacts.has(t));
+    }
+  }
+
+  const dropped = [...droppedNotInDb, ...droppedNoFacts];
+
+  console.log(
+    `[selectCompaniesForSubsector] "${subsectorTerm}" -> ${surviving.length} of ${totalConsidered} ` +
+    `usable ticker(s) [${surviving.join(', ')}] via ${source}` +
+    (dropped.length > 0 ? ` | dropped (not in DB or no ${metric || 'facts'} data): ${dropped.join(', ')}` : '')
+  );
+
+  return { tickers: surviving, reasoning, source, dropped, totalConsidered };
 }
 
 /**
@@ -600,6 +673,10 @@ async function resolveCompanySetFacts(filter) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+  // Coverage info, populated when the subsector picker runs. Exposed to
+  // callers so the answer can render "(showing N of M known companies)".
+  let coverageInfo = null;
+
   if (filter.sector === null && filter.unresolvedTerm) {
     console.log(`[resolveCompanySetFacts] refusing unresolvedTerm="${filter.unresolvedTerm}" with sector=null`);
     return { chunks: [], facts: [], sources: [], _unresolved: filter.unresolvedTerm };
@@ -608,7 +685,7 @@ async function resolveCompanySetFacts(filter) {
   let candidateTickers = null;
 
   if (filter.subsectorTerm) {
-    const picked = await selectCompaniesForSubsector(filter.subsectorTerm, filter.sector);
+    const picked = await selectCompaniesForSubsector(filter.subsectorTerm, filter.sector, filter.metric);
     if (!picked || picked.tickers.length === 0) {
       console.log(
         `[resolveCompanySetFacts] no companies matched subsector "${filter.subsectorTerm}" — returning empty`
@@ -616,6 +693,12 @@ async function resolveCompanySetFacts(filter) {
       return { chunks: [], facts: [], sources: [], _unresolved: filter.subsectorTerm };
     }
     candidateTickers = picked.tickers;
+    coverageInfo = {
+      returned: null,   // set after the fact query
+      considered: picked.totalConsidered,
+      dropped: picked.dropped,
+      subsector: filter.subsectorTerm,
+    };
     console.log(
       `[resolveCompanySetFacts] subsector "${filter.subsectorTerm}" -> ${candidateTickers.length} ticker(s): ${candidateTickers.join(', ')}`
     );
@@ -723,7 +806,10 @@ async function resolveCompanySetFacts(filter) {
     };
   });
 
-  return { chunks: [], facts, sources };
+  // If we tracked coverage, record how many actually made it into the answer.
+  if (coverageInfo) coverageInfo.returned = facts.length;
+
+  return { chunks: [], facts, sources, coverageInfo };
 }
 
 
