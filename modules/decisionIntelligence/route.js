@@ -480,6 +480,13 @@ async function handleDecision(question, clientId, industry) {
       `(others lack SEC filing data in our database).`;
   }
 
+  // Prepend the coverage note to the visible answer body, since the
+  // frontend doesn't yet render the coverageNote field directly. The
+  // italic markdown (_..._) renders as a subtle line at the top.
+  if (coverageNote && report && typeof report.bodyText === 'string') {
+    report.bodyText = `_${coverageNote}_\n\n${report.bodyText}`;
+  }
+
   return { type: 'decision', report, sources: mergedSources, chart, chartMeta, coverageNote };
 }
 
