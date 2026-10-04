@@ -151,6 +151,124 @@ function detectTargetModules(question) {
   if (matched.size === 0) return [...LIVE_MODULE_IDS];
   return [...matched];
 }
+// ── Named-entity rescue ─────────────────────────────────────────────────
+// Semantic search is bad at short entity questions ("What updates on
+// Glossier?"). The embedding of a 6-word generic question often scores
+// below the DI_SCORE_FLOOR against specific signal chunks that mention
+// the entity by name, so the signal is missed even though it's in the DB.
+//
+// This fallback catches that: extract capitalized words from the question
+// and do a direct ILIKE lookup on signal_title / summary / organization
+// across all three signal tables. If an entity match is found, we return
+// those signals regardless of semantic score.
+
+const ENTITY_STOPWORDS = new Set([
+  // Question words
+  'what', 'who', 'where', 'when', 'why', 'how', 'which', 'whom', 'whose',
+  // Articles / conjunctions
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'than',
+  'in', 'on', 'at', 'by', 'for', 'with', 'from', 'to', 'of', 'as',
+  // Common verbs
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will', 'may', 'might',
+  'tell', 'me', 'us', 'show', 'give', 'get', 'find', 'list',
+  // Query intent words
+  'any', 'all', 'some', 'more', 'most', 'many', 'much', 'few', 'less',
+  'new', 'news', 'update', 'updates', 'recent', 'recently', 'latest',
+  'last', 'past', 'this', 'that', 'these', 'those', 'week', 'weeks',
+  'month', 'months', 'year', 'years', 'day', 'days', 'today', 'yesterday',
+  'about', 'regarding', 'concerning',
+  // Industry words that would match too broadly
+  'industry', 'market', 'sector', 'company', 'companies', 'business',
+]);
+
+function extractNamedEntities(question) {
+  if (!question) return [];
+  // Grab capitalized words that aren't at the start of a sentence-only
+  // context (allow "Glossier" even mid-sentence), 3+ chars, not stopwords.
+  const matches = question.match(/\b[A-Z][a-zA-Z0-9&.'-]{2,}\b/g) || [];
+  const out = [];
+  const seen = new Set();
+  for (const w of matches) {
+    const lower = w.toLowerCase();
+    if (ENTITY_STOPWORDS.has(lower)) continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(w);
+  }
+  return out;
+}
+
+async function retrieveSignalsByEntity(clientId, entities) {
+  if (!entities || entities.length === 0) return [];
+
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  // Each table has slightly different columns. We select only what exists
+  // in each and normalize the output afterwards.
+  const signalTables = [
+    {
+      table: 'policy_signals',
+      moduleId: POLICY_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, source_published_date, created_at, submodule_id, module_id, industry, client_id',
+    },
+    {
+      table: 'market_dynamics_signals',
+      moduleId: MARKET_DYNAMICS_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, published_date, created_at, submodule_id, module_id, organization, client_id',
+    },
+    {
+      table: 'trend_signals',
+      moduleId: FORWARD_OUTLOOK_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, source_published_date, created_at, submodule_id, module_id, organization, industry, client_id',
+    },
+  ];
+
+  const results = [];
+
+  for (const { table, moduleId, columns } of signalTables) {
+    // Build OR filter: entity matching against signal_title OR summary.
+    const orClauses = [];
+    for (const e of entities) {
+      const escaped = e.replace(/[%_]/g, m => `\\${m}`);
+      orClauses.push(`signal_title.ilike.%${escaped}%`);
+      orClauses.push(`summary.ilike.%${escaped}%`);
+    }
+
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .eq('client_id', clientId)
+      .or(orClauses.join(','))
+      .limit(10);
+
+    if (error) {
+      console.log(`[EntityRescue] ${table} query failed: ${error.message}`);
+      continue;
+    }
+
+    for (const row of data || []) {
+      results.push({
+        entity_match: true,
+        module_id: row.module_id || moduleId,
+        signal_id: row.id,
+        article_id: row.article_id,
+        title: row.signal_title,
+        summary: row.summary,
+        published_date:
+          row.source_published_date || row.published_date || row.created_at,
+        submodule_id: row.submodule_id,
+        organization: row.organization || null,
+      });
+    }
+  }
+
+  console.log(
+    `[EntityRescue] entities=${JSON.stringify(entities)} -> ${results.length} signal(s)`
+  );
+  return results;
+}
 
 /**
  * Searches the client's own data across existing modules, with optional
@@ -231,14 +349,72 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
     );
   }
 
-  const chosen = bestAttempt;
+  let chosen = bestAttempt;
+
+  // ── Named-entity rescue ──────────────────────────────────────────────
+  // If semantic search came up empty (or thin) and the question names
+  // specific entities, fall back to a direct Postgres lookup. This
+  // recovers short entity questions like "What updates on Glossier?"
+  // that score poorly against Qdrant chunks.
+  if (chosen.length < 3) {
+    const entities = extractNamedEntities(topicQuery);
+    if (entities.length > 0) {
+      const entityMatches = await retrieveSignalsByEntity(clientId, entities);
+
+      // Filter entity matches to target modules only.
+      const filteredEntities = entityMatches.filter(m =>
+        targetModules.includes(m.module_id)
+      );
+
+      // Dedupe against what we already have (by article_id or signal_id).
+      const existingIds = new Set(
+        chosen.map(r => r.payload?.article_id || r.payload?.signal_id)
+      );
+      const additions = filteredEntities.filter(m =>
+        !existingIds.has(m.article_id) && !existingIds.has(m.signal_id)
+      );
+
+      if (additions.length > 0) {
+        console.log(
+          `[retrieveClientData] Entity rescue added ${additions.length} signal(s) ` +
+          `via direct lookup (${entities.join(', ')})`
+        );
+        // Normalize additions to the same shape as Qdrant hits so the
+        // rest of the pipeline (buildListAnswer, generateInferenceAnswer)
+        // can consume them uniformly.
+        const normalizedAdditions = additions.map((m, idx) => ({
+          id: `entity_${m.signal_id || m.article_id || idx}`,
+          score: 0.99, // high score so they sort to the top
+          payload: {
+            article_id: m.article_id || null,
+            signal_id: m.signal_id,
+            title: m.title,
+            summary: m.summary,
+            chunk_text: m.summary || m.title,
+            module_id: m.module_id,
+            submodule_id: m.submodule_id,
+            published_date: m.published_date,
+            source_published_date: m.published_date,
+            entity_match: true,
+          },
+        }));
+        chosen = [...normalizedAdditions, ...chosen];
+      } else {
+        console.log(
+          `[retrieveClientData] Entity rescue found no new signal(s) for ` +
+          `${entities.join(', ')}`
+        );
+      }
+    }
+  }
+  const chosenFinal = chosen;
 
   // NEW: log every retrieved chunk with its score, so we can see exactly
   // what's passing the current 0.20 threshold before deciding whether to
   // change it.
   const effectiveFloor = Number(process.env.DI_SCORE_FLOOR) || 0.53;
-  console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays === null ? 'no filter' : bestWindowDays + 'd'} | floor=${effectiveFloor} | ${chosen.length} result(s)`);
-  chosen.forEach((r, i) => {
+  console.log(`[retrieveClientData] Query: "${question}" | window=${bestWindowDays === null ? 'no filter' : bestWindowDays + 'd'} | floor=${effectiveFloor} | ${chosenFinal.length} result(s)`);
+  chosenFinal.forEach((r, i) => {
     console.log(`  [${i + 1}] score=${r.score.toFixed(3)} | module=${r.payload.module_id} | title="${r.payload.title}"`);
     console.log(`      chunk_text: ${(r.payload.chunk_text || '(none)').slice(0, 300)}`);
   });
@@ -246,7 +422,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   // Dedupe by article/title and sort by score
   const seen = new Set();
   const deduped = [];
-  for (const r of chosen.sort((a, b) => b.score - a.score)) {
+  for (const r of [...chosenFinal].sort((a, b) => b.score - a.score)) {
     const key = r.payload.url || r.payload.title;
     if (seen.has(key)) continue;
     seen.add(key);
