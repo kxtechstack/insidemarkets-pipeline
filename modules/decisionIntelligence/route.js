@@ -159,17 +159,6 @@ const {
  * the user honestly that it widened.
  */
 async function handleList(question, clientId, industry, forceList = false) {
-  const nonUsRegion = detectNonUSGeography(question);
-  if (nonUsRegion) {
-    console.log(`[handleList] refusing non-US geography: ${nonUsRegion}`);
-    return {
-      type: 'list',
-      items: [],
-      _empty: true,
-      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
-    };
-  }
-
   const setPeek = await resolveCompanySet(question);
   if (setPeek) {
     console.log(`[handleList] detected company-set question -- delegating to handleDecision`);
@@ -272,18 +261,6 @@ async function handleList(question, clientId, industry, forceList = false) {
  * Handles an 'inference' question: client data + LLM synthesis.
  */
 async function handleInference(question, clientId, industry) {
-  const nonUsRegion = detectNonUSGeography(question);
-  if (nonUsRegion) {
-    console.log(`[handleInference] refusing non-US geography: ${nonUsRegion}`);
-    return {
-      type: 'inference',
-      report: null,
-      sources: [],
-      _empty: true,
-      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
-    };
-  }
-
   const [searchResults, customSourceResults] = await Promise.all([
     retrieveClientData(question, clientId, industry),
     retrieveCustomSourceData(question, clientId),
@@ -315,69 +292,109 @@ async function handleInference(question, clientId, industry) {
  * generic word in the question.
  */
 async function handleDecision(question, clientId, industry) {
-  const nonUsRegion = detectNonUSGeography(question);
-  if (nonUsRegion) {
-    console.log(`[handleDecision] refusing non-US geography: ${nonUsRegion}`);
-    return {
-      type: 'decision',
-      report: null,
-      sources: [],
-      chart: null,
-      chartMeta: null,
-      _empty: true,
-      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
-    };
-  }
-
   const intent = await extractIntent(question, getAllCompanies);
 
+  const nonUsRegion = detectNonUSGeography(question);
+  const isFramework =
+    intent.questionCategory === 'swot' ||
+    intent.questionCategory === 'pestle' ||
+    intent.questionCategory === 'risk_analysis' ||
+    intent.questionCategory === 'five_forces';
+
   let secRetrieval;
-  const setFilter = await resolveCompanySet(question);
-
-  // ── Guard: refuse when sector could not be resolved AND the user's term
-  // was flagged as unmatched. Prevents the "top cosmetic companies" -> top-5-
-  // by-revenue bug where an unresolved term silently became sector=null and
-  // returned the biggest US companies across all sectors.
-  if (setFilter && setFilter.sector === null && setFilter.unresolvedTerm) {
-    console.log(
-      `[handleDecision] refusing: unresolved sector term "${setFilter.unresolvedTerm}" ` +
-      `-- no sector matched even after disambiguation`
-    );
-    return {
-      type: 'decision',
-      report: null,
-      sources: [],
-      chart: null,
-      chartMeta: null,
-      _empty: true,
-      _reason: `I couldn't match "${setFilter.unresolvedTerm}" to a sector in our SEC data. Try naming a broader category (e.g. "consumer staples", "health care", "information technology").`,
-    };
-  }
-
   let coverageInfo = null;
 
-  if (setFilter) {
-    secRetrieval = await resolveCompanySetFacts(setFilter);
-    coverageInfo = secRetrieval.coverageInfo || null;
-    if (secRetrieval.facts.length > 0) {
-      intent.dataType = 'quantitative';
-      intent.questionCategory = 'comparison';
-      intent.metric = setFilter.metric;
-      intent.tickers = secRetrieval.facts.map((f) => f.ticker);
-      intent.isChartable = secRetrieval.facts.length >= 2;
-      console.log(
-        `[handleDecision] company-set resolved to ${secRetrieval.facts.length} facts ` +
-        `(sector=${setFilter.sector || 'any'}, metric=${setFilter.metric}, orderBy=${setFilter.orderBy})`
-      );
-    } else {
-      secRetrieval = intent.tickers.length > 0
-        ? await retrieveForIntent(question, intent)
-        : { chunks: [], facts: [] };
-    }
-  } else if (intent.tickers.length > 0) {
-    secRetrieval = await retrieveForIntent(question, intent);
-  } else {
+  // Case A: framework question + non-US region named.
+  // Framework questions are exempt from geography refusal. A named
+  // non-US region just means "don't use SEC" -- the framework prompt
+  // still runs on client signals + custom sources and produces a normal
+  // SWOT / PESTLE / Five Forces / Risk answer, silently.
+  if (isFramework && nonUsRegion) {
+    console.log(`[handleDecision] framework + non-US ("${nonUsRegion}") -- skipping SEC`);
     secRetrieval = { chunks: [], facts: [] };
+  } else {
+    const setFilter = await resolveCompanySet(question);
+
+    // Case B: company-set question + non-US region named.
+    // Company-set questions are purely numeric SEC lookups, so a non-US
+    // region genuinely cannot be answered. Refuse as before.
+    if (setFilter && nonUsRegion) {
+      console.log(`[handleDecision] company-set + non-US ("${nonUsRegion}") -- refusing`);
+      return {
+        type: 'decision',
+        report: null,
+        sources: [],
+        chart: null,
+        chartMeta: null,
+        _empty: true,
+        _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
+      };
+    }
+
+    // Existing guard: unresolved sector term.
+    if (setFilter && setFilter.sector === null && setFilter.unresolvedTerm) {
+      console.log(
+        `[handleDecision] refusing: unresolved sector term "${setFilter.unresolvedTerm}" ` +
+        `-- no sector matched even after disambiguation`
+      );
+      return {
+        type: 'decision',
+        report: null,
+        sources: [],
+        chart: null,
+        chartMeta: null,
+        _empty: true,
+        _reason: `I couldn't match "${setFilter.unresolvedTerm}" to a sector in our SEC data. Try naming a broader category (e.g. "consumer staples", "health care", "information technology").`,
+      };
+    }
+
+    if (setFilter) {
+      secRetrieval = await resolveCompanySetFacts(setFilter);
+      coverageInfo = secRetrieval.coverageInfo || null;
+
+      const companySetTickers = (secRetrieval.facts || []).map((f) => f.ticker);
+
+      if (isFramework) {
+        // Framework + company-set: pull SEC NARRATIVE chunks only
+        // (Item 1 / 1A / 7). Financial facts are dropped -- revenue
+        // numbers don't belong in a SWOT/PESTLE bucket and were
+        // confusing the LLM into ignoring the framework shape.
+        const tickersForChunks = companySetTickers.length > 0
+          ? companySetTickers
+          : intent.tickers;
+
+        if (tickersForChunks.length > 0) {
+          const frameworkIntent = {
+            ...intent,
+            tickers: tickersForChunks,
+            questionCategory: intent.questionCategory,
+            isNumericQuestion: false,
+          };
+          const chunksResult = await retrieveForIntent(question, frameworkIntent);
+          secRetrieval = { chunks: chunksResult.chunks, facts: [] };
+        } else {
+          secRetrieval = { chunks: [], facts: [] };
+        }
+      } else if (secRetrieval.facts.length > 0) {
+        intent.dataType = 'quantitative';
+        intent.questionCategory = 'comparison';
+        intent.metric = setFilter.metric;
+        intent.tickers = companySetTickers;
+        intent.isChartable = secRetrieval.facts.length >= 2;
+        console.log(
+          `[handleDecision] company-set resolved to ${secRetrieval.facts.length} facts ` +
+          `(sector=${setFilter.sector || 'any'}, metric=${setFilter.metric}, orderBy=${setFilter.orderBy})`
+        );
+      } else {
+        secRetrieval = intent.tickers.length > 0
+          ? await retrieveForIntent(question, intent)
+          : { chunks: [], facts: [] };
+      }
+    } else if (intent.tickers.length > 0) {
+      secRetrieval = await retrieveForIntent(question, intent);
+    } else {
+      secRetrieval = { chunks: [], facts: [] };
+    }
   }
 
   const [customSourceResults] = await Promise.all([
