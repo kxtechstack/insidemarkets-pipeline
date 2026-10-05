@@ -108,10 +108,31 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Small override list for common acronyms that need all-caps display
+const ACRONYM_OVERRIDES = {
+  'uk': 'UK',
+  'us': 'US',
+  'usa': 'USA',
+  'uae': 'UAE',
+  'eu': 'EU',
+  'emea': 'EMEA',
+  'apac': 'APAC',
+  'mena': 'MENA',
+  'latam': 'LATAM',
+  'gcc': 'GCC',
+  'brics': 'BRICS',
+  'asean': 'ASEAN',
+  'prc': 'PRC',
+  'roc': 'ROC',
+  'ksa': 'KSA',
+};
+
 function titleCase(s) {
-  return s.split(/\s+/).map(w =>
-    w.charAt(0).toUpperCase() + w.slice(1)
-  ).join(' ');
+  return s.split(/\s+/).map(w => {
+    const lower = w.toLowerCase();
+    if (ACRONYM_OVERRIDES[lower]) return ACRONYM_OVERRIDES[lower];
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).join(' ');
 }
 
 /**
