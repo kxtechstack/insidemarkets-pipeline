@@ -198,13 +198,51 @@ const ENTITY_STOPWORDS = new Set([
   'united', 'states', 'kingdom', 'europe', 'european', 'asia', 'global',
 ]);
 
-function extractNamedEntities(question) {
+// Client-scoped cache of known "organization" values (brand names, company
+// names) that appear in this client's own signals. Refreshed every 5 min.
+// Lets lowercase questions like "what updates on glossier" still trigger
+// entity rescue -- previously the extractor only caught capitalized words.
+const ORG_CACHE_TTL_MS = 5 * 60 * 1000;
+const _orgCache = new Map(); // clientId -> { orgs: [...], fetchedAt }
+
+async function getClientKnownOrgs(clientId) {
+  const cached = _orgCache.get(clientId);
+  if (cached && Date.now() - cached.fetchedAt < ORG_CACHE_TTL_MS) {
+    return cached.orgs;
+  }
+
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  const orgs = new Set();
+  try {
+    const { data } = await supabase
+      .from('market_dynamics_signals')
+      .select('organization')
+      .eq('client_id', clientId)
+      .not('organization', 'is', null)
+      .limit(500);
+    (data || []).forEach(r => {
+      if (r.organization && r.organization.length >= 3) {
+        orgs.add(r.organization.toLowerCase().trim());
+      }
+    });
+  } catch (err) {
+    console.log(`[EntityRescue] org cache fetch failed: ${err.message}`);
+  }
+
+  const list = [...orgs];
+  _orgCache.set(clientId, { orgs: list, fetchedAt: Date.now() });
+  return list;
+}
+
+async function extractNamedEntities(question, clientId = null) {
   if (!question) return [];
-  // Grab capitalized words that aren't at the start of a sentence-only
-  // context (allow "Glossier" even mid-sentence), 3+ chars, not stopwords.
-  const matches = question.match(/\b[A-Z][a-zA-Z0-9&.'-]{2,}\b/g) || [];
   const out = [];
   const seen = new Set();
+
+  // 1. Capitalized words (existing behavior)
+  const matches = question.match(/\b[A-Z][a-zA-Z0-9&.'-]{2,}\b/g) || [];
   for (const w of matches) {
     const lower = w.toLowerCase();
     if (ENTITY_STOPWORDS.has(lower)) continue;
@@ -212,6 +250,32 @@ function extractNamedEntities(question) {
     seen.add(lower);
     out.push(w);
   }
+
+  // 2. Lowercase long words that match a known org for this client
+  if (clientId) {
+    const knownOrgs = await getClientKnownOrgs(clientId);
+    if (knownOrgs.length > 0) {
+      const lowerWords = question.match(/\b[a-z][a-z0-9&.'-]{3,}\b/g) || [];
+      for (const w of lowerWords) {
+        const lower = w.toLowerCase();
+        if (seen.has(lower)) continue;
+        if (ENTITY_STOPWORDS.has(lower)) continue;
+        // exact match against known org (handles "glossier" -> "glossier")
+        if (knownOrgs.includes(lower)) {
+          seen.add(lower);
+          out.push(w);
+          continue;
+        }
+        // partial match: a known org that contains this word (handles
+        // "amorepacific" vs "amorepacific corporation")
+        if (knownOrgs.some(org => org.startsWith(lower) && org.length - lower.length <= 15)) {
+          seen.add(lower);
+          out.push(w);
+        }
+      }
+    }
+  }
+
   return out;
 }
 
@@ -454,7 +518,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   // recovers short entity questions like "What updates on Glossier?"
   // that score poorly against Qdrant chunks.
   if (chosen.length < 3) {
-    const entities = extractNamedEntities(topicQuery);
+    const entities = await extractNamedEntities(topicQuery, clientId);
     if (entities.length > 0) {
       const entityMatches = await retrieveSignalsByEntity(clientId, entities);
 
