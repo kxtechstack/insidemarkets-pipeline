@@ -215,6 +215,87 @@ function extractNamedEntities(question) {
   return out;
 }
 
+// Region-aware retrieval: when a non-US region is detected in the question
+// (via detectNonUSGeography in resolveCompanySet.js), always do an ILIKE
+// match on that region's aliases against signal_title / summary. This
+// bypasses the semantic-score floor entirely -- short questions like
+// "south korea swot analysis" embed to generic vectors that don't clear
+// the floor, but the region term itself is an exact match we can rely on.
+const REGION_ALIASES = {
+  'south korea': ['south korea', 'korea', 'seoul', 'k-beauty', 'korean'],
+  'north korea': ['north korea', 'dprk', 'pyongyang'],
+  'united kingdom': ['united kingdom', 'uk', 'britain', 'england', 'scotland', 'wales'],
+  'uk': ['uk', 'united kingdom', 'britain', 'england'],
+  'germany': ['germany', 'german', 'berlin'],
+  'france': ['france', 'french', 'paris'],
+  'japan': ['japan', 'japanese', 'tokyo'],
+  'china': ['china', 'chinese', 'beijing', 'shanghai'],
+  'india': ['india', 'indian', 'delhi', 'mumbai'],
+  'brazil': ['brazil', 'brazilian', 'sao paulo'],
+  'mexico': ['mexico', 'mexican'],
+  'indonesia': ['indonesia', 'indonesian', 'jakarta'],
+  'vietnam': ['vietnam', 'vietnamese'],
+  'european union': ['european union', 'eu', 'europe', 'european'],
+  'europe': ['europe', 'european', 'eu'],
+  'middle east': ['middle east', 'mena', 'gulf', 'uae', 'saudi'],
+  'africa': ['africa', 'african'],
+  'latin america': ['latin america', 'latam', 'south america'],
+};
+
+async function retrieveSignalsByRegion(clientId, regionTerm) {
+  if (!regionTerm) return [];
+  const key = String(regionTerm).toLowerCase().trim();
+  const aliases = REGION_ALIASES[key] || [key];
+
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+  const signalTables = [
+    { table: 'policy_signals', moduleId: POLICY_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, source_published_date, created_at, submodule_id, module_id, industry, client_id' },
+    { table: 'market_dynamics_signals', moduleId: MARKET_DYNAMICS_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, published_date, created_at, submodule_id, module_id, organization, client_id' },
+    { table: 'trend_signals', moduleId: FORWARD_OUTLOOK_MODULE_ID,
+      columns: 'id, article_id, signal_title, summary, source_published_date, created_at, submodule_id, module_id, organization, industry, client_id' },
+  ];
+
+  const results = [];
+  for (const { table, moduleId, columns } of signalTables) {
+    const orClauses = [];
+    for (const a of aliases) {
+      const escaped = a.replace(/[%_]/g, m => `\\${m}`);
+      orClauses.push(`signal_title.ilike.%${escaped}%`);
+      orClauses.push(`summary.ilike.%${escaped}%`);
+    }
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .eq('client_id', clientId)
+      .or(orClauses.join(','))
+      .limit(15);
+
+    if (error) {
+      console.log(`[RegionRescue] ${table} failed: ${error.message}`);
+      continue;
+    }
+    for (const row of data || []) {
+      results.push({
+        region_match: true,
+        module_id: row.module_id || moduleId,
+        signal_id: row.id,
+        article_id: row.article_id,
+        title: row.signal_title,
+        summary: row.summary,
+        published_date: row.source_published_date || row.published_date || row.created_at,
+        submodule_id: row.submodule_id,
+        organization: row.organization || null,
+      });
+    }
+  }
+  console.log(`[RegionRescue] region="${regionTerm}" aliases=[${aliases.join(',')}] -> ${results.length} signal(s)`);
+  return results;
+}
+
 async function retrieveSignalsByEntity(clientId, entities) {
   if (!entities || entities.length === 0) return [];
 
@@ -423,6 +504,51 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
       }
     }
   }
+    // ── Region rescue ─────────────────────────────────────────────────────
+  // When a non-US region is detected and we still don't have enough hits,
+  // do an exact ILIKE match on the region name + its aliases. This catches
+  // lowercase short queries like "south korea swot analysis" whose
+  // embeddings don't clear the semantic score floor.
+  if (chosen.length < 5) {
+    try {
+      const { detectNonUSGeography } = require('./resolveCompanySet');
+      const region = detectNonUSGeography(question);
+      if (region) {
+        const regionMatches = await retrieveSignalsByRegion(clientId, region);
+        const existingIds = new Set(
+          chosen.map(r => r.payload?.article_id || r.payload?.signal_id)
+        );
+        const additions = regionMatches.filter(m =>
+          !existingIds.has(m.article_id) && !existingIds.has(m.signal_id)
+        );
+        if (additions.length > 0) {
+          console.log(`[retrieveClientData] Region rescue added ${additions.length} signal(s) for "${region}"`);
+          const normalized = additions.map((m, idx) => ({
+            id: `region_${m.signal_id || m.article_id || idx}`,
+            score: 0.98,
+            payload: {
+              article_id: m.article_id || null,
+              signal_id: m.signal_id,
+              title: m.title,
+              summary: m.summary,
+              chunk_text: m.summary || m.title,
+              module_id: m.module_id,
+              submodule_id: m.submodule_id,
+              published_date: m.published_date,
+              source_published_date: m.published_date,
+              region_match: true,
+            },
+          }));
+          chosen = [...normalized, ...chosen];
+        } else {
+          console.log(`[retrieveClientData] Region rescue found no new signal(s) for "${region}"`);
+        }
+      }
+    } catch (err) {
+      console.log(`[retrieveClientData] Region rescue failed: ${err.message}`);
+    }
+  }
+
   const chosenFinal = chosen;
 
   // NEW: log every retrieved chunk with its score, so we can see exactly
