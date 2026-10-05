@@ -272,7 +272,7 @@ async function retrieveSignalsByRegion(clientId, regionTerm) {
       .select(columns)
       .eq('client_id', clientId)
       .or(orClauses.join(','))
-      .limit(15);
+      .limit(8);
 
     if (error) {
       console.log(`[RegionRescue] ${table} failed: ${error.message}`);
