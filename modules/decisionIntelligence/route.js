@@ -12,7 +12,7 @@ const { buildListAnswer } = require('./buildListAnswer');
 const { generateInferenceAnswer } = require('./generateInferenceAnswer');
 const { classifyQuestion } = require('./classifyQuestion');
 const { enrichSourcesWithSignalIds } = require('./enrichSources');
-const { resolveCompanySet } = require('./resolveCompanySet');
+const { resolveCompanySet, detectNonUSGeography } = require('./resolveCompanySet');
 // ── Subsector allow-lists ─────────────────────────────────────────────────
 // For the subsectors clients actually ask about, we curate the exact tickers
 // rather than trusting the LLM to guess. This eliminates the entire class of
@@ -159,7 +159,17 @@ const {
  * the user honestly that it widened.
  */
 async function handleList(question, clientId, industry, forceList = false) {
-  // Safety net -- company-set question that got routed to list.
+  const nonUsRegion = detectNonUSGeography(question);
+  if (nonUsRegion) {
+    console.log(`[handleList] refusing non-US geography: ${nonUsRegion}`);
+    return {
+      type: 'list',
+      items: [],
+      _empty: true,
+      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
+    };
+  }
+
   const setPeek = await resolveCompanySet(question);
   if (setPeek) {
     console.log(`[handleList] detected company-set question -- delegating to handleDecision`);
@@ -262,6 +272,18 @@ async function handleList(question, clientId, industry, forceList = false) {
  * Handles an 'inference' question: client data + LLM synthesis.
  */
 async function handleInference(question, clientId, industry) {
+  const nonUsRegion = detectNonUSGeography(question);
+  if (nonUsRegion) {
+    console.log(`[handleInference] refusing non-US geography: ${nonUsRegion}`);
+    return {
+      type: 'inference',
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
+    };
+  }
+
   const [searchResults, customSourceResults] = await Promise.all([
     retrieveClientData(question, clientId, industry),
     retrieveCustomSourceData(question, clientId),
@@ -293,6 +315,20 @@ async function handleInference(question, clientId, industry) {
  * generic word in the question.
  */
 async function handleDecision(question, clientId, industry) {
+  const nonUsRegion = detectNonUSGeography(question);
+  if (nonUsRegion) {
+    console.log(`[handleDecision] refusing non-US geography: ${nonUsRegion}`);
+    return {
+      type: 'decision',
+      report: null,
+      sources: [],
+      chart: null,
+      chartMeta: null,
+      _empty: true,
+      _reason: `Our financial data covers US-listed companies only. I can't answer questions about ${nonUsRegion}. Try asking about US companies instead.`,
+    };
+  }
+
   const intent = await extractIntent(question, getAllCompanies);
 
   let secRetrieval;

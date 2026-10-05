@@ -1,6 +1,145 @@
 // modules/decisionIntelligence/resolveCompanySet.js
 const { callLLM } = require('../llmClient');
 
+// ── Geographic scope guard ──────────────────────────────────────────────
+// Our financial data source is SEC filings — US-listed companies only.
+// There is no country/region column anywhere in the DB. So when a user
+// asks about companies "in India" / "in the UK" / "in Europe", any answer
+// using US companies is wrong. Detect non-US geography and refuse.
+//
+// Rule:
+//   1. If the question contains ANY US term → allow (return null)
+//   2. If a non-US country/region/currency term is present → refuse
+//   3. Otherwise → allow
+//
+// The list covers ~195 countries + common aliases + regions + currency
+// hints. About 250 strings — trivial in memory. Better to over-refuse
+// than to answer a Bhutan question with US companies.
+
+const US_TERMS = [
+  'us', 'usa', 'u.s.', 'u.s.a.', 'united states', 'united states of america',
+  'america', 'american', 'americans',
+  'wall street', 'silicon valley',
+];
+
+const NON_US_COUNTRIES = [
+  'afghanistan','albania','algeria','andorra','angola','antigua',
+  'argentina','armenia','aruba','australia','austria','azerbaijan',
+  'bahamas','bahrain','bangladesh','barbados','belarus','belgium',
+  'belize','benin','bermuda','bhutan','bolivia','bosnia',
+  'botswana','brazil','brunei','bulgaria','burkina faso','burundi',
+  'cambodia','cameroon','canada','cape verde','cayman islands',
+  'central african republic','chad','chile','china','colombia',
+  'comoros','congo','costa rica',"cote d'ivoire",'croatia','cuba',
+  'cyprus','czechia','czech republic',
+  'denmark','djibouti','dominica','dominican republic',
+  'ecuador','egypt','el salvador','equatorial guinea','eritrea',
+  'estonia','eswatini','ethiopia',
+  'fiji','finland','france',
+  'gabon','gambia','georgia','germany','ghana','greece','grenada',
+  'guatemala','guinea','guinea-bissau','guyana',
+  'haiti','honduras','hong kong','hungary',
+  'iceland','india','indonesia','iran','iraq','ireland','israel','italy',
+  'jamaica','japan','jordan',
+  'kazakhstan','kenya','kiribati','kosovo','kuwait','kyrgyzstan',
+  'laos','latvia','lebanon','lesotho','liberia','libya',
+  'liechtenstein','lithuania','luxembourg',
+  'macau','madagascar','malawi','malaysia','maldives','mali','malta',
+  'marshall islands','mauritania','mauritius','mexico','micronesia',
+  'moldova','monaco','mongolia','montenegro','morocco','mozambique',
+  'myanmar',
+  'namibia','nauru','nepal','netherlands','new zealand','nicaragua',
+  'niger','nigeria','north korea','north macedonia','norway',
+  'oman',
+  'pakistan','palau','palestine','panama','papua new guinea','paraguay',
+  'peru','philippines','poland','portugal',
+  'qatar',
+  'romania','russia','rwanda',
+  'saint kitts','saint lucia','saint vincent','samoa','san marino',
+  'sao tome','saudi arabia','senegal','serbia','seychelles',
+  'sierra leone','singapore','slovakia','slovenia','solomon islands',
+  'somalia','south africa','south korea','south sudan','spain',
+  'sri lanka','sudan','suriname','sweden','switzerland','syria',
+  'taiwan','tajikistan','tanzania','thailand','timor-leste','togo',
+  'tonga','trinidad','tunisia','turkey','turkmenistan','tuvalu',
+  'uganda','ukraine','united arab emirates','united kingdom',
+  'uruguay','uzbekistan',
+  'vanuatu','vatican','venezuela','vietnam',
+  'yemen',
+  'zambia','zimbabwe',
+];
+
+const NON_US_ALIASES = [
+  'uk','britain','great britain','england','scotland','wales',
+  'northern ireland','holland','deutschland','espana','italia',
+  'uae','ksa','saudi','emirates','korea','s. korea','n. korea',
+  'prc','roc','russian federation','czech','burma','ivory coast',
+  'swaziland','vatican city','holy see',
+];
+
+const NON_US_REGIONS = [
+  'europe','european','eu','emea','asia','asian','apac',
+  'southeast asia','south asia','east asia','central asia',
+  'middle east','mena','africa','african','sub-saharan africa',
+  'latin america','latam','south america','central america',
+  'caribbean','nordics','nordic','scandinavia','scandinavian',
+  'balkans','balkan','baltic','baltic states',
+  'oceania','pacific islands','commonwealth',
+  'gcc','brics','asean',
+];
+
+const NON_US_CURRENCIES = [
+  'euro','euros','eur','pound','pounds','gbp','sterling',
+  'yen','jpy','yuan','renminbi','rmb','cny',
+  'rupee','rupees','inr','won','krw',
+  'real','brl','peso','pesos','mxn','ars',
+  'dirham','aed','riyal','sar','ringgit','myr',
+  'baht','thb','rupiah','idr','rand','zar',
+];
+
+const NON_US_TERMS = [
+  ...NON_US_COUNTRIES,
+  ...NON_US_ALIASES,
+  ...NON_US_REGIONS,
+  ...NON_US_CURRENCIES,
+];
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function titleCase(s) {
+  return s.split(/\s+/).map(w =>
+    w.charAt(0).toUpperCase() + w.slice(1)
+  ).join(' ');
+}
+
+/**
+ * Returns the name of the first non-US geography detected in the question,
+ * or null if the question is US-only / neutral.
+ *
+ * @param {string} question
+ * @returns {string|null}
+ */
+function detectNonUSGeography(question) {
+  if (!question) return null;
+  const q = String(question).toLowerCase();
+
+  for (const term of US_TERMS) {
+    const pattern = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
+    if (pattern.test(q)) return null;
+  }
+
+  for (const term of NON_US_TERMS) {
+    const pattern = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
+    if (pattern.test(q)) {
+      return titleCase(term);
+    }
+  }
+
+  return null;
+}
+// ── end geographic scope guard ─────────────────────────────────────────
 const VALID_SECTORS = new Set([
   'Information Technology', 'Financials', 'Health Care', 'Energy',
   'Industrials', 'Consumer Discretionary', 'Consumer Staples',
@@ -240,4 +379,4 @@ async function resolveCompanySet(question) {
   return { sector, metric, orderBy, limit, unresolvedTerm, subsectorTerm };
 }
 
-module.exports = { resolveCompanySet };
+module.exports = { resolveCompanySet, detectNonUSGeography };
