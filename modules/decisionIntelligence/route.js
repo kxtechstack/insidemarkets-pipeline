@@ -159,23 +159,6 @@ const {
  * the user honestly that it widened.
  */
 async function handleList(question, clientId, industry, forceList = false) {
-  // Framework questions (SWOT / PESTLE / Five Forces / Risk Analysis) are
-  // always decision-class -- they need the framework prompt, not a list.
-  // Delegate immediately so a non-US region silently skips SEC and uses
-  // client signals + custom sources instead of failing on empty client data.
-  const qLower = (question || '').toLowerCase();
-  const looksLikeFramework =
-    qLower.includes('swot') ||
-    qLower.includes('pestle') || qLower.includes('pestel') ||
-    qLower.includes('five forces') || qLower.includes('5 forces') ||
-    qLower.includes('porter') ||
-    qLower.includes('risk analysis') || qLower.includes('risk categor');
-
-  if (looksLikeFramework) {
-    console.log('[handleList] framework question detected -- delegating to handleDecision');
-    return await handleDecision(question, clientId, industry);
-  }
-
   const setPeek = await resolveCompanySet(question);
   if (setPeek) {
     console.log(`[handleList] detected company-set question -- delegating to handleDecision`);
