@@ -573,7 +573,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
   // do an exact ILIKE match on the region name + its aliases. This catches
   // lowercase short queries like "south korea swot analysis" whose
   // embeddings don't clear the semantic score floor.
-  if (chosen.length < 5) {
+  if (chosen.length === 0) {
     try {
       const { detectNonUSGeography } = require('./resolveCompanySet');
       const region = detectNonUSGeography(question);
@@ -586,10 +586,12 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
           !existingIds.has(m.article_id) && !existingIds.has(m.signal_id)
         );
         if (additions.length > 0) {
-          console.log(`[retrieveClientData] Region rescue added ${additions.length} signal(s) for "${region}"`);
-          const normalized = additions.map((m, idx) => ({
+          const TOP_REGION_SIGNALS = 6;
+          const finalAdditions = additions.slice(0, TOP_REGION_SIGNALS);
+          console.log(`[retrieveClientData] Region rescue added ${finalAdditions.length} signal(s) for "${region}" (capped from ${additions.length})`);
+          const normalized = finalAdditions.map((m, idx) => ({
             id: `region_${m.signal_id || m.article_id || idx}`,
-            score: 0.98,
+            score: 0.45,
             payload: {
               article_id: m.article_id || null,
               signal_id: m.signal_id,
@@ -603,7 +605,7 @@ async function retrieveClientData(question, clientId, industry, limitPerModule =
               region_match: true,
             },
           }));
-          chosen = [...normalized, ...chosen];
+          chosen = [...normalized, ...chosen].sort((a, b) => b.score - a.score);
         } else {
           console.log(`[retrieveClientData] Region rescue found no new signal(s) for "${region}"`);
         }
