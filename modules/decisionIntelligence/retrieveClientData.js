@@ -180,6 +180,22 @@ const ENTITY_STOPWORDS = new Set([
   'about', 'regarding', 'concerning',
   // Industry words that would match too broadly
   'industry', 'market', 'sector', 'company', 'companies', 'business',
+  // ── Generic business / regulatory terminology ────────────────────────
+  // These are capitalized mid-sentence in normal writing but are NOT
+  // proper nouns — so they shouldn't trigger entity rescue.
+  'excise', 'duty', 'duties', 'tax', 'taxes', 'taxation',
+  'product', 'products', 'service', 'services',
+  'regulation', 'regulations', 'regulatory', 'compliance', 'law', 'laws',
+  'legislation', 'legislative', 'policy', 'policies', 'rule', 'rules',
+  'act', 'acts', 'bill', 'bills', 'amendment', 'amendments',
+  'procedure', 'procedures', 'process', 'processes', 'step', 'steps',
+  'requirement', 'requirements', 'deadline', 'deadlines',
+  'cosmetic', 'cosmetics', 'beauty', 'skincare', 'haircare', 'makeup',
+  'funding', 'investment', 'investments', 'venture', 'capital',
+  'revenue', 'profit', 'income', 'sales', 'earnings',
+  'report', 'reports', 'study', 'studies', 'analysis', 'research',
+  'government', 'ministry', 'agency', 'authority', 'commission',
+  'united', 'states', 'kingdom', 'europe', 'european', 'asia', 'global',
 ]);
 
 function extractNamedEntities(question) {
