@@ -4,13 +4,52 @@ const exa = new Exa(process.env.EXA_API_KEY);
 
 const daysAgoISO = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
+// ---------- Ambiguous slash-date disambiguation ----------
+// JS Date() assumes MM/DD/YYYY (US). Many of our sources (Malaysia, UK,
+// India, EU, etc.) use DD/MM/YYYY. When both day and month are <=12,
+// the format is genuinely ambiguous -- if reading it as MM/DD produces
+// a future date but DD/MM would not, assume DD/MM was intended.
+const disambiguateSlashDate = (rawDate) => {
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(.*)$/.exec(rawDate.trim());
+  if (!match) return rawDate;
+
+  const [, first, second, year, rest] = match;
+  const f = parseInt(first, 10);
+  const s = parseInt(second, 10);
+
+  // Not ambiguous if either part is >12 (must be the day)
+  if (f > 12 && s <= 12) return rawDate; // DD/MM already
+  if (s > 12 && f <= 12) return `${second}/${first}/${year}${rest}`; // MM/DD -> swap to DD/MM reading... actually need care
+  if (f <= 12 && s <= 12) {
+    // Truly ambiguous -- test both interpretations
+    const asMMDD = new Date(`${first}/${second}/${year}${rest}`);
+    const asDDMM = new Date(`${second}/${first}/${year}${rest}`);
+    const now = Date.now();
+
+    const mmddIsFuture = asMMDD.getTime() > now;
+    const ddmmIsFuture = asDDMM.getTime() > now;
+
+    if (mmddIsFuture && !ddmmIsFuture) {
+      // MM/DD reads as future, DD/MM doesn't -- prefer DD/MM
+      return `${second}/${first}/${year}${rest}`;
+    }
+  }
+
+  return rawDate;
+};
+
 // ---------- Published-date sanitization ----------
 const FUTURE_DATE_GRACE_MS = 2 * 24 * 60 * 60 * 1000;
 
 const sanitizePublishedDate = (rawDate, source, url) => {
   if (!rawDate) return null;
 
-  const parsed = new Date(rawDate);
+  const disambiguated = disambiguateSlashDate(rawDate);
+  if (disambiguated !== rawDate) {
+    console.log(`[DateSanitize] Reinterpreted ambiguous date "${rawDate}" as "${disambiguated}" (DD/MM vs MM/DD)`);
+  }
+
+  const parsed = new Date(disambiguated);
   if (isNaN(parsed.getTime())) {
     console.log(`[DateSanitize] Unparseable publishedDate "${rawDate}" from ${source} (${url}) -- dropping`);
     return null;
@@ -24,6 +63,55 @@ const sanitizePublishedDate = (rawDate, source, url) => {
   return parsed.toISOString();
 };
 
+const cheerio = require('cheerio');
+
+const extractDateFromHtml = async (url) => {
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; KXBot/1.0)' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+
+    const html = await res.text();
+    const $ = cheerio.load(html);
+
+    let found = null;
+    $('script[type="application/ld+json"]').each((_, el) => {
+      if (found) return;
+      try {
+        const data = JSON.parse($(el).contents().text());
+        const nodes = Array.isArray(data) ? data : [data, ...(data['@graph'] || [])];
+        for (const node of nodes) {
+          if (node?.datePublished) { found = node.datePublished; break; }
+        }
+      } catch { /* skip malformed JSON-LD */ }
+    });
+    if (found) return found;
+
+    const metaSelectors = [
+      'meta[property="article:published_time"]',
+      'meta[name="article:published_time"]',
+      'meta[name="publish-date"]',
+      'meta[name="publishdate"]',
+      'meta[name="date"]',
+      'meta[property="og:article:published_time"]',
+      'meta[itemprop="datePublished"]',
+    ];
+    for (const sel of metaSelectors) {
+      const content = $(sel).attr('content');
+      if (content) return content;
+    }
+
+    const timeAttr = $('time[datetime]').first().attr('datetime');
+    if (timeAttr) return timeAttr;
+
+    return null;
+  } catch (err) {
+    console.log(`[DateFallback] HTML fetch failed for ${url}: ${err.message}`);
+    return null;
+  }
+};
 
 
 // ---------- EXA ----------
@@ -145,10 +233,24 @@ const fetchArticles = async (source, promptText, lookbackDays = 90) => {
   }
   const articles = await fetcher(promptText, lookbackDays);
 
-  return articles.map(article => ({
-    ...article,
-    publishedDate: sanitizePublishedDate(article.publishedDate, source, article.url),
-  }));
+  const results = [];
+  for (const article of articles) {
+    let publishedDate = sanitizePublishedDate(article.publishedDate, source, article.url);
+
+    if (!publishedDate) {
+      const htmlDate = await extractDateFromHtml(article.url);
+      if (htmlDate) {
+        publishedDate = sanitizePublishedDate(htmlDate, `${source}+html-fallback`, article.url);
+        if (publishedDate) {
+          console.log(`[DateFallback] Recovered date for ${article.url} via HTML: ${publishedDate}`);
+        }
+      }
+    }
+
+    results.push({ ...article, publishedDate });
+  }
+
+  return results;
 };
 
-module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles, sanitizePublishedDate };
+module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles, sanitizePublishedDate, extractDateFromHtml };
