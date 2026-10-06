@@ -17,6 +17,7 @@
 
 const { callLLM } = require('../llmClient');
 const { buildNumericAnswer } = require('./buildNumericAnswer');
+const { designSchema } = require('./schemaDesigner');
 const { sanitizeQuestionForLLM } = require('./secRetrieval');
 const { retrieveClientData } = require('./retrieveClientData');
 const { resolveSecUrls } = require('./secUrlResolver');
@@ -700,13 +701,29 @@ async function generateQualitativeReport(question, intent, chunks, facts, client
 
   const { text: context, sourceManifest } = buildNumberedContext(chunks, facts, clientResults, customSourceResults);
   const questionForLlm = sanitizeQuestionForLLM(question, intent.unresolvedMentions || []);
-  const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}`;
+
+  // ── Dynamic schema design (Call 1) ───────────────────────────────────
+  const schema = await designSchema(questionForLlm);
+
+  let dynamicInstructions = '';
+  if (schema) {
+    const headingsBlock = schema.sections
+      .map((s, i) => {
+        const pts = s.points.length ? '\n' + s.points.map(p => `  - ${p}`).join('\n') : '';
+        return `${i + 1}. ${s.heading}${pts}`;
+      })
+      .join('\n\n');
+
+    dynamicInstructions = `\n\nHEADINGS TO USE (exact, in this order):\n\n${headingsBlock}\n`;
+  }
+
+  const userPrompt = `Context:\n${context}\n\nQuestion: ${questionForLlm}${dynamicInstructions}`;
 
   let raw = '';
   try {
     raw = await callLLM(
       [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      { temperature: 0.1, max_tokens: 2500, timeout: 180000 }
+      { temperature: 0.1, max_tokens: schema ? 3000 : 2500, timeout: 180000 }
     );
   } catch (err) {
     return { report: { title: 'Report unavailable', bodyText: `LLM call failed: ${err.message}` }, sources: [] };
@@ -970,12 +987,13 @@ async function generateAnswer(question, intent, chunks, facts, clientId = null, 
     }
   }
 
-  // --- 2. Framework path ---
-  if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) {
-    return generateFrameworkReport(question, intent, chunks, facts, clientResults, customSourceResults);
-  }
-
-  // --- 3. Qualitative / open-ended path ---
+  // --- 2. All non-numeric paths (framework + qualitative) now go through
+  //         the dynamic schema-designer flow. Framework questions like
+  //         SWOT/PESTLE still work because the schema designer produces
+  //         appropriate headings for them (Strengths/Weaknesses/... for
+  //         SWOT, Political/Economic/... for PESTLE, etc.) -- we just
+  //         render them via the dynamic sections[] shape instead of the
+  //         fixed bodyText format.
   return generateQualitativeReport(question, intent, chunks, facts, clientResults, customSourceResults);
 }
 

@@ -13,6 +13,7 @@
 const { callLLM } = require('../llmClient');
 const { createClient } = require('@supabase/supabase-js');
 const { stripCitationsDeep, stripCitationMarkers } = require('./generateAnswer');
+const { designSchema } = require('./schemaDesigner');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const INFERENCE_PROMPT_ID = 'decision_intelligence_inference_v2';
@@ -337,7 +338,26 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
     };
   }
 
-  const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
+  // ── Dynamic schema design (Call 1) ───────────────────────────────────
+  // designSchema returns 4-6 tailored headings for this question, or null.
+  // We append them as a "HEADINGS TO USE" block on the user message. The
+  // DB prompt (decision_intelligence_inference_v2) knows how to detect
+  // that block and switch formats.
+  const schema = await designSchema(question);
+
+  let dynamicInstructions = '';
+  if (schema) {
+    const headingsBlock = schema.sections
+      .map((s, i) => {
+        const pts = s.points.length ? '\n' + s.points.map(p => `  - ${p}`).join('\n') : '';
+        return `${i + 1}. ${s.heading}${pts}`;
+      })
+      .join('\n\n');
+
+    dynamicInstructions = `\n\nHEADINGS TO USE (exact, in this order):\n\n${headingsBlock}\n`;
+  }
+
+  const userPrompt = `Context:\n${context}\n\nQuestion: ${question}${dynamicInstructions}`;
 
   let raw = '';
   try {
@@ -346,7 +366,7 @@ async function generateInferenceAnswer(question, searchResults, customSourceResu
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      { temperature: 0.1, max_tokens: 1800, timeout: 180000 }
+      { temperature: 0.1, max_tokens: schema ? 2500 : 1800, timeout: 180000 }
     );
   } catch (err) {
     return {
