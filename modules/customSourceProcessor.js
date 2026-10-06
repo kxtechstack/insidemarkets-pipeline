@@ -190,17 +190,8 @@ const processCustomSource = async (source, extracted) => {
 
     console.log(`[CustomSourceProcessor] "${source.source_name}" -> ${rawChunks.length} raw chunks to synthesize`);
 
-    // Step 2 -- synthesize EACH chunk into original wording.
-    //
-    // This preserves the copyright-safety property (no verbatim third-party
-    // text is ever stored) while still covering the entire document instead
-    // of just the first 5,000 chars. Numbers, product names, and metrics
-    // are preserved exactly by the existing synthesis prompt.
-    const synthesizedChunks = [];
-    for (let i = 0; i < rawChunks.length; i++) {
-      const rewritten = await synthesizeContent(extracted.title, rawChunks[i]);
-      synthesizedChunks.push(rewritten);
-    }
+        // Step 2 -- store raw chunks (no synthesis; rewriting happens at answer time)
+    const synthesizedChunks = rawChunks;
 
     const contentId = uuidv4();
 
