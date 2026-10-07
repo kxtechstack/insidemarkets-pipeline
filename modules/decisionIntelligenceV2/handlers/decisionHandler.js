@@ -112,15 +112,18 @@ const ITEM_MAX_CHARS = 1200;
 function buildContext(clientHits, customHits) {
   const parts = [];
 
-  const matched   = clientHits.filter((h) => h._matched);
-  const unmatched = clientHits.filter((h) => !h._matched);
-  const clientPool = [...matched, ...unmatched].slice(0, MAX_CLIENT_CHUNKS);
+  const secHits    = clientHits.filter((h) => h._sec).slice(0, 4);
+  const clientOnly = clientHits.filter((h) => !h._sec);
+  const matched    = clientOnly.filter((h) => h._matched);
+  const unmatched  = clientOnly.filter((h) => !h._matched);
+  const clientPool = [...secHits, ...matched, ...unmatched].slice(0, MAX_CLIENT_CHUNKS);
 
   for (const h of clientPool) {
     const title = h.title || 'Untitled';
     let text = h.chunk_text || '';
     if (text.length > ITEM_MAX_CHARS) text = text.slice(0, ITEM_MAX_CHARS) + '…';
-    parts.push(`[CLIENT] ${title}\n${text}`);
+    const label = h._sec ? '[SEC FILING]' : '[CLIENT SIGNAL]';
+parts.push(`${label} ${title}\n${text}`);
   }
 
   const customPool = (customHits || []).slice(0, MAX_CUSTOM_CHUNKS);
@@ -367,6 +370,22 @@ function collectSources(clientHits, customSourceHits) {
 
   const seenArticles = new Set();
   for (const h of ordered) {
+    if (h._sec) {
+      const sec = h._sec_payload || {};
+      const key = `sec:${sec.ticker}:${sec.fiscal_year}:${sec.item_code}`;
+      if (seenArticles.has(key)) continue;
+      seenArticles.add(key);
+      out.push({
+        type: 'sec',
+        ticker: sec.ticker || null,
+        fiscal_year: sec.fiscal_year || null,
+        item_code: sec.item_code || null,
+        title: h.title,
+        url: null,
+        matched: true,
+      });
+      continue;
+    }
     if (!h.article_id) continue;
     if (seenArticles.has(h.article_id)) continue;
     seenArticles.add(h.article_id);
