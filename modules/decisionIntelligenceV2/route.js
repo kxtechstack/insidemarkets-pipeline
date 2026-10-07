@@ -114,6 +114,17 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     };
   }
 
+  // SEC region fallback (non-US + SEC-numeric) — return directly.
+  // Either a list of region+topic-matching signals, or a no_data payload.
+  if (secResult && secResult.mode === 'region_fallback' && secResult.payload) {
+    console.log(`[V2 route] SEC region fallback returned directly (type=${secResult.payload.type})`);
+    return {
+      routerResult,
+      handlerResult: secResult.payload,
+      payload: secResult.payload,
+    };
+  }
+
   // SEC framework chunks (if any) will be merged into the decision context
   // further down. Held in `secResult.injectChunks`.
   const secInjectChunks = (secResult && secResult.mode === 'framework' && Array.isArray(secResult.injectChunks))

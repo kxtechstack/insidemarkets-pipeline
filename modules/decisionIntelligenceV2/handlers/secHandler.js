@@ -16,22 +16,25 @@
  *      narrative chunks and returns them as `injectChunks` so V2's
  *      decisionHandler merges them into its writer context.
  *
- * Non-US geography: if a question names a non-US region and is SEC-shaped,
- * this returns null silently. V2 answers it from client data / custom
- * sources instead. No hard refusal is issued by this handler.
+ * Non-US geography:
+ *   · If the question names a non-US region and is SEC-numeric-shaped
+ *     (ranking / financial metric / company-set), we NEVER fall through.
+ *     Instead we look for hits that mention the region AND match the
+ *     question's topic. If we find enough, return a list. Otherwise
+ *     return no_data.
+ *   · If the question names a non-US region but is NOT SEC-numeric (e.g.
+ *     a SWOT for a non-US market), we fall through to V2 as before.
  */
 
-const { detectNonUSGeography } = require('../sec/resolveCompanySet');
-const { resolveCompanySet } = require('../sec/resolveCompanySet');
+const { detectNonUSGeography, resolveCompanySet } = require('../sec/resolveCompanySet');
 const {
   resolveCompanySetFacts,
-  selectCompaniesForSubsector,
-  findAllowlistTickers,
 } = require('../sec/subsectorResolver');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('../sec/secRetrieval');
 const { buildNumericAnswer } = require('../sec/buildNumericAnswer');
 const { decideChartFormat, renderChart } = require('../sec/chartPipeline');
-const { resolveSecUrls } = require('../sec/secUrlResolver');
+const { getRegionAliases } = require('../sec/regionAliases');
+const { containsPhrase, normalizeConcepts } = require('../retrieval/filterListHits');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Module IDs
@@ -48,45 +51,243 @@ const NUMERIC_KEYWORDS = [
   'what was the', 'capital expenditure', 'r&d spending',
 ];
 
+// Threshold for the region fallback: how many topic+region-matching hits
+// we need before we surface them as a list. Below this we return no_data.
+const REGION_MIN_HITS = 3;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Shape detection
 // ─────────────────────────────────────────────────────────────────────────
-
-/**
- * Returns one of:
- *   'company_set'   → run company-set numeric path
- *   'numeric'       → run named-ticker numeric path
- *   'framework'     → pull SEC chunks, inject into V2 decisionHandler
- *   null            → not SEC-shaped; V2 handles normally
- */
 function detectSecShape(question, routerResult, intent) {
   const q = String(question || '').toLowerCase();
 
-  // Company-set query (from router's classification)
   if (routerResult && routerResult.is_company_set_query === true) {
     return 'company_set';
   }
 
-  // A named ticker must be present for the other two paths
   const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
   if (!hasTickers) return null;
 
-  // Framework + ticker
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) return 'framework';
 
-  // Numeric + ticker
   const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
   if (looksNumeric) return 'numeric';
 
-  // Ticker named but nothing else specific — treat as framework-style
-  // so we still surface SEC narrative chunks.
   if (intent.questionCategory === 'qualitative') return 'framework';
 
   return null;
 }
 
+/**
+ * Is the question unambiguously asking for SEC-grade numeric data?
+ *
+ * Broad on purpose — a false positive here just costs one extra filter
+ * pass and produces an honest list or no_data response. A false negative
+ * means V2 gets to hallucinate a ranked answer from news signals.
+ */
+function isSecNumericQuestion(question, routerResult, intent) {
+  if (routerResult && routerResult.is_company_set_query === true) return true;
+
+  const q = String(question || '').toLowerCase();
+
+  // Ranking phrases
+  const hasRanking =
+    /\btop\s+\d+\b/.test(q) ||
+    /\brank(ed|ing)?\b/.test(q) ||
+    /\bhighest\b|\blargest\b|\bbiggest\b|\bbest\b\s+by\b/.test(q) ||
+    /\bcompare\b.*\bby\b/.test(q);
+
+  // Financial metric phrases
+  const hasMetric = NUMERIC_KEYWORDS.some((k) => q.includes(k)) ||
+    /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q);
+
+  if (hasRanking && hasMetric) return true;
+
+  // Named ticker + numeric keyword is also SEC-numeric
+  const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
+  if (hasTickers && hasMetric) return true;
+
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
-// Chart helper — same shape chartPipeline.js expects
+// Region fallback helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Deterministic filter: returns hits whose title or chunk_text mentions
+ * the region (or one of its aliases) AND matches at least one of the
+ * question's concepts.
+ *
+ * If concepts is empty, we only require the region match — otherwise a
+ * router failure would turn a valid region answer into no_data.
+ */
+function findRegionHits(hits, region, concepts) {
+  const aliases = getRegionAliases(region);
+  if (!aliases.length) return { passing: [], regionMatchCount: 0 };
+
+  const cleanConcepts = normalizeConcepts(concepts);
+  const requireTopic = cleanConcepts.length > 0;
+
+  let regionMatchCount = 0;
+  const passing = [];
+
+  for (const h of hits || []) {
+    const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+
+    // Region check
+    const regionMatch = aliases.some((a) => containsPhrase(haystack, a));
+    if (!regionMatch) continue;
+    regionMatchCount++;
+
+    // Topic check (skip if no concepts available)
+    if (requireTopic) {
+      const topicMatch = cleanConcepts.some((c) => containsPhrase(haystack, c));
+      if (!topicMatch) continue;
+    }
+
+    passing.push(h);
+  }
+
+  return { passing, regionMatchCount };
+}
+
+/**
+ * Builds the response payload when a non-US SEC-numeric question is
+ * detected. Either surfaces region+topic-matching hits as a list, or
+ * returns no_data with an explanatory message.
+ */
+async function buildRegionFallbackPayload(region, passingHits, regionMatchCount, question) {
+  const { getVerifiedSuggestions } = require('../decisionIntelligence/suggestionEngine');
+
+  if (passingHits.length >= REGION_MIN_HITS) {
+    // Surface the hits as a list with an explanatory message.
+    // Reuse listHandler to produce clean items from the filtered hits.
+    const { buildListItems } = require('./listHandler');
+
+    let items = [];
+    try {
+      const result = await buildListItems(passingHits);
+      items = result.items || [];
+    } catch (err) {
+      console.log(`[secHandler:region] buildListItems failed: ${err.message}`);
+    }
+
+    if (items.length >= REGION_MIN_HITS) {
+      return {
+        type: 'list',
+        items,
+        message:
+          `I can't rank companies by revenue for ${region} — our SEC financial data ` +
+          `covers US-listed companies only. Here's what our collected signals show ` +
+          `for ${region} instead.`,
+      };
+    }
+  }
+
+  // Not enough signal — return no_data
+  let suggestions = [];
+  try {
+    suggestions = await getVerifiedSuggestions(null, 4);
+  } catch (err) {
+    console.log(`[secHandler:region] suggestions failed: ${err.message}`);
+  }
+  if (!suggestions || !suggestions.length) {
+    suggestions = [
+      'What are the major policy changes affecting my industry?',
+      'What recent market activity is happening in my sector?',
+    ];
+  }
+
+  let message;
+  if (regionMatchCount === 0) {
+    message =
+      `I can't rank companies by revenue for ${region} — our SEC financial data ` +
+      `covers US-listed companies only — and I don't have any ${region}-specific ` +
+      `signals that answer this. Try dropping the country, or asking about ${region} ` +
+      `market activity instead.`;
+  } else {
+    message =
+      `I can't rank companies by revenue for ${region} — our SEC financial data ` +
+      `covers US-listed companies only — and the ${region} signals I have don't ` +
+      `directly answer this. Try dropping the country, or asking about ${region} ` +
+      `market activity instead.`;
+  }
+
+  return {
+    type: 'list',
+    items: [],
+    no_data: true,
+    message,
+    suggestions,
+  };
+}
+
+/**
+ * Top-level region fallback. Retrieves client + custom hits, filters by
+ * region + topic, and produces a payload. Wrapped so any failure is
+ * caught by the outer try in buildSecAnswer.
+ */
+async function buildRegionFallback(question, region, clientId, industry, routerResult) {
+  const { retrieveClientSignals } = require('../retrieval/clientSignalsRetrieval');
+  const { retrieveCustomSourceHits } = require('../retrieval/customSourceRetrieval');
+
+  const concepts = [
+    ...((routerResult && routerResult.concept_keywords) || []),
+    ...((routerResult && routerResult.entity_mentions) || []),
+  ];
+
+  // Fetch both sides in parallel — same retrieval V2 would use.
+  let clientHits = [];
+  let customHits = [];
+  try {
+    const [clientRetr, customRetr] = await Promise.all([
+      retrieveClientSignals(question, clientId, industry, {
+        precomputedUnderstanding: routerResult,
+      }),
+      retrieveCustomSourceHits(question, clientId),
+    ]);
+    clientHits = clientRetr?.hits || [];
+    customHits = customRetr || [];
+  } catch (err) {
+    console.log(`[secHandler:region] retrieval failed: ${err.message}`);
+  }
+
+  // Normalize custom hits to the same shape used by buildListItems —
+  // they carry their fields under .payload.
+  const normalizedCustom = customHits.map((c, idx) => ({
+    id: c.id || `custom_${idx}`,
+    score: c.score || 0,
+    module_id: '__custom__',
+    module_name: 'Uploaded Document',
+    title: c.payload?.source_name || c.payload?.title || 'Uploaded document',
+    chunk_text: c.payload?.chunk_text || '',
+    article_id: null,
+    published_date: null,
+    submodule_id: null,
+    _matched: true,
+    _custom: true,
+    _custom_payload: c.payload || {},
+  }));
+
+  const combined = [...clientHits, ...normalizedCustom];
+
+  const { passing, regionMatchCount } = findRegionHits(combined, region, concepts);
+
+  console.log(
+    `[secHandler:region] region="${region}" concepts=[${concepts.join(', ')}] ` +
+    `regionHits=${regionMatchCount} topicHits=${passing.length} ` +
+    `passing=${passing.length}/${REGION_MIN_HITS} → ${passing.length >= REGION_MIN_HITS ? 'LIST' : 'NO_DATA'}`
+  );
+
+  return {
+    mode: 'region_fallback',
+    payload: await buildRegionFallbackPayload(region, passing, regionMatchCount, question),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Chart helper
 // ─────────────────────────────────────────────────────────────────────────
 async function tryBuildChart(intent, facts) {
   if (!Array.isArray(facts) || facts.length < 2) return { chart: null, chartMeta: null };
@@ -96,8 +297,6 @@ async function tryBuildChart(intent, facts) {
       const chart = await renderChart(display.chartData);
       return { chart, chartMeta: { chartType: display.chartType } };
     }
-    // decideChartFormat returned 'text' but we have multiple values —
-    // force a sensible default so the user always gets a visual.
     const tickers = [...new Set(facts.map((f) => f.ticker))];
     const years = [...new Set(facts.map((f) => f.fiscal_year))].sort();
 
@@ -148,7 +347,6 @@ async function runCompanySetPath(question, intent) {
   const filter = await resolveCompanySet(question);
   if (!filter) return null;
 
-  // Unresolved sector term → not our problem, fall through to V2
   if (filter.sector === null && filter.unresolvedTerm) {
     console.log(`[secHandler] company-set unresolved: "${filter.unresolvedTerm}" — falling through`);
     return null;
@@ -162,13 +360,9 @@ async function runCompanySetPath(question, intent) {
     return null;
   }
 
-  // Enrich facts with human-readable company names
   const enrichedFacts = await enrichFactsWithNames(facts);
-
-  // Build the text answer (no LLM)
   const bodyText = buildNumericAnswer(enrichedFacts);
 
-  // Sources come straight from resolveCompanySetFacts (already SEC URLs)
   const sources = (factsResult.sources || []).map((s) => ({
     type: 'sec',
     title: s.title,
@@ -178,7 +372,6 @@ async function runCompanySetPath(question, intent) {
     item_code: s.item_code,
   }));
 
-  // Chart
   const chartIntent = {
     ...intent,
     dataType: 'quantitative',
@@ -223,12 +416,8 @@ async function runNumericPath(question, intent) {
   }
 
   const enrichedFacts = await enrichFactsWithNames(facts);
-
   const bodyText = buildNumericAnswer(enrichedFacts);
-
-  // Build sources from fact + filings
   const sources = await buildNumericSources(enrichedFacts);
-
   const { chart, chartMeta } = await tryBuildChart(intent, enrichedFacts);
 
   console.log(
@@ -264,8 +453,6 @@ async function runFrameworkPath(question, intent) {
     return null;
   }
 
-  // Convert SEC chunks into the V2 hit shape so buildDecisionAnswer's
-  // buildContext() consumes them the same way it consumes client hits.
   const injectChunks = chunks.map((c) => ({
     id: c.qdrant_point_id || null,
     score: 1.0,
@@ -329,7 +516,6 @@ async function buildNumericSources(facts) {
 
   const tickers = [...new Set(facts.map((f) => f.ticker))];
 
-  // Look up company + CIK
   const { data: companies } = await supabase
     .from('companies')
     .select('ticker, company_name, cik')
@@ -341,7 +527,6 @@ async function buildNumericSources(facts) {
     nameByTicker[c.ticker] = c.company_name;
   });
 
-  // Look up filings by filing_id
   const filingIds = [...new Set(facts.map((f) => f.filing_id).filter(Boolean))];
   const filingById = {};
   if (filingIds.length) {
@@ -383,14 +568,9 @@ async function buildNumericSources(facts) {
 // Main entry
 // ─────────────────────────────────────────────────────────────────────────
 async function buildSecAnswer({ question, routerResult, clientId, industry }) {
-  // Everything is wrapped in try/catch. Any failure returns null so V2
-  // runs unmodified.
   try {
     if (!question || typeof question !== 'string' || !question.trim()) return null;
 
-    // Extract intent (tickers, years, framework detection) via the old
-    // deterministic code path. No LLM beyond what extractIntent itself
-    // does — which is nothing (pure lookup + fuzzy match).
     let intent;
     try {
       intent = await extractIntent(question, getAllCompanies);
@@ -399,7 +579,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
-    // Detect SEC shape
     const shape = detectSecShape(question, routerResult, intent);
     if (!shape) {
       console.log(`[secHandler] not SEC-shaped — falling through`);
@@ -408,25 +587,28 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
 
     console.log(`[secHandler] shape=${shape} tickers=[${(intent.tickers || []).join(',')}]`);
 
-    // Non-US geography guard.
-    // If the question names a non-US region AND is SEC-shaped, drop SEC
-    // silently. V2 will answer from client data / custom sources.
+    // ── Non-US geography handling ──────────────────────────────────────
     const nonUs = detectNonUSGeography(question);
+
     if (nonUs) {
-      console.log(`[secHandler] non-US geography "${nonUs}" — dropping SEC, V2 will handle`);
+      // Is this an SEC-numeric question? Ranking, financial metric, etc.
+      if (isSecNumericQuestion(question, routerResult, intent)) {
+        // SEC-numeric + non-US → never fall through. Look for
+        // region+topic-matching hits, or return no_data.
+        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → region fallback`);
+        return await buildRegionFallback(question, nonUs, clientId, industry, routerResult);
+      }
+
+      // Non-US but not SEC-numeric (framework, narrative, list).
+      // Let V2 handle it — it can answer from client signals.
+      console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
       return null;
     }
 
-    // Dispatch
-    if (shape === 'company_set') {
-      return await runCompanySetPath(question, intent);
-    }
-    if (shape === 'numeric') {
-      return await runNumericPath(question, intent);
-    }
-    if (shape === 'framework') {
-      return await runFrameworkPath(question, intent);
-    }
+    // ── Dispatch ───────────────────────────────────────────────────────
+    if (shape === 'company_set') return await runCompanySetPath(question, intent);
+    if (shape === 'numeric')     return await runNumericPath(question, intent);
+    if (shape === 'framework')   return await runFrameworkPath(question, intent);
 
     return null;
 
@@ -439,6 +621,10 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
 module.exports = {
   buildSecAnswer,
   detectSecShape,
+  isSecNumericQuestion,
+  findRegionHits,
+  buildRegionFallback,
+  buildRegionFallbackPayload,
   runCompanySetPath,
   runNumericPath,
   runFrameworkPath,
