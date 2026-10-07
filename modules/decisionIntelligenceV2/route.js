@@ -187,7 +187,18 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     ...(routerResult.entity_mentions || []),
   ];
 
-  const keptClient = filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
+  // Framework questions (SWOT / PESTLE / Five Forces / Risk) are STRUCTURAL —
+  // they apply a template to whatever data exists; they don't ask "does
+  // this hit mention the framework name". The concept filter is guaranteed
+  // to drop all client hits on those questions because no client signal
+  // literally says "swot" / "pestle" / etc. So we skip the filter for
+  // framework questions and let the writer decide relevance.
+  const isFrameworkQuestion = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(question);
+
+  const keptClient = isFrameworkQuestion
+    ? clientRetr.hits
+    : filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
+
   const keptCustom = customHits; // custom sources always kept
 
   // Merge SEC chunks (if the SEC handler produced any) into the client
