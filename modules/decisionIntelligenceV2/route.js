@@ -1,17 +1,16 @@
 /**
  * modules/decisionIntelligenceV2/route.js
  *
- * V2 HTTP route. Mirrors /decision-intelligence/chat but uses the V2
- * pipeline. Both V1 and V2 routes coexist — V1 is untouched.
+ * V2 HTTP route. All three question types (list / inference / decision)
+ * use the same deterministic concept-matching filter. No LLM filter.
  *
- * LIST pipeline (deterministic):
- *   router → client-signal retrieval → filterListHits → list handler
- *   - No custom sources
- *   - No SEC
- *   - No LLM filter
+ * LIST pipeline:
+ *   router → client-signal retrieval → deterministic filter → list handler
+ *   (client signals only — no custom sources)
  *
- * INFERENCE / DECISION pipeline (LLM-assisted):
- *   router → client + custom retrieval → LLM relevance filter → handler
+ * INFERENCE / DECISION pipeline:
+ *   router → client + custom retrieval → deterministic filter → handler
+ *   (custom sources always kept)
  *
  * Reuses the existing chatHistory for conversation persistence.
  */
@@ -28,8 +27,7 @@ const {
 const { route } = require('./routing/router');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
-const { filterRelevantChunks } = require('./retrieval/relevanceFilter');
-const { filterListHits } = require('./retrieval/filterListHits');
+const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
 const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
@@ -42,7 +40,22 @@ const {
   buildDecisionResponse,
 } = require('./responseBuilder');
 
-const MIN_CHUNK_SCORE = 80;
+// ─────────────────────────────────────────────────────────────────────────
+// Deterministic filter for inference / decision.
+//
+// Same concept normalization as list. Keeps any hit where at least one
+// clean concept appears in title OR body. If no concepts survive cleaning,
+// keeps all hits (nothing to filter on).
+// ─────────────────────────────────────────────────────────────────────────
+function filterForInferenceOrDecision(clientHits, concepts) {
+  const clean = normalizeConcepts(concepts);
+  if (clean.length === 0) return clientHits;
+
+  return clientHits.filter((h) => {
+    const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+    return clean.some((c) => containsPhrase(haystack, c));
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Pipeline runner
@@ -71,22 +84,13 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 
   // ── 2. Non market-intelligence short-circuits ───────────────────────
   if (routerResult.intent === 'greeting') {
-    return {
-      routerResult,
-      payload: await buildGreetingResponse({ routerResult, clientId, industry }),
-    };
+    return { routerResult, payload: await buildGreetingResponse({ routerResult, clientId, industry }) };
   }
   if (routerResult.intent === 'off_topic') {
-    return {
-      routerResult,
-      payload: await buildOffTopicResponse({ routerResult, clientId, industry }),
-    };
+    return { routerResult, payload: await buildOffTopicResponse({ routerResult, clientId, industry }) };
   }
   if (routerResult.intent === 'clarification') {
-    return {
-      routerResult,
-      payload: await buildClarificationResponse({ routerResult, clientId, industry }),
-    };
+    return { routerResult, payload: await buildClarificationResponse({ routerResult, clientId, industry }) };
   }
 
   // ── 3. LIST — deterministic, client signals only ────────────────────
@@ -95,14 +99,16 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       precomputedUnderstanding: routerResult,
     });
 
-    const filtered = filterListHits(
-      clientRetr.hits,
-      routerResult.concept_keywords || []
-    );
+    const conceptsForFilter = [
+      ...(routerResult.concept_keywords || []),
+      ...(routerResult.entity_mentions || []),
+    ];
+
+    const filtered = filterListHits(clientRetr.hits, conceptsForFilter);
 
     console.log(
       `[V2 route] list filter: kept ${filtered.length}/${clientRetr.hits.length} ` +
-      `(concepts=[${(routerResult.concept_keywords || []).join(', ')}])`
+      `(concepts=[${conceptsForFilter.join(', ')}])`
     );
 
     if (filtered.length === 0) {
@@ -119,7 +125,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     return { routerResult, handlerResult, payload };
   }
 
-  // ── 4. INFERENCE / DECISION — full retrieval + LLM filter ───────────
+  // ── 4. INFERENCE / DECISION — full retrieval + deterministic filter ─
   const [clientRetr, customHits] = await Promise.all([
     retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: routerResult,
@@ -127,58 +133,46 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     retrieveCustomSourceHits(question, clientId),
   ]);
 
-  const filterResult = await filterRelevantChunks(
-    question,
-    clientRetr.hits,
-    customHits,
-    { minScore: MIN_CHUNK_SCORE }
-  );
+  const conceptsForFilter = [
+    ...(routerResult.concept_keywords || []),
+    ...(routerResult.entity_mentions || []),
+  ];
 
-  const keptClient = filterResult.keptClientHits;
-  const keptCustom = filterResult.keptCustomHits;
+  const keptClient = filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
+  const keptCustom = customHits; // custom sources always kept
+
   const hasMaterial = keptClient.length + keptCustom.length > 0;
 
   console.log(
-    `[V2 route] ${routerResult.type} filter: kept client=${keptClient.length} custom=${keptCustom.length} ` +
-    `(minScore=${MIN_CHUNK_SCORE}, filterRan=${filterResult.filterRan})`
+    `[V2 route] ${routerResult.type} filter: kept client=${keptClient.length}/${clientRetr.hits.length} ` +
+    `custom=${keptCustom.length} (concepts=[${conceptsForFilter.join(', ')}])`
   );
 
-  // No material cleared the threshold → no-data
   if (!hasMaterial) {
-    console.log(`[V2 route] no chunk cleared threshold — returning no-data`);
-
     if (routerResult.type === 'inference') {
       const payload = await buildInferenceResponse({
-        handlerResult: {
-          _empty: true,
-          _reason: 'retrieved content did not meet the relevance threshold',
-        },
+        handlerResult: { _empty: true, _reason: 'no relevant content matched this question' },
         clientId,
       });
-      return { routerResult, payload, filterResult };
+      return { routerResult, payload };
     }
-
     const payload = await buildDecisionResponse({
-      handlerResult: {
-        _empty: true,
-        _reason: 'retrieved content did not meet the relevance threshold',
-      },
+      handlerResult: { _empty: true, _reason: 'no relevant content matched this question' },
       clientId,
     });
-    return { routerResult, payload, filterResult };
+    return { routerResult, payload };
   }
 
-  // ── Inference ───────────────────────────────────────────────────────
   if (routerResult.type === 'inference') {
     const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
-    return { routerResult, handlerResult, payload, filterResult };
+    return { routerResult, handlerResult, payload };
   }
 
-  // ── Decision ────────────────────────────────────────────────────────
+  // decision
   const handlerResult = await buildDecisionAnswer(question, keptClient, keptCustom);
   const payload = await buildDecisionResponse({ handlerResult, clientId });
-  return { routerResult, handlerResult, payload, filterResult };
+  return { routerResult, handlerResult, payload };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -257,7 +251,6 @@ function registerDecisionIntelligenceV2Route(app) {
     }
   });
 
-  // ── Conversation endpoints — reuse same tables as V1 ─────────────────
   app.get('/decision-intelligence-v2/conversations', async (req, res) => {
     try {
       const { userId } = req.query;

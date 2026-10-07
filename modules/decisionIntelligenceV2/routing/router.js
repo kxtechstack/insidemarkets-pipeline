@@ -71,7 +71,15 @@ If intent is NOT "market_intelligence", put a short friendly reply in
                 FRAMEWORKS or COMPARISONS. Examples:
                 "SWOT analysis", "PESTLE", "five forces",
                 "should we enter market X", "compare companies by revenue",
-                "top 5 companies by metric", "how should we price against X"
+                "top 5 companies by metric", "how should we price against X",
+                "what's our competitive position against X",
+                "how should we approach X",
+                "should we invest in X",
+                "should we prioritize X",
+                "what's our strategy for X",
+                "risk analysis for X",
+                "how should we respond to X",
+                "how do we position against X"
 
 When unsure between list and inference, prefer "list".
 When unsure between inference and decision, prefer "inference".

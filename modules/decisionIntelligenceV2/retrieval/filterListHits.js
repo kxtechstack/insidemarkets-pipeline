@@ -1,13 +1,17 @@
 /**
  * modules/decisionIntelligenceV2/retrieval/filterListHits.js
  *
- * Deterministic list filter. No LLM.
+ * Deterministic filter for list, inference, and decision questions.
+ * No LLM. No drift.
  *
- * Split multi-word concepts into individual words, drop common filler
- * words, then keep any hit where AT LEAST ONE cleaned concept appears in
- * title or chunk_text (case-insensitive, word-boundary).
+ * For each hit, keeps it if at least one cleaned concept appears in
+ * title or chunk_text (case-insensitive, plural-tolerant, word-boundary).
  *
- * If no concepts survive cleaning, keep all hits.
+ * Cleaning rules:
+ *   - split multi-word concepts into individual words
+ *   - drop common filler words ("industry", "update", "trends", etc.)
+ *   - drop words under 3 chars
+ *   - dedupe
  */
 
 const FILLER_CONCEPTS = new Set([
@@ -65,9 +69,12 @@ function normalizeConcepts(concepts) {
   return [...out];
 }
 
+/**
+ * List filter — keeps any hit where at least one cleaned concept appears
+ * in title or chunk_text. If no concepts survive cleaning, keeps all hits.
+ */
 function filterListHits(hits, concepts) {
   if (!Array.isArray(hits) || hits.length === 0) return [];
-
   const clean = normalizeConcepts(concepts);
   if (clean.length === 0) return hits;
 
@@ -77,4 +84,9 @@ function filterListHits(hits, concepts) {
   });
 }
 
-module.exports = { filterListHits, containsPhrase, phraseVariants, normalizeConcepts };
+module.exports = {
+  filterListHits,
+  containsPhrase,
+  phraseVariants,
+  normalizeConcepts,
+};

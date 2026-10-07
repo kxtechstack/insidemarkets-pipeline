@@ -3,13 +3,13 @@
  *
  * Full-pipeline tracer. Shows every stage of the V2 pipeline for one question:
  *   1. Router
- *   2. Retrieval (client signals, custom sources only for inference/decision)
- *   2b. Filter — deterministic for list, LLM-based for inference/decision
+ *   2. Retrieval (client signals + custom sources)
+ *   2b. Filter — deterministic concept matching for all question types
  *   3. Handler
  *   4. Sources
  *
  *   node scripts\di-v2-trace.js --q "your question"
- *   node scripts\di-v2-trace.js --q "..." --type list|inference|decision
+ *   node scripts\di-v2-trace.js --q "..." --client <uuid> --industry "Cosmetics"
  *
  * Env:
  *   DI_V2_TRACE_VERBOSE=1   print full chunk text (no truncation)
@@ -20,8 +20,7 @@ require('dotenv').config();
 const { route } = require('../modules/decisionIntelligenceV2/routing/router');
 const { retrieveClientSignals } = require('../modules/decisionIntelligenceV2/retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('../modules/decisionIntelligenceV2/retrieval/customSourceRetrieval');
-const { filterRelevantChunks } = require('../modules/decisionIntelligenceV2/retrieval/relevanceFilter');
-const { filterListHits } = require('../modules/decisionIntelligenceV2/retrieval/filterListHits');
+const { filterListHits, normalizeConcepts, containsPhrase } = require('../modules/decisionIntelligenceV2/retrieval/filterListHits');
 const { buildListItems } = require('../modules/decisionIntelligenceV2/handlers/listHandler');
 const { buildInferenceAnswer } = require('../modules/decisionIntelligenceV2/handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('../modules/decisionIntelligenceV2/handlers/decisionHandler');
@@ -31,7 +30,6 @@ const SUB  = '─'.repeat(90);
 
 const VERBOSE = process.env.DI_V2_TRACE_VERBOSE === '1';
 const CHUNK_LIMIT = VERBOSE ? 5000 : 400;
-const MIN_CHUNK_SCORE = 80;
 
 function parseArgs(argv) {
   const args = { question: null, client: null, industry: null, type: null };
@@ -62,6 +60,16 @@ function subHeader(title) {
   console.log('\n' + SUB);
   console.log(` ${title}`);
   console.log(SUB);
+}
+
+// Deterministic filter for inference / decision — mirrors route.js
+function filterForInferenceOrDecision(clientHits, concepts) {
+  const clean = normalizeConcepts(concepts);
+  if (clean.length === 0) return clientHits;
+  return clientHits.filter((h) => {
+    const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+    return clean.some((c) => containsPhrase(haystack, c));
+  });
 }
 
 async function main() {
@@ -175,67 +183,39 @@ async function main() {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  stageHeader('2b', routerResult.type === 'list'
-    ? 'Filter (deterministic — concept in title or body)'
-    : 'Filter (LLM — batched relevance audit)');
+  stageHeader('2b', 'Filter (deterministic — concept in title or body)');
 
   const tFilter = Date.now();
+  const conceptsForFilter = [
+    ...(routerResult.concept_keywords || []),
+    ...(routerResult.entity_mentions || []),
+  ];
 
-  let filterResult;
-
+  let keptClient, keptCustom;
   if (routerResult.type === 'list') {
-    const concepts = routerResult.concept_keywords || [];
-    const filtered = filterListHits(clientRetr.hits, concepts);
-
-    filterResult = {
-      keptClientHits: filtered,
-      keptCustomHits: [],
-      verdicts: clientRetr.hits.map((h, i) => {
-        const matched = filtered.includes(h);
-        return {
-          index: i + 1,
-          kind: 'client',
-          label: `[CLIENT] ${h.title || 'Untitled'}${h.module_name ? ' | ' + h.module_name : ''}`,
-          relevant: matched,
-          score: matched ? 100 : 0,
-          reason: matched ? 'concept matched in title or body' : 'no concept matched',
-        };
-      }),
-      filterRan: true,
-    };
+    keptClient = filterListHits(clientRetr.hits, conceptsForFilter);
+    keptCustom = [];
   } else {
-    filterResult = await filterRelevantChunks(
-      args.question,
-      clientRetr.hits,
-      customHits,
-      { minScore: MIN_CHUNK_SCORE }
-    );
+    keptClient = filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
+    keptCustom = customHits;
   }
 
-  const filterMs = Date.now() - tFilter;
-  console.log(` filterRan:  ${filterResult.filterRan}`);
-  console.log(` kept client: ${filterResult.keptClientHits.length}/${clientRetr.hits.length}`);
-  console.log(` kept custom: ${filterResult.keptCustomHits.length}/${customHits.length}`);
-  console.log(` (${filterMs}ms)`);
+  console.log(` normalized concepts: [${normalizeConcepts(conceptsForFilter).join(', ')}]`);
+  console.log(` kept client: ${keptClient.length}/${clientRetr.hits.length}`);
+  console.log(` kept custom: ${keptCustom.length}/${customHits.length}`);
+  console.log(` (${Date.now() - tFilter}ms)`);
 
-  subHeader('Verdicts');
-  if (filterResult.verdicts.length === 0) {
-    console.log(' (no verdicts)');
-  } else {
-    filterResult.verdicts.forEach((v) => {
-      const flag = v.relevant ? '✓ KEEP' : '✗ DROP';
-      console.log(` [${String(v.index).padStart(2)}] ${flag}  score=${v.score ?? '?'}  | ${v.kind} | ${v.label}`);
-      if (v.reason) console.log(`      reason: ${v.reason}`);
-    });
-  }
+  subHeader('Verdicts (client)');
+  clientRetr.hits.forEach((h, i) => {
+    const kept = keptClient.includes(h);
+    console.log(` [${String(i + 1).padStart(2)}] ${kept ? '✓ KEEP' : '✗ DROP'} | ${h.title}`);
+  });
 
-  const filteredClient = filterResult.keptClientHits;
-  const filteredCustom = filterResult.keptCustomHits;
-  const hasMaterial = filteredClient.length + filteredCustom.length > 0;
+  const hasMaterial = keptClient.length + keptCustom.length > 0;
 
   // ─────────────────────────────────────────────────────────────────────
   stageHeader(3, 'Handler');
-  console.log(` Input: client=${filteredClient.length}, custom=${filteredCustom.length} (hasMaterial=${hasMaterial})`);
+  console.log(` Input: client=${keptClient.length}, custom=${keptCustom.length} (hasMaterial=${hasMaterial})`);
 
   let handlerResult;
 
@@ -250,7 +230,7 @@ async function main() {
 
   if (routerResult.type === 'list') {
     const t2 = Date.now();
-    handlerResult = await buildListItems(filteredClient);
+    handlerResult = await buildListItems(keptClient);
     console.log(` items:          ${handlerResult.items.length}`);
     console.log(` matched:        ${handlerResult.matchedCount}`);
     console.log(` un-matched:     ${handlerResult.unmatchedCount}`);
@@ -266,7 +246,7 @@ async function main() {
 
   } else if (routerResult.type === 'inference') {
     const t2 = Date.now();
-    handlerResult = await buildInferenceAnswer(args.question, filteredClient, filteredCustom);
+    handlerResult = await buildInferenceAnswer(args.question, keptClient, keptCustom);
     console.log(` empty:          ${handlerResult._empty ? 'yes' : 'no'}`);
     if (handlerResult._empty) {
       console.log(` reason:         ${handlerResult._reason}`);
@@ -282,7 +262,7 @@ async function main() {
 
   } else if (routerResult.type === 'decision') {
     const t2 = Date.now();
-    handlerResult = await buildDecisionAnswer(args.question, filteredClient, filteredCustom);
+    handlerResult = await buildDecisionAnswer(args.question, keptClient, keptCustom);
     console.log(` empty:          ${handlerResult._empty ? 'yes' : 'no'}`);
     if (handlerResult._empty) {
       console.log(` reason:         ${handlerResult._reason}`);
