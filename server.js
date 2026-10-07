@@ -21,6 +21,7 @@ const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
 const { startStaleJobWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
+const { registerDecisionIntelligenceV2Route } = require('./modules/decisionIntelligenceV2/route');
 const { registerDecisionIntelligenceRoute } = require('./modules/decisionIntelligence/route');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
@@ -1059,6 +1060,7 @@ app.get('/daily-snapshot-latest/:clientId', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 registerDecisionIntelligenceRoute(app);
+registerDecisionIntelligenceV2Route(app);
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
