@@ -2,10 +2,18 @@
  * modules/decisionIntelligenceV2/route.js
  *
  * V2 HTTP route. Mirrors /decision-intelligence/chat but uses the V2
- * router + handlers. Both V1 and V2 routes coexist — V1 is untouched.
+ * pipeline. Both V1 and V2 routes coexist — V1 is untouched.
  *
- * Reuses the existing chatHistory for conversation persistence so users
- * keep one unified history when they switch between V1 and V2.
+ * LIST pipeline (deterministic):
+ *   router → client-signal retrieval → filterListHits → list handler
+ *   - No custom sources
+ *   - No SEC
+ *   - No LLM filter
+ *
+ * INFERENCE / DECISION pipeline (LLM-assisted):
+ *   router → client + custom retrieval → LLM relevance filter → handler
+ *
+ * Reuses the existing chatHistory for conversation persistence.
  */
 
 const {
@@ -20,6 +28,8 @@ const {
 const { route } = require('./routing/router');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
+const { filterRelevantChunks } = require('./retrieval/relevanceFilter');
+const { filterListHits } = require('./retrieval/filterListHits');
 const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
@@ -32,11 +42,13 @@ const {
   buildDecisionResponse,
 } = require('./responseBuilder');
 
+const MIN_CHUNK_SCORE = 80;
+
 // ─────────────────────────────────────────────────────────────────────────
-// Pipeline runner — orchestration of router → retrieval → handler
+// Pipeline runner
 // ─────────────────────────────────────────────────────────────────────────
 async function runV2Pipeline({ question, clientId, industry, forcedType }) {
-  // 1. Route (unless the frontend forced a type)
+  // ── 1. Route ────────────────────────────────────────────────────────
   let routerResult;
   if (forcedType) {
     const valid = ['list', 'inference', 'decision'];
@@ -57,7 +69,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     routerResult = await route(question, industry);
   }
 
-  // 2. Non market-intelligence short-circuits
+  // ── 2. Non market-intelligence short-circuits ───────────────────────
   if (routerResult.intent === 'greeting') {
     return {
       routerResult,
@@ -77,7 +89,37 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     };
   }
 
-  // 3. Market intelligence — retrieve once (client + custom)
+  // ── 3. LIST — deterministic, client signals only ────────────────────
+  if (routerResult.type === 'list') {
+    const clientRetr = await retrieveClientSignals(question, clientId, industry, {
+      precomputedUnderstanding: routerResult,
+    });
+
+    const filtered = filterListHits(
+      clientRetr.hits,
+      routerResult.concept_keywords || []
+    );
+
+    console.log(
+      `[V2 route] list filter: kept ${filtered.length}/${clientRetr.hits.length} ` +
+      `(concepts=[${(routerResult.concept_keywords || []).join(', ')}])`
+    );
+
+    if (filtered.length === 0) {
+      const payload = await buildListResponse({
+        handlerResult: { items: [] },
+        clientId,
+        industry,
+      });
+      return { routerResult, handlerResult: { items: [] }, payload };
+    }
+
+    const handlerResult = await buildListItems(filtered);
+    const payload = await buildListResponse({ handlerResult, clientId, industry });
+    return { routerResult, handlerResult, payload };
+  }
+
+  // ── 4. INFERENCE / DECISION — full retrieval + LLM filter ───────────
   const [clientRetr, customHits] = await Promise.all([
     retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: routerResult,
@@ -85,24 +127,58 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     retrieveCustomSourceHits(question, clientId),
   ]);
 
-  // 4. Dispatch to handler
-  let handlerResult;
-  if (routerResult.type === 'list') {
-    handlerResult = await buildListItems(clientRetr.hits);
-    const payload = await buildListResponse({ handlerResult, clientId, industry });
-    return { routerResult, handlerResult, payload };
+  const filterResult = await filterRelevantChunks(
+    question,
+    clientRetr.hits,
+    customHits,
+    { minScore: MIN_CHUNK_SCORE }
+  );
+
+  const keptClient = filterResult.keptClientHits;
+  const keptCustom = filterResult.keptCustomHits;
+  const hasMaterial = keptClient.length + keptCustom.length > 0;
+
+  console.log(
+    `[V2 route] ${routerResult.type} filter: kept client=${keptClient.length} custom=${keptCustom.length} ` +
+    `(minScore=${MIN_CHUNK_SCORE}, filterRan=${filterResult.filterRan})`
+  );
+
+  // No material cleared the threshold → no-data
+  if (!hasMaterial) {
+    console.log(`[V2 route] no chunk cleared threshold — returning no-data`);
+
+    if (routerResult.type === 'inference') {
+      const payload = await buildInferenceResponse({
+        handlerResult: {
+          _empty: true,
+          _reason: 'retrieved content did not meet the relevance threshold',
+        },
+        clientId,
+      });
+      return { routerResult, payload, filterResult };
+    }
+
+    const payload = await buildDecisionResponse({
+      handlerResult: {
+        _empty: true,
+        _reason: 'retrieved content did not meet the relevance threshold',
+      },
+      clientId,
+    });
+    return { routerResult, payload, filterResult };
   }
 
+  // ── Inference ───────────────────────────────────────────────────────
   if (routerResult.type === 'inference') {
-    handlerResult = await buildInferenceAnswer(question, clientRetr.hits, customHits);
+    const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
-    return { routerResult, handlerResult, payload };
+    return { routerResult, handlerResult, payload, filterResult };
   }
 
-  // decision
-  handlerResult = await buildDecisionAnswer(question, clientRetr.hits, customHits);
+  // ── Decision ────────────────────────────────────────────────────────
+  const handlerResult = await buildDecisionAnswer(question, keptClient, keptCustom);
   const payload = await buildDecisionResponse({ handlerResult, clientId });
-  return { routerResult, handlerResult, payload };
+  return { routerResult, handlerResult, payload, filterResult };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -126,7 +202,6 @@ function registerDecisionIntelligenceV2Route(app) {
         });
       }
 
-      // Create or resume conversation
       let conversationId = incomingConversationId;
       if (!conversationId) {
         conversationId = await createConversation({
@@ -138,7 +213,6 @@ function registerDecisionIntelligenceV2Route(app) {
 
       await appendMessage({ conversationId, role: 'user', content: question });
 
-      // Run the pipeline
       let result;
       try {
         result = await runV2Pipeline({
@@ -154,7 +228,6 @@ function registerDecisionIntelligenceV2Route(app) {
 
       const { payload, routerResult } = result;
 
-      // Persist assistant message
       const assistantContent =
         payload.type === 'list'
           ? `List: ${payload.items?.length ?? 0} items`
@@ -172,7 +245,6 @@ function registerDecisionIntelligenceV2Route(app) {
         console.log(`[V2 route] failed to persist assistant message: ${err.message}`);
       }
 
-      // Response
       return res.json({
         ...payload,
         conversationId,
@@ -185,7 +257,7 @@ function registerDecisionIntelligenceV2Route(app) {
     }
   });
 
-  // ── Conversation endpoints — reuse same tables as V1 ──────────────────
+  // ── Conversation endpoints — reuse same tables as V1 ─────────────────
   app.get('/decision-intelligence-v2/conversations', async (req, res) => {
     try {
       const { userId } = req.query;

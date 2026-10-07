@@ -1,18 +1,28 @@
 /**
  * modules/decisionIntelligenceV2/routing/router.js
  *
- * STAGE 2 (unified, clean) — single LLM call decides everything.
+ * STAGE 2 (unified) — single LLM call classifies the user's question.
  *
- * DESIGN PRINCIPLE:
+ * Produces:
+ *   intent, type, time_constraint, entity_mentions, concept_keywords,
+ *   is_company_set_query, primary_intent
+ *
+ * Key design principle:
  *   Code enforces SHAPE. The prompt enforces CONTENT.
  *
- * The only content-level corrections in code:
- *   - stripIndustryName: removes the exact industry string from concepts/entities
- *   - normalizeTimeConstraint: uses the user's own phrase as ground truth
+ * Only two post-LLM corrections live in code:
+ *   - stripIndustryName() — removes the exact industry string passed in
+ *   - normalizeTimeConstraint() — uses the user's phrase as ground truth
+ *
+ * NOTE ON PROMPTS-IN-CODE: prompt lives in code during Stage 2. Moves to
+ * public.prompts at Stage 6 cutover.
  */
 
 const { callLLM } = require('../../llmClient');
 
+// ─────────────────────────────────────────────────────────────────────────
+// TODO (Stage 6): move to DB under id 'di_v2_router_v1'
+// ─────────────────────────────────────────────────────────────────────────
 const ROUTER_PROMPT = `You are a classifier for a market intelligence chat assistant.
 
 The user has asked a question. Analyze it and return structured metadata
@@ -46,24 +56,18 @@ FIELD RULES
 - "market_intelligence" = a real business/market/finance question
 
 If intent is NOT "market_intelligence", put a short friendly reply in
-"primary_intent" that the assistant can say back to the user. You may leave
-other fields at their default values (empty arrays, present: false,
-type: "list").
+"primary_intent" that the assistant can say back to the user.
 
 --- type --- (only matters when intent = market_intelligence)
 - "list"      = user wants a LIST of items. Examples:
                 "list recent funding rounds", "what are the new regulations",
                 "any VC investments", "what's happening in my market"
-- "inference" = user wants an EXPLANATION or ANALYSIS of their own data.
-                Short answer, prose. Examples:
+- "inference" = user wants an EXPLANATION or ANALYSIS. Examples:
                 "how has the market changed", "why is X happening",
                 "tell me about Y", "explain the impact of Z",
                 "what updates on Glossier",
-                "What is the new X?" / "What is X?" (when X is a specific
-                thing like a tax, regulation, rate, or event — the user
-                wants an explanation, not a list of articles),
-                "What does X do?" / "What happened with X?"
-- "decision"  = user wants a DEEP analysis that requires STRUCTURED
+                "What is the new X?" / "What is X?" (specific thing)
+- "decision"  = user wants a DEEP analysis requiring STRUCTURED
                 FRAMEWORKS or COMPARISONS. Examples:
                 "SWOT analysis", "PESTLE", "five forces",
                 "should we enter market X", "compare companies by revenue",
@@ -81,7 +85,6 @@ CRITICAL: value and unit MUST AGREE.
   "recent"         → { "value": 30, "unit": "days", "phrase": "recent" }
   "latest"         → { "value": 14, "unit": "days", "phrase": "latest" }
   "past quarter"   → { "value": 90, "unit": "days", "phrase": "past quarter" }
-  "last 3 months"  → { "value": 90, "unit": "days", "phrase": "last 3 months" }
   "today"          → { "value": 1,  "unit": "days", "phrase": "today" }
   "yesterday"      → { "value": 2,  "unit": "days", "phrase": "yesterday" }
 
@@ -91,7 +94,7 @@ Never use a value greater than what fits in one year for that unit:
 
 --- entity_mentions ---
 Proper nouns ONLY: company names, brand names, regulator names,
-jurisdiction names, city names. Preserve the exact spelling.
+jurisdiction names, city names.
 
 NEVER include:
   ✗ Industry names (Cosmetics, Beauty, Healthcare, Logistics, Automobile,
@@ -108,23 +111,68 @@ Real examples: "Glossier", "Estée Lauder", "L'Oréal", "FDA",
 --- concept_keywords ---
 3-6 keywords. Each keyword must be 1-2 WORDS.
 
-USE LITERAL VOCABULARY that would appear in matching articles.
-Include the words the user used, plus the most common synonyms that
-journalists/business writers use for that topic:
+Concept keywords are the search terms used to find relevant chunks in the
+client's data. They should be the SPECIFIC TOPIC WORDS that would appear
+in the TITLE of a relevant article.
 
+CRITICAL RULES:
+
+1. DO NOT include GENERIC SYNONYMS that could apply to many different topics.
+   These words are NEVER useful as concepts because almost every article
+   contains them:
+     ✗ compliance, requirements, obligations, rules, laws
+     ✗ updates, update, news, recent
+     ✗ activity, activities
+     ✗ information, data
+     ✗ trend, trends, growth, development, changes
+     ✗ industry, sector, business, company, companies, market
+
+2. DO NOT include a single word from the question that is not the TOPIC
+   (e.g. "list", "recent", "show", "get", "find", "latest").
+
+3. DO NOT include industry names or time words.
+
+4. DO include the specific topic vocabulary and its closest LITERAL
+   variants that would appear in article titles.
+
+WORKED EXAMPLES:
+
+  Q: "List recent funding rounds in our Cosmetics industry"
+  GOOD: ["funding", "round", "raise"]
+  BAD:  ["funding", "rounds", "industry"]  ← "industry" is generic filler
+
+  Q: "Any new AML compliance requirements?"
+  GOOD: ["aml", "anti-money laundering"]
+  BAD:  ["aml", "compliance", "requirements"]  ← "compliance" and "requirements" are filler
+
+  Q: "List recent licensing updates"
+  GOOD: ["licensing", "license", "permit"]
+  BAD:  ["licensing", "update"]  ← "update" is filler
+
+  Q: "What are the latest tech trends in K-beauty?"
+  GOOD: ["k-beauty", "technology", "innovation"]
+  BAD:  ["tech", "trends", "k-beauty"]  ← "trends" is filler
+
+  Q: "What are the major policy changes in the last week?"
+  GOOD: ["regulation", "policy", "compliance", "reform"]
+       (here "compliance" IS specific because the question is about
+        policy, not about compliance in general)
+  BAD:  ["policy", "changes", "week"]
+
+  Q: "What is the New Excise Duty on Vaping Products?"
+  GOOD: ["excise duty", "vaping product", "duty", "tax"]
+  BAD:  ["excise", "new", "product"]
+
+  Q: "Give me all recent acquisitions in beauty"
+  GOOD: ["acquisition", "merger", "takeover"]
+  BAD:  ["acquisitions", "beauty", "recent"]
+
+Include synonyms that JOURNALISTS use for the topic:
   M&A topics        → merger, acquisition, consolidation, takeover
-  Funding topics    → funding, investment, raise, financing, round
+  Funding topics    → funding, raise, investment, financing, round
   Regulation topics → regulation, policy, compliance, rule, reform
   Layoff topics     → layoff, workforce, reduction
   Launch topics     → launch, introduced, unveiled
-
-DO NOT include:
-  ✗ abstract labels (activity, sector, industry, business, market, news,
-    updates, changes, developments, brands, companies, items, things,
-    reports, trends, growth)
-  ✗ time words ("last week", "recent", "today")
-  ✗ question words ("what", "how", "which", "list")
-  ✗ 3+ word phrases
 
 --- is_company_set_query ---
 TRUE only if the user asks to COMPARE FINANCIAL METRICS across a SET of
@@ -178,31 +226,42 @@ Output: {
   "type": "list",
   "time_constraint": { "present": true, "value": 7, "unit": "days", "phrase": "last week" },
   "entity_mentions": [],
-  "concept_keywords": ["policy", "regulation", "compliance", "reform"],
+  "concept_keywords": ["regulation", "policy", "compliance", "reform"],
   "is_company_set_query": false,
   "primary_intent": "List the major policy changes that occurred in the last week."
 }
 
-Input: "what updates on glossier"
+Input: "List recent funding rounds in our Cosmetics industry"
 Output: {
   "intent": "market_intelligence",
-  "type": "inference",
-  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
-  "entity_mentions": ["Glossier"],
-  "concept_keywords": ["glossier"],
-  "is_company_set_query": false,
-  "primary_intent": "Provide recent updates about Glossier."
-}
-
-Input: "What is the New Excise Duty on Vaping Products?"
-Output: {
-  "intent": "market_intelligence",
-  "type": "inference",
+  "type": "list",
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
-  "concept_keywords": ["excise duty", "vaping products"],
+  "concept_keywords": ["funding", "round", "raise"],
   "is_company_set_query": false,
-  "primary_intent": "Explain the new excise duty on vaping products."
+  "primary_intent": "List recent funding rounds in the Cosmetics industry."
+}
+
+Input: "Any new AML compliance requirements?"
+Output: {
+  "intent": "market_intelligence",
+  "type": "list",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": [],
+  "concept_keywords": ["aml", "anti-money-laundering"],
+  "is_company_set_query": false,
+  "primary_intent": "List any new AML compliance requirements."
+}
+
+Input: "What has LG H&H been doing?"
+Output: {
+  "intent": "market_intelligence",
+  "type": "inference",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": ["LG H&H"],
+  "concept_keywords": ["lg", "h&h"],
+  "is_company_set_query": false,
+  "primary_intent": "Provide recent updates about LG H&H."
 }
 
 Input: "SWOT analysis for cosmetics industry"
@@ -227,21 +286,11 @@ Output: {
   "primary_intent": "Rank the top 5 cosmetic companies by revenue."
 }
 
-Input: "Should we enter the K-beauty market?"
-Output: {
-  "intent": "market_intelligence",
-  "type": "decision",
-  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
-  "entity_mentions": [],
-  "concept_keywords": ["k-beauty", "market entry"],
-  "is_company_set_query": false,
-  "primary_intent": "Get strategic advice on entering the K-beauty market."
-}
-
 =========================
 
 Respond with ONLY the JSON object. No markdown fences, no explanation.`;
 
+// ─────────────────────────────────────────────────────────────────────────
 const UNIT_DAYS = {
   days: 1, weeks: 7, months: 30, quarters: 90, years: 365,
 };
@@ -413,7 +462,7 @@ async function route(question, industry = null) {
         { role: 'system', content: ROUTER_PROMPT },
         { role: 'user', content: question },
       ],
-      { temperature: 0, max_tokens: 600, timeout: 30000 }
+      { temperature: 0, max_tokens: 700, timeout: 30000 }
     );
   } catch (err) {
     console.log(`[router] LLM call failed: ${err.message}`);
