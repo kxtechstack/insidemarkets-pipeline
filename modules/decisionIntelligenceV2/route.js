@@ -31,6 +31,7 @@ const { filterListHits, normalizeConcepts, containsPhrase } = require('./retriev
 const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
+const { buildSecAnswer } = require('./handlers/secHandler');
 const {
   buildGreetingResponse,
   buildOffTopicResponse,
@@ -81,6 +82,43 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   } else {
     routerResult = await route(question, industry);
   }
+
+  // ── 1.5 SEC pre-check ───────────────────────────────────────────────
+  // Only runs for market_intelligence questions. Wrapped so any failure
+  // in the SEC layer silently falls through to normal V2.
+  //   - mode:'numeric'   → returns a full payload (numeric answer + chart)
+  //   - mode:'framework' → returns injectChunks to merge into decision context
+  //   - null             → not SEC-shaped, or SEC failed; V2 runs unmodified
+  let secResult = null;
+  if (routerResult.intent === 'market_intelligence') {
+    try {
+      secResult = await buildSecAnswer({
+        question,
+        routerResult,
+        clientId,
+        industry,
+      });
+    } catch (err) {
+      console.log(`[V2 route] SEC handler threw, falling through: ${err.message}`);
+      secResult = null;
+    }
+  }
+
+  // SEC numeric answer is authoritative — return it directly.
+  if (secResult && secResult.mode === 'numeric' && secResult.payload) {
+    console.log(`[V2 route] SEC numeric answer returned directly`);
+    return {
+      routerResult,
+      handlerResult: secResult.handlerResult || secResult.payload,
+      payload: secResult.payload,
+    };
+  }
+
+  // SEC framework chunks (if any) will be merged into the decision context
+  // further down. Held in `secResult.injectChunks`.
+  const secInjectChunks = (secResult && secResult.mode === 'framework' && Array.isArray(secResult.injectChunks))
+    ? secResult.injectChunks
+    : [];
 
   // ── 2. Non market-intelligence short-circuits ───────────────────────
   if (routerResult.intent === 'greeting') {
@@ -141,11 +179,23 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   const keptClient = filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
   const keptCustom = customHits; // custom sources always kept
 
-  const hasMaterial = keptClient.length + keptCustom.length > 0;
+  // Merge SEC chunks (if the SEC handler produced any) into the client
+  // hits. SEC chunks bypass the deterministic concept filter because they
+  // were retrieved by SEC-specific logic (ticker + framework item codes).
+  const keptClientWithSec = secInjectChunks.length
+    ? [...secInjectChunks, ...keptClient]
+    : keptClient;
+
+  // For inference, SEC chunks don't count toward material — inference
+  // never consumes them. For decision, they do.
+  const materialCount = routerResult.type === 'decision'
+    ? keptClientWithSec.length + keptCustom.length
+    : keptClient.length + keptCustom.length;
+  const hasMaterial = materialCount > 0;
 
   console.log(
     `[V2 route] ${routerResult.type} filter: kept client=${keptClient.length}/${clientRetr.hits.length} ` +
-    `custom=${keptCustom.length} (concepts=[${conceptsForFilter.join(', ')}])`
+    `sec=${secInjectChunks.length} custom=${keptCustom.length} (concepts=[${conceptsForFilter.join(', ')}])`
   );
 
   if (!hasMaterial) {
@@ -164,13 +214,14 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   }
 
   if (routerResult.type === 'inference') {
+    // SEC chunks only attach to decision — inference stays client+custom only.
     const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
     return { routerResult, handlerResult, payload };
   }
 
-  // decision
-  const handlerResult = await buildDecisionAnswer(question, keptClient, keptCustom);
+  // decision — SEC chunks merged in (empty array if SEC didn't fire)
+  const handlerResult = await buildDecisionAnswer(question, keptClientWithSec, keptCustom);
   const payload = await buildDecisionResponse({ handlerResult, clientId });
   return { routerResult, handlerResult, payload };
 }
