@@ -256,7 +256,7 @@ function detectMetric(question) {
       if (kw.includes(' ')) continue;
       for (const w of words) {
         const sim = stringSimilarity.compareTwoStrings(w, kw);
-        if (sim >= 0.75) return name;
+        if (sim >= 0.65) return name;
       }
     }
   }
@@ -278,7 +278,7 @@ function detectAllMetrics(question) {
         if (kw.includes(' ')) continue;
         for (const w of words) {
           const sim = stringSimilarity.compareTwoStrings(w, kw);
-          if (sim >= 0.75) { matched = true; break; }
+          if (sim >= 0.65) { matched = true; break; }
         }
         if (matched) break;
       }
