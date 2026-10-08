@@ -221,116 +221,6 @@ function sanitizeQuestionForLLM(question, unresolvedMentions) {
   return sanitized;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// NEW: build intent from the router's already-extracted structured output.
-// This is the primary path. The router LLM does the heavy lifting —
-// entity resolution, metric canonicalization, time parsing, framework
-// detection — and this function just adapts its output to the shape
-// the rest of the SEC pipeline expects.
-// ─────────────────────────────────────────────────────────────────────────
-async function extractIntentFromRouter(question, routerResult, getAllCompaniesFn) {
-  const lookup = await loadCompanyLookup(getAllCompaniesFn);
-
-  // 1. Tickers — resolve router's entity_mentions against the companies table
-  const tickers = [];
-  for (const entity of routerResult.entity_mentions || []) {
-    const upper = String(entity).toUpperCase().trim();
-    const ticker = lookup.get(upper);
-    if (ticker && !tickers.includes(ticker)) {
-      tickers.push(ticker);
-      continue;
-    }
-    // If the exact match failed, try the diacritic-stripped form
-    const stripped = stripDiacritics(upper);
-    const altTicker = lookup.get(stripped);
-    if (altTicker && !tickers.includes(altTicker)) {
-      tickers.push(altTicker);
-    }
-  }
-  const ticker = tickers[0] || null;
-
-  // 2. Metric — from router directly
-  const metric = routerResult.metric || null;
-
-  // 3. Time — convert router's time_constraint to requestedYearCount when
-  //    the unit is years, else fall back to what the phrase suggests.
-  let requestedYearCount = null;
-  let allYears = [];
-  const tc = routerResult.time_constraint;
-
-  if (tc && tc.present) {
-    if (tc.unit === 'years') {
-      requestedYearCount = Math.max(1, Math.min(Number(tc.value) || 1, 10));
-    } else if (tc.phrase) {
-      // Look for explicit years in the phrase like "2024 and 2023"
-      const explicitYears = [...new Set((String(tc.phrase).match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
-      if (explicitYears.length) {
-        allYears = explicitYears;
-      } else if (/\b(year|yr|yer|yrs|yers)\b/i.test(String(tc.phrase))) {
-        requestedYearCount = Math.max(1, Math.min(Number(tc.value) || 1, 10));
-      }
-    }
-  }
-
-  // Also scan the raw question for explicit years, in case router missed them
-  if (allYears.length === 0) {
-    const explicitYears = [...new Set((String(question).match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
-    if (explicitYears.length) allYears = explicitYears;
-  }
-
-  // 4. Framework — from router directly
-  const framework = routerResult.framework || null;
-  const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'five_forces', 'risk_analysis']);
-  const isFrameworkQuestion = framework && FRAMEWORK_CATEGORIES.has(framework);
-
-  // 5. Question category — infer from what we extracted
-  let questionCategory;
-  if (isFrameworkQuestion) questionCategory = framework;
-  else if (metric) {
-    if (tickers.length > 1 && (allYears.length > 1 || (requestedYearCount || 1) > 1)) questionCategory = 'comparison_trend';
-    else if (tickers.length > 1) questionCategory = 'comparison';
-    else if (allYears.length > 1 || (requestedYearCount || 1) > 1) questionCategory = 'trend';
-    else questionCategory = 'single_value';
-  } else questionCategory = 'qualitative';
-
-  const isNumericQuestion = Boolean(metric) && !isFrameworkQuestion;
-  const dataType = isNumericQuestion ? 'quantitative' : 'qualitative';
-
-  // 6. Unresolved mentions (used for V2 fallback path, not needed here)
-  const unresolvedMentions = [];
-
-  return {
-    tickers,
-    ticker,
-    fiscalYear: allYears[0] || null,
-    allYears,
-    requestedYearCount,
-    noDataNote: null,
-    itemCode: null,
-    isNumericQuestion,
-    metric,
-    dataType,
-    questionCategory,
-    isChartable: dataType === 'quantitative' && questionCategory !== 'single_value',
-    isSwot: framework === 'swot',
-    isPestle: framework === 'pestle',
-    isFiveForces: framework === 'five_forces',
-    isRiskAnalysis: framework === 'risk_analysis',
-    isCompositionQuestion: false,
-    metricsFound: metric ? [metric] : [],
-    isRelationshipQuestion: false,
-    isDistributionQuestion: false,
-    isCumulativeQuestion: false,
-    insufficientForDistribution: false,
-    unresolvedMentions,
-    _source: 'router',
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// LEGACY: build intent by parsing the raw question with keyword lists and
-// fuzzy matching. Kept as a fallback only — the router path is preferred.
-// ─────────────────────────────────────────────────────────────────────────
 const PESTLE_KEYWORDS = ['pestle', 'pestel', 'pest analysis'];
 const FIVE_FORCES_KEYWORDS = [
   'five forces', '5 forces', "porter's five forces", 'porters five forces',
@@ -350,6 +240,9 @@ const METRIC_KEYWORDS = [
   ['CapEx', ['capital expenditure', 'capex', 'r&d spending']],
 ];
 
+// Fuzzy-tolerant metric detection. Uses exact includes() first, then a
+// Dice-coefficient fuzzy match against single-word keywords at 0.65.
+// Handles typos like "reveue" → "revenue" without a hardcoded typo list.
 function detectMetric(question) {
   const q = String(question || '').toLowerCase();
   const words = q.split(/\s+/).filter((w) => w.length >= 5);
@@ -400,6 +293,8 @@ const WORD_TO_NUM = {
   nine: 9, ten: 10, couple: 2, few: 3,
 };
 
+// Returns the most recent fiscal_year present in financial_facts for a
+// ticker, optionally scoped by metric_name.
 async function getLatestFiscalYear(ticker, metricName = null) {
   let query = supabase
     .from('financial_facts')
@@ -412,6 +307,8 @@ async function getLatestFiscalYear(ticker, metricName = null) {
   return data?.[0]?.fiscal_year || null;
 }
 
+// Returns the top N most recent fiscal_years present in financial_facts
+// for a ticker, scoped by metric_name.
 async function getLatestFiscalYears(ticker, metricName, n) {
   let query = supabase
     .from('financial_facts')
@@ -431,6 +328,7 @@ async function extractIntent(question, getAllCompaniesFn) {
   const unresolvedMentions = extractUnresolvedMentions(question, tickers, lookup);
   const qLower = question.toLowerCase();
 
+  // Explicit years the user named (e.g. "2023", "2024 and 2023", "between 2022 and 2024")
   let allYears = [...new Set((question.match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
 
   const rangeMatch = question.match(/\b(20\d{2})\s*(?:to|-|through|thru|until)\s*(20\d{2})\b/i);
@@ -444,20 +342,18 @@ async function extractIntent(question, getAllCompaniesFn) {
     allYears = [...new Set([...allYears, ...range])].sort();
   }
 
+  // Relative year requests — count only, resolved against DB later.
+  // Examples: "last 3 years" → 3, "last year" / "this year" → 1.
   let requestedYearCount = null;
 
   const lastNMatch = question.match(
-    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\b\s*(\w*)/i
+    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s*years?\b/i
   );
   if (lastNMatch && allYears.length === 0) {
-    const afterNumber = (lastNMatch[2] || '').toLowerCase();
-    const isNonYearUnit = /^(day|week|month|quarter|hour|minute)/.test(afterNumber);
-    if (!isNonYearUnit) {
-      const raw = lastNMatch[1].toLowerCase();
-      let n = /^\d+$/.test(raw) ? parseInt(raw, 10) : (WORD_TO_NUM[raw] || 2);
-      n = Math.max(1, Math.min(n, 10));
-      requestedYearCount = n;
-    }
+    const raw = lastNMatch[1].toLowerCase();
+    let n = /^\d+$/.test(raw) ? parseInt(raw, 10) : (WORD_TO_NUM[raw] || 2);
+    n = Math.max(1, Math.min(n, 10));
+    requestedYearCount = n;
   }
 
   if (
@@ -562,7 +458,6 @@ async function extractIntent(question, getAllCompaniesFn) {
     isRiskAnalysis, isCompositionQuestion, metricsFound, isRelationshipQuestion,
     isDistributionQuestion, isCumulativeQuestion, insufficientForDistribution,
     unresolvedMentions,
-    _source: 'keywords',
   };
 }
 
@@ -655,6 +550,7 @@ async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) 
   const seenIds = new Set();
 
   for (const ticker of tickers) {
+    // Resolve years for this ticker, per the intent.
     let years;
     if (latestOnly) {
       const latest = ticker ? await getLatestFiscalYear(ticker) : null;
@@ -695,13 +591,17 @@ async function retrieveForIntent(question, intent, opts = {}) {
     const metricForLookup = intent.metric || 'Revenue';
 
     for (const ticker of intent.tickers) {
+      // Resolve which years to fetch, per ticker, from the DB.
       let yearsForTicker = [];
 
       if (intent.allYears && intent.allYears.length) {
+        // User named specific years — use them as-is.
         yearsForTicker = intent.allYears;
       } else if (intent.requestedYearCount) {
+        // "last year" / "last 3 years" — fetch top N that actually exist.
         yearsForTicker = await getLatestFiscalYears(ticker, metricForLookup, intent.requestedYearCount);
       } else {
+        // No year context — default to just the latest available year.
         const latest = await getLatestFiscalYear(ticker, metricForLookup);
         if (latest) yearsForTicker = [latest];
       }
@@ -717,6 +617,7 @@ async function retrieveForIntent(question, intent, opts = {}) {
       facts = facts.filter(f => f.metric_name === intent.metric);
     }
 
+    // If requestedYearCount was set, note when we couldn't get that many.
     if (
       intent.requestedYearCount &&
       intent.tickers.length === 1 &&
@@ -737,8 +638,7 @@ async function retrieveForIntent(question, intent, opts = {}) {
 
 module.exports = {
   getAllCompanies,
-  extractIntent, extractIntentFromRouter,
-  loadCompanyLookup, extractTickers,
+  extractIntent, loadCompanyLookup, extractTickers,
   extractUnresolvedMentions, sanitizeQuestionForLLM,
   detectMetric, detectAllMetrics,
   getLatestFiscalYear, getLatestFiscalYears,

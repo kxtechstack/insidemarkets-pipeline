@@ -25,8 +25,6 @@ Return ONLY this JSON object:
   "entity_mentions": ["<proper nouns from the question>"],
   "concept_keywords": ["<literal 1-2 word search terms>"],
   "sector_term": "<the industry or sector word the question is about, or null>",
-  "metric": "Revenue" | "NetIncome" | "TotalAssets" | "TotalLiabilities" | "CashFlow" | "CapEx" | null,
-  "framework": "swot" | "pestle" | "five_forces" | "risk_analysis" | null,
   "is_company_set_query": true | false,
   "primary_intent": "<one sentence summarizing what the user wants, or a short reply if intent is not market_intelligence>"
 }
@@ -81,20 +79,10 @@ CRITICAL: value and unit MUST AGREE.
   "past quarter"   → { "value": 90, "unit": "days", "phrase": "past quarter" }
   "today"          → { "value": 1,  "unit": "days", "phrase": "today" }
   "yesterday"      → { "value": 2,  "unit": "days", "phrase": "yesterday" }
-  "last year"      → { "value": 1,  "unit": "years", "phrase": "last year" }
-  "this year"      → { "value": 1,  "unit": "years", "phrase": "this year" }
-  "last 3 years"   → { "value": 3,  "unit": "years", "phrase": "last 3 years" }
-  "last 5 yer"     → { "value": 5,  "unit": "years", "phrase": "last 5 yer" }
-  "last 3 yr"      → { "value": 3,  "unit": "years", "phrase": "last 3 yr" }
-  "2024 and 2023"  → { "value": null, "unit": null, "phrase": "2024 and 2023" }
 
 Never use a value greater than what fits in one year for that unit:
   ✗ { "value": 7, "unit": "weeks" }
   ✓ { "value": 7, "unit": "days" }
-
-Recognize misspelled time units ("yer", "yr", "yers", "yrs", "mth", "wk") as
-their proper units. If the phrase is explicit years like "2024 and 2023",
-set present: false and put the phrase in "phrase".
 
 --- entity_mentions ---
 Proper nouns ONLY: company names, brand names, regulator names,
@@ -106,18 +94,11 @@ NEVER include:
   ✗ Generic categories (sector, industry, market, business, brand, company)
   ✗ Acronyms (VC, PE, M&A, ESG, IPO, B2B, B2C, AI, ML, SaaS, etc.)
   ✗ Common plural nouns (products, brands, customers, users, items, things)
-  ✗ Sector descriptors combining a region + industry ("US banks",
-    "European airlines", "Asian tech companies", "Indian pharma").
-    Those go in sector_term, not entity_mentions.
 
 If the list would be empty, output [].
 
 Real examples: "Glossier", "Estée Lauder", "L'Oréal", "FDA",
 "European Union", "South Korea", "United Kingdom", "HMRC".
-
-Fix obvious misspellings: "glossieer" → "Glossier", "estee lauder" →
-"Estée Lauder", "microsoft" → "Microsoft". Always output the properly
-spelled proper noun.
 
 --- concept_keywords ---
 3-6 keywords. Each keyword must be 1-2 WORDS.
@@ -206,52 +187,6 @@ Rules:
 - Do NOT include country/region names.
 - If the question is about a specific named company, output null.
 
---- metric ---
-The FINANCIAL METRIC the user is asking about. Output one of the six
-canonical names below, or null if no metric is being asked about.
-
-CANONICAL METRICS AND COMMON WORDINGS:
-  "Revenue"          ← revenue, sales, top line, turnover, reveneu,
-                        revne, revenu, rev, revnue, sales figure
-  "NetIncome"        ← net income, profit, net profit, bottom line,
-                        earnings, proft, netincome, netincome
-  "TotalAssets"      ← total assets, assets, asset base
-  "TotalLiabilities" ← total liabilities, liabilities
-  "CashFlow"         ← cash flow, cashflow, operating cash, free cash flow
-  "CapEx"            ← capital expenditure, capex, capital expenditures,
-                        r&d spending, capital spending
-
-Examples:
-  "microsoft revenue last year"                → "Revenue"
-  "ulta revne last 3 yer"                      → "Revenue"
-  "compare apple profit vs revenue of 2025"    → null (TWO metrics — see below)
-  "apple net income"                           → "NetIncome"
-  "microsoft revenue for 2024 and 2023"        → "Revenue"
-  "rank US banks by total assets"              → "TotalAssets"
-  "pestle for delta air lines"                 → null
-  "swot analysis for estee lauder"             → null
-
-When the question asks about TWO metrics at once (e.g. "profit vs revenue",
-"revenue and net income"), set metric to null — the code handles multi-
-metric detection separately.
-
---- framework ---
-If the question names a business framework, set this field. Otherwise null.
-
-  "swot"          ← swot
-  "pestle"        ← pestle, pestel, pest analysis
-  "five_forces"   ← five forces, porter's five forces, 5 forces
-  "risk_analysis" ← risk analysis, risk categor, categorize the risk,
-                    types of risk, risk breakdown, risk matrix
-  null            ← everything else
-
-Examples:
-  "SWOT for Estée Lauder"          → "swot"
-  "pestle for delta air lines"     → "pestle"
-  "five forces of the cosmetics market" → "five_forces"
-  "risk analysis for entering K-beauty" → "risk_analysis"
-  "microsoft revenue last year"    → null
-
 --- is_company_set_query ---
 TRUE only if the user asks to COMPARE FINANCIAL METRICS across a SET of
 public companies ("top 5 cosmetic companies by revenue", "which tech
@@ -284,8 +219,6 @@ Output: {
   "entity_mentions": [],
   "concept_keywords": [],
   "sector_term": null,
-  "metric": null,
-  "framework": null,
   "is_company_set_query": false,
   "primary_intent": "Hi! What would you like to know about your market data?"
 }
@@ -298,122 +231,68 @@ Output: {
   "entity_mentions": [],
   "concept_keywords": [],
   "sector_term": null,
-  "metric": null,
-  "framework": null,
   "is_company_set_query": false,
   "primary_intent": "I focus on market and business intelligence — I can't help with weather. Ask me about your industry data instead."
 }
 
-Input: "microsoft revenue for the last 3 years"
+Input: "asdf"
 Output: {
-  "intent": "market_intelligence",
-  "type": "inference",
-  "time_constraint": { "present": true, "value": 3, "unit": "years", "phrase": "last 3 years" },
-  "entity_mentions": ["Microsoft"],
-  "concept_keywords": ["revenue"],
-  "sector_term": null,
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Get Microsoft's revenue for the last 3 fiscal years."
-}
-
-Input: "ulta revne last 3 yer"
-Output: {
-  "intent": "market_intelligence",
-  "type": "inference",
-  "time_constraint": { "present": true, "value": 3, "unit": "years", "phrase": "last 3 yer" },
-  "entity_mentions": ["Ulta Beauty"],
-  "concept_keywords": ["revenue"],
-  "sector_term": null,
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Get Ulta Beauty's revenue for the last 3 fiscal years."
-}
-
-Input: "microsoft revenue for the last year"
-Output: {
-  "intent": "market_intelligence",
-  "type": "inference",
-  "time_constraint": { "present": true, "value": 1, "unit": "years", "phrase": "last year" },
-  "entity_mentions": ["Microsoft"],
-  "concept_keywords": ["revenue"],
-  "sector_term": null,
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Get Microsoft's revenue for the last fiscal year."
-}
-
-Input: "what is the revenue for ulta for the 3 year"
-Output: {
-  "intent": "market_intelligence",
-  "type": "inference",
-  "time_constraint": { "present": true, "value": 3, "unit": "years", "phrase": "the 3 year" },
-  "entity_mentions": ["Ulta Beauty"],
-  "concept_keywords": ["revenue"],
-  "sector_term": null,
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Get Ulta Beauty's revenue for the last 3 fiscal years."
-}
-
-Input: "compare apple profit vs revenue for the last 3 years"
-Output: {
-  "intent": "market_intelligence",
-  "type": "decision",
-  "time_constraint": { "present": true, "value": 3, "unit": "years", "phrase": "last 3 years" },
-  "entity_mentions": ["Apple"],
-  "concept_keywords": ["revenue", "net income"],
-  "sector_term": null,
-  "metric": null,
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Compare Apple's net income and revenue over the last 3 years."
-}
-
-Input: "compare estee lauder and ulta revenue in the last 3 years"
-Output: {
-  "intent": "market_intelligence",
-  "type": "decision",
-  "time_constraint": { "present": true, "value": 3, "unit": "years", "phrase": "last 3 years" },
-  "entity_mentions": ["Estée Lauder", "Ulta Beauty"],
-  "concept_keywords": ["revenue"],
-  "sector_term": null,
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": false,
-  "primary_intent": "Compare Estée Lauder and Ulta Beauty revenue for the last 3 years."
-}
-
-Input: "rank US banks by total assets"
-Output: {
-  "intent": "market_intelligence",
-  "type": "decision",
+  "intent": "clarification",
+  "type": "list",
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
-  "concept_keywords": ["total assets"],
-  "sector_term": "banks",
-  "metric": "TotalAssets",
-  "framework": null,
-  "is_company_set_query": true,
-  "primary_intent": "Rank US banks by their total assets."
+  "concept_keywords": [],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "Could you give me a bit more to go on? Try asking about recent developments in your industry."
 }
 
-Input: "top 5 cosmetic companies by revenue"
+Input: "What are the major policy changes in the last week?"
 Output: {
   "intent": "market_intelligence",
-  "type": "decision",
+  "type": "list",
+  "time_constraint": { "present": true, "value": 7, "unit": "days", "phrase": "last week" },
+  "entity_mentions": [],
+  "concept_keywords": ["regulation", "policy", "compliance", "reform"],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "List the major policy changes that occurred in the last week."
+}
+
+Input: "List recent funding rounds in our Cosmetics industry"
+Output: {
+  "intent": "market_intelligence",
+  "type": "list",
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
-  "concept_keywords": ["revenue"],
+  "concept_keywords": ["funding", "round", "raise"],
   "sector_term": "cosmetics",
-  "metric": "Revenue",
-  "framework": null,
-  "is_company_set_query": true,
-  "primary_intent": "Rank the top 5 cosmetic companies by revenue."
+  "is_company_set_query": false,
+  "primary_intent": "List recent funding rounds in the Cosmetics industry."
+}
+
+Input: "Any new AML compliance requirements?"
+Output: {
+  "intent": "market_intelligence",
+  "type": "list",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": [],
+  "concept_keywords": ["aml", "anti-money-laundering"],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "List any new AML compliance requirements."
+}
+
+Input: "What has LG H&H been doing?"
+Output: {
+  "intent": "market_intelligence",
+  "type": "inference",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": ["LG H&H"],
+  "concept_keywords": ["lg", "h&h"],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "Provide recent updates about LG H&H."
 }
 
 Input: "SWOT analysis for cosmetics industry"
@@ -424,38 +303,20 @@ Output: {
   "entity_mentions": [],
   "concept_keywords": ["swot"],
   "sector_term": "cosmetics",
-  "metric": null,
-  "framework": "swot",
   "is_company_set_query": false,
   "primary_intent": "SWOT analysis of the cosmetics industry."
 }
 
-Input: "do a swot analysis for apple"
-Output: {
-  "intent": "market_intelligence",
-  "type": "decision",
-  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
-  "entity_mentions": ["Apple"],
-  "concept_keywords": ["swot"],
-  "sector_term": null,
-  "metric": null,
-  "framework": "swot",
-  "is_company_set_query": false,
-  "primary_intent": "SWOT analysis of Apple."
-}
-
-Input: "swot analysis for nanotech industry"
+Input: "Top 5 cosmetic companies by revenue"
 Output: {
   "intent": "market_intelligence",
   "type": "decision",
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
-  "concept_keywords": ["swot", "nanotech"],
-  "sector_term": "nanotech",
-  "metric": null,
-  "framework": "swot",
-  "is_company_set_query": false,
-  "primary_intent": "SWOT analysis of the nanotech industry."
+  "concept_keywords": ["revenue"],
+  "sector_term": "cosmetics",
+  "is_company_set_query": true,
+  "primary_intent": "Rank the top 5 cosmetic companies by revenue."
 }
 
 =========================
@@ -469,8 +330,6 @@ const UNIT_DAYS = {
 const VALID_INTENTS = new Set(['greeting', 'off_topic', 'clarification', 'market_intelligence']);
 const VALID_TYPES   = new Set(['list', 'inference', 'decision']);
 const VALID_UNITS   = new Set(['days', 'weeks', 'months', 'quarters', 'years']);
-const VALID_METRICS = new Set(['Revenue', 'NetIncome', 'TotalAssets', 'TotalLiabilities', 'CashFlow', 'CapEx']);
-const VALID_FRAMEWORKS = new Set(['swot', 'pestle', 'five_forces', 'risk_analysis']);
 
 function stripFences(raw) {
   return String(raw || '')
@@ -503,8 +362,6 @@ function fallbackResult(question) {
     entity_mentions: [],
     concept_keywords: [],
     sector_term: null,
-    metric: null,
-    framework: null,
     is_company_set_query: false,
     primary_intent: String(question || '').slice(0, 200),
     _fallback: true,
@@ -618,14 +475,6 @@ function sanitize(parsed, question) {
     out.sector_term = parsed.sector_term.trim().toLowerCase().slice(0, 60);
   }
 
-  if (typeof parsed.metric === 'string' && VALID_METRICS.has(parsed.metric)) {
-    out.metric = parsed.metric;
-  }
-
-  if (typeof parsed.framework === 'string' && VALID_FRAMEWORKS.has(parsed.framework)) {
-    out.framework = parsed.framework;
-  }
-
   if (typeof parsed.is_company_set_query === 'boolean') {
     out.is_company_set_query = parsed.is_company_set_query;
   }
@@ -650,7 +499,7 @@ async function route(question, industry = null) {
         { role: 'system', content: ROUTER_PROMPT },
         { role: 'user', content: question },
       ],
-      { temperature: 0, max_tokens: 900, timeout: 30000 }
+      { temperature: 0, max_tokens: 700, timeout: 30000 }
     );
   } catch (err) {
     console.log(`[router] LLM call failed: ${err.message}`);
@@ -696,6 +545,4 @@ module.exports = {
   stripIndustryName,
   normalizeTimeConstraint,
   UNIT_DAYS,
-  VALID_METRICS,
-  VALID_FRAMEWORKS,
 };
