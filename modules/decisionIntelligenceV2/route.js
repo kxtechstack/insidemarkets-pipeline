@@ -25,7 +25,6 @@ const {
 } = require('../decisionIntelligence/chatHistory');
 
 const { route } = require('./routing/router');
-const { loadContext } = require('./contextLoader');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
 const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
@@ -270,13 +269,6 @@ function registerDecisionIntelligenceV2Route(app) {
         });
       }
 
-      const { standaloneQuestion } = await loadContext({
-        question,
-        conversationId: incomingConversationId,
-        userId,
-      });
-      console.log(`[V2 route] question: "${question}" -> standalone: "${standaloneQuestion}"`);
-
       let conversationId = incomingConversationId;
       if (!conversationId) {
         conversationId = await createConversation({
@@ -291,7 +283,7 @@ function registerDecisionIntelligenceV2Route(app) {
       let result;
       try {
         result = await runV2Pipeline({
-          question: standaloneQuestion,
+          question,
           clientId,
           industry,
           forcedType: providedType || null,
