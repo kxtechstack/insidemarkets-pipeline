@@ -97,10 +97,8 @@ function detectSecShape(question, routerResult, intent) {
 
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) return 'framework';
 
-  // Numeric if either: exact keyword match OR fuzzy-detected metric.
-  // The fuzzy branch catches typos like "reveue" → "revenue".
   const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
-  if (looksNumeric || intent.metric) return 'numeric';
+  if (looksNumeric || intent.metric || intent.requestedYearCount) return 'numeric';
 
   if (intent.questionCategory === 'qualitative') return 'framework';
 
@@ -407,7 +405,14 @@ async function runNumericPath(question, intent) {
   }
 
   const enrichedFacts = await enrichFactsWithNames(facts);
-  const bodyText = buildNumericAnswer(enrichedFacts);
+  let bodyText = buildNumericAnswer(enrichedFacts);
+
+  // If the intent has a note (e.g. "only 2 of 3 requested years available"),
+  // prepend it so the user sees the caveat.
+  if (intent.noDataNote) {
+    bodyText = `_${intent.noDataNote}_\n\n${bodyText}`;
+  }
+
   const sources = await buildNumericSources(enrichedFacts);
   const { chart, chartMeta } = await tryBuildChart(intent, enrichedFacts);
 
@@ -464,6 +469,7 @@ async function runSectorFrameworkPath(question, sectorTermFromRouter = null) {
   const sectorIntent = {
     tickers: cappedTickers,
     allYears: [],
+    requestedYearCount: 1,
     fiscalYear: null,
     questionCategory: 'swot',
     isNumericQuestion: false,

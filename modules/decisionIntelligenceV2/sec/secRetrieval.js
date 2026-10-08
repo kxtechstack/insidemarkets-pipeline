@@ -240,10 +240,9 @@ const METRIC_KEYWORDS = [
   ['CapEx', ['capital expenditure', 'capex', 'r&d spending']],
 ];
 
-// Fuzzy-tolerant metric detection. For each metric keyword, first try the
-// fast includes() path; if that fails, fuzzy-compare each question word
-// (>=5 chars) against single-word keywords with a 0.75 threshold. Handles
-// typos like "reveue" → "revenue" without a hardcoded typo list.
+// Fuzzy-tolerant metric detection. Uses exact includes() first, then a
+// Dice-coefficient fuzzy match against single-word keywords at 0.65.
+// Handles typos like "reveue" → "revenue" without a hardcoded typo list.
 function detectMetric(question) {
   const q = String(question || '').toLowerCase();
   const words = q.split(/\s+/).filter((w) => w.length >= 5);
@@ -289,12 +288,38 @@ function detectAllMetrics(question) {
   return [...found];
 }
 
-const LATEST_FISCAL_YEAR = 2025;
-
 const WORD_TO_NUM = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
   nine: 9, ten: 10, couple: 2, few: 3,
 };
+
+// Returns the most recent fiscal_year present in financial_facts for a
+// ticker, optionally scoped by metric_name.
+async function getLatestFiscalYear(ticker, metricName = null) {
+  let query = supabase
+    .from('financial_facts')
+    .select('fiscal_year')
+    .eq('ticker', ticker)
+    .order('fiscal_year', { ascending: false })
+    .limit(1);
+  if (metricName) query = query.eq('metric_name', metricName);
+  const { data } = await query;
+  return data?.[0]?.fiscal_year || null;
+}
+
+// Returns the top N most recent fiscal_years present in financial_facts
+// for a ticker, scoped by metric_name.
+async function getLatestFiscalYears(ticker, metricName, n) {
+  let query = supabase
+    .from('financial_facts')
+    .select('fiscal_year')
+    .eq('ticker', ticker)
+    .order('fiscal_year', { ascending: false })
+    .limit(Math.max(1, n));
+  if (metricName) query = query.eq('metric_name', metricName);
+  const { data } = await query;
+  return [...new Set((data || []).map(r => r.fiscal_year))];
+}
 
 async function extractIntent(question, getAllCompaniesFn) {
   const lookup = await loadCompanyLookup(getAllCompaniesFn);
@@ -303,17 +328,8 @@ async function extractIntent(question, getAllCompaniesFn) {
   const unresolvedMentions = extractUnresolvedMentions(question, tickers, lookup);
   const qLower = question.toLowerCase();
 
+  // Explicit years the user named (e.g. "2023", "2024 and 2023", "between 2022 and 2024")
   let allYears = [...new Set((question.match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
-
-  const lastNMatch = question.match(
-    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s*years?\b/i
-  );
-  if (lastNMatch && allYears.length === 0) {
-    const raw = lastNMatch[1].toLowerCase();
-    let n = /^\d+$/.test(raw) ? parseInt(raw, 10) : (WORD_TO_NUM[raw] || 2);
-    n = Math.max(1, Math.min(n, 10));
-    allYears = Array.from({ length: n }, (_, i) => LATEST_FISCAL_YEAR - n + 1 + i);
-  }
 
   const rangeMatch = question.match(/\b(20\d{2})\s*(?:to|-|through|thru|until)\s*(20\d{2})\b/i);
   const betweenMatch = question.match(/\bbetween\s+(20\d{2})\s+and\s+(20\d{2})\b/i);
@@ -324,6 +340,28 @@ async function extractIntent(question, getAllCompaniesFn) {
     const range = [];
     for (let y = lo; y <= hi; y++) range.push(y);
     allYears = [...new Set([...allYears, ...range])].sort();
+  }
+
+  // Relative year requests — count only, resolved against DB later.
+  // Examples: "last 3 years" → 3, "last year" / "this year" → 1.
+  let requestedYearCount = null;
+
+  const lastNMatch = question.match(
+    /\b(?:last|past|previous)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|couple|few)\s*years?\b/i
+  );
+  if (lastNMatch && allYears.length === 0) {
+    const raw = lastNMatch[1].toLowerCase();
+    let n = /^\d+$/.test(raw) ? parseInt(raw, 10) : (WORD_TO_NUM[raw] || 2);
+    n = Math.max(1, Math.min(n, 10));
+    requestedYearCount = n;
+  }
+
+  if (
+    allYears.length === 0 &&
+    requestedYearCount === null &&
+    /\b(?:last|this|current|past|latest|recent|most recent)\s+year\b/i.test(question)
+  ) {
+    requestedYearCount = 1;
   }
 
   const fiscalYear = allYears.length ? allYears[0] : null;
@@ -358,7 +396,6 @@ async function extractIntent(question, getAllCompaniesFn) {
     'margin', 'total assets', 'total liabilities', 'cash flow', 'how much',
     'what was the', 'capital expenditure', 'r&d spending'].some(k => qLower.includes(k));
 
-  // Fuzzy-tolerant metric detection
   const metric = detectMetric(question);
   const metricsFound = detectAllMetrics(question);
 
@@ -369,8 +406,8 @@ async function extractIntent(question, getAllCompaniesFn) {
   const isCumulativeQuestion = ['cumulative', 'stacked', 'running total'].some(k => qLower.includes(k));
 
   isNumericQuestion = isNumericQuestion || isRelationshipQuestion || isDistributionQuestion;
-  // Metric detection is also a signal that the question is numeric.
   if (metric) isNumericQuestion = true;
+  if (requestedYearCount !== null) isNumericQuestion = true;
 
   const COMPOSITION_KEYWORDS = ['share', 'breakdown', 'composition', 'percentage',
     'proportion', 'split of', 'distribution', 'makeup', 'mix of'];
@@ -388,13 +425,10 @@ async function extractIntent(question, getAllCompaniesFn) {
     (qualitativeSections.has(itemCode) && !isNumericQuestion)
   ) ? 'qualitative' : 'quantitative';
 
-  if (dataType === 'qualitative' && allYears.length === 0) {
-    allYears = [LATEST_FISCAL_YEAR];
-  }
   const resolvedFiscalYear = allYears.length ? allYears[0] : fiscalYear;
 
   const nEntities = tickers.length;
-  const nYears = allYears.length;
+  const nYears = allYears.length || (requestedYearCount || 1);
   let insufficientForDistribution = false;
 
   let questionCategory;
@@ -417,7 +451,9 @@ async function extractIntent(question, getAllCompaniesFn) {
   const isChartable = dataType === 'quantitative' && questionCategory !== 'single_value';
 
   return {
-    tickers, ticker, fiscalYear: resolvedFiscalYear, allYears, itemCode, isNumericQuestion, metric,
+    tickers, ticker, fiscalYear: resolvedFiscalYear, allYears,
+    requestedYearCount, noDataNote: null,
+    itemCode, isNumericQuestion, metric,
     dataType, questionCategory, isChartable, isSwot, isPestle, isFiveForces,
     isRiskAnalysis, isCompositionQuestion, metricsFound, isRelationshipQuestion,
     isDistributionQuestion, isCumulativeQuestion, insufficientForDistribution,
@@ -485,7 +521,7 @@ async function getFinancialFacts(ticker, fiscalYear) {
 async function retrieveChunks(question, intent, topK = 6) {
   const queryVector = await embedText(question);
   const tickers = intent.tickers.length ? intent.tickers : [null];
-  const years = intent.allYears.length ? intent.allYears : [intent.fiscalYear];
+  const years = intent.allYears.length ? intent.allYears : [null];
 
   const perTickerK = tickers.length <= 1 ? topK : Math.max(3, Math.floor(topK / tickers.length) + 1);
   const perYearK = years.length <= 1 ? perTickerK : Math.max(2, Math.floor(perTickerK / years.length) + 1);
@@ -504,38 +540,28 @@ async function retrieveChunks(question, intent, topK = 6) {
 
 const FRAMEWORK_ITEM_CODES = ['Item 1', 'Item 1A', 'Item 7'];
 
-async function getLatestFiscalYear(ticker) {
-  const { data } = await supabase
-    .from('financial_facts')
-    .select('fiscal_year')
-    .eq('ticker', ticker)
-    .order('fiscal_year', { ascending: false })
-    .limit(1);
-  return data?.[0]?.fiscal_year || null;
-}
-
 async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) {
   const { latestOnly = false } = opts;
   const queryVector = await embedText(question);
   const tickers = intent.tickers.length ? intent.tickers : [null];
   const perSectionK = Math.max(2, Math.floor(topK / FRAMEWORK_ITEM_CODES.length));
 
-  const tickerYears = new Map();
-  if (latestOnly) {
-    for (const ticker of tickers) {
-      if (!ticker) continue;
-      const latest = await getLatestFiscalYear(ticker);
-      if (latest) tickerYears.set(ticker, [latest]);
-    }
-  }
-
   const allHits = [];
   const seenIds = new Set();
+
   for (const ticker of tickers) {
-    const years = latestOnly
-      ? (tickerYears.get(ticker) || [])
-      : (intent.allYears.length ? intent.allYears : [intent.fiscalYear]);
-    if (latestOnly && years.length === 0) continue;
+    // Resolve years for this ticker, per the intent.
+    let years;
+    if (latestOnly) {
+      const latest = ticker ? await getLatestFiscalYear(ticker) : null;
+      years = latest ? [latest] : [];
+    } else if (intent.allYears.length) {
+      years = intent.allYears;
+    } else {
+      const latest = ticker ? await getLatestFiscalYear(ticker) : null;
+      years = latest ? [latest] : [];
+    }
+    if (years.length === 0) continue;
 
     for (const year of years) {
       for (const itemCode of FRAMEWORK_ITEM_CODES) {
@@ -562,16 +588,48 @@ async function retrieveForIntent(question, intent, opts = {}) {
 
   let facts = [];
   if (intent.isNumericQuestion) {
-    const yearsToFetch = intent.allYears.length ? intent.allYears : [intent.fiscalYear];
+    const metricForLookup = intent.metric || 'Revenue';
+
     for (const ticker of intent.tickers) {
-      for (const year of yearsToFetch) {
+      // Resolve which years to fetch, per ticker, from the DB.
+      let yearsForTicker = [];
+
+      if (intent.allYears && intent.allYears.length) {
+        // User named specific years — use them as-is.
+        yearsForTicker = intent.allYears;
+      } else if (intent.requestedYearCount) {
+        // "last year" / "last 3 years" — fetch top N that actually exist.
+        yearsForTicker = await getLatestFiscalYears(ticker, metricForLookup, intent.requestedYearCount);
+      } else {
+        // No year context — default to just the latest available year.
+        const latest = await getLatestFiscalYear(ticker, metricForLookup);
+        if (latest) yearsForTicker = [latest];
+      }
+
+      for (const year of yearsForTicker) {
         facts.push(...await getFinancialFacts(ticker, year));
       }
     }
+
     if (intent.metricsFound && intent.metricsFound.length >= 2) {
       facts = facts.filter(f => intent.metricsFound.includes(f.metric_name));
     } else if (intent.metric) {
       facts = facts.filter(f => f.metric_name === intent.metric);
+    }
+
+    // If requestedYearCount was set, note when we couldn't get that many.
+    if (
+      intent.requestedYearCount &&
+      intent.tickers.length === 1 &&
+      facts.length > 0
+    ) {
+      const distinctYears = [...new Set(facts.map(f => f.fiscal_year))];
+      if (distinctYears.length < intent.requestedYearCount) {
+        const latestAvailable = Math.max(...distinctYears);
+        intent.noDataNote =
+          `Requested ${intent.requestedYearCount} year(s) but only ${distinctYears.length} ` +
+          `are available (through FY${latestAvailable}).`;
+      }
     }
   }
 
@@ -583,6 +641,7 @@ module.exports = {
   extractIntent, loadCompanyLookup, extractTickers,
   extractUnresolvedMentions, sanitizeQuestionForLLM,
   detectMetric, detectAllMetrics,
+  getLatestFiscalYear, getLatestFiscalYears,
   embedText, retrieveChunks, retrieveChunksStratified, retrieveForIntent,
   getFinancialFacts, getChunkTextByPointIds,
   stripDiacritics,
