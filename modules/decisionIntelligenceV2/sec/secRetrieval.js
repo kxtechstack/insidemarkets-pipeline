@@ -1,15 +1,5 @@
 /**
  * modules/decisionIntelligenceV2/sec/secRetrieval.js
- *
- * COPIED VERBATIM from modules/decisionIntelligence/secRetrieval.js.
- *
- * ONE LOCAL PATCH: accent/diacritic normalization added to
- * extractTickers + extractUnresolvedMentions so user input like
- * "estee lauder" (no accent) matches the DB name
- * "Estée Lauder Companies (The)" (accented).
- *
- * Without this, extractIntent returned tickers=[] for "estee lauder",
- * detectSecShape returned null, and SEC never fired for those questions.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -25,28 +15,16 @@ const qdrant = new QdrantClient({
 });
 const COLLECTION = process.env.SEC10K_QDRANT_COLLECTION || 'sec10k_chunks';
 
-// ─────────────────────────────────────────────────────────────────────────
-// Diacritic normalizer — LOCAL ADDITION
-// Strips accents so "estee" matches "estée", "loreal" matches "l'oréal", etc.
-// ─────────────────────────────────────────────────────────────────────────
 const stripDiacritics = (s) =>
   String(s || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
-
-// =============================================================================
-// SECTION 1: companies.js
-// =============================================================================
 
 async function getAllCompanies() {
   const { data, error } = await supabase.from('companies').select('ticker, company_name');
   if (error) throw error;
   return data;
 }
-
-// =============================================================================
-// SECTION 2: extractIntent.js
-// =============================================================================
 
 const TICKER_ALIASES = {
   GOOGLE: 'GOOGL', ALPHABET: 'GOOGL', FACEBOOK: 'META', AMAZON: 'AMZN',
@@ -62,7 +40,6 @@ const TICKER_ALIASES = {
   WALMART: 'WMT', DISNEY: 'DIS', BOEING: 'BA', CHEVRON: 'CVX',
   EXXON: 'XOM', EXXONMOBIL: 'XOM', QUALCOMM: 'QCOM', BROADCOM: 'AVGO',
   INTEL: 'INTC', NVIDIA: 'NVDA', 'HOME DEPOT': 'HD',
-  // LOCAL ADDITION — accented brand variants
   'ESTEE LAUDER': 'EL', 'ESTÉE LAUDER': 'EL',
   "L'OREAL": 'LRLCY', 'LORÉAL': 'LRLCY',
 };
@@ -100,10 +77,6 @@ async function loadCompanyLookup(getAllCompaniesFn) {
     const firstWord = c.company_name.split(' ')[0].toUpperCase();
     if (!GENERIC_FIRST_WORDS.has(firstWord)) lookup.set(firstWord, c.ticker);
     lookup.set(c.company_name.toUpperCase(), c.ticker);
-
-    // LOCAL ADDITION — also register the diacritic-stripped full name,
-    // so "ESTEE LAUDER COMPANIES (THE)" matches a lookup key even when
-    // the user typed no accent.
     lookup.set(stripDiacritics(c.company_name).toUpperCase(), c.ticker);
   }
   const validTickers = new Set(lookup.values());
@@ -120,19 +93,12 @@ function escapeRegex(s) {
 
 function extractTickers(question, lookup) {
   const found = [];
-
-  // LOCAL ADDITION — normalize the question once so all subsequent
-  // regex tests and fuzzy matches happen on accent-free strings.
   const normalizedQuestion = stripDiacritics(question);
 
   const names = [...lookup.keys()].sort((a, b) => b.length - a.length);
   for (const name of names) {
     if (STOPWORD_TICKERS.has(name)) continue;
     const ticker = lookup.get(name);
-
-    // LOCAL ADDITION — also compare against the diacritic-stripped name,
-    // so a lookup key like "ESTÉE LAUDER COMPANIES (THE)" can match a
-    // question that says "estee lauder companies".
     const normalizedName = stripDiacritics(name);
 
     const isFullName = normalizedName.includes(' ');
@@ -145,8 +111,6 @@ function extractTickers(question, lookup) {
   }
   if (found.length) return found;
 
-  // Fuzzy fallback — LOCAL ADDITION: match against diacritic-stripped
-  // candidate words and lookup names.
   const candidateWords = (normalizedQuestion.match(/[A-Za-z][A-Za-z&.]*/g) || [])
     .filter((w) => w.length >= 4 && !QUESTION_STOPWORDS.has(w.toUpperCase()));
 
@@ -159,8 +123,6 @@ function extractTickers(question, lookup) {
       return true;
     });
 
-  // Build a reverse map from stripped name → ticker so we can look up
-  // the ticker after findBestMatch returns a stripped target.
   const strippedToTicker = new Map();
   for (const [rawName, ticker] of lookup.entries()) {
     strippedToTicker.set(stripDiacritics(rawName), ticker);
@@ -176,11 +138,6 @@ function extractTickers(question, lookup) {
       sameLengthNames.map((n) => n.toUpperCase())
     );
 
-    // LOCAL ADDITION — using 0.7 for short words instead of 0.85. Was
-    // previously blocking "ESTEE" → "ESTÉE LAUDER..." because Dice on a
-    // 5-char vs 30-char string never gets close. Now that accents are
-    // stripped, we still need a slightly looser threshold for the
-    // short-vs-long case. Longer words (>= 7 chars) keep 0.6.
     const upper = word.toUpperCase();
     const minRating = upper.length <= 6 ? 0.7 : 0.6;
 
@@ -196,7 +153,6 @@ function extractTickers(question, lookup) {
 }
 
 function extractUnresolvedMentions(question, resolvedTickers, lookup) {
-  // LOCAL ADDITION — work on stripped strings throughout.
   const normalizedQuestion = stripDiacritics(question);
 
   const alreadyMatchedNames = [...lookup.entries()]
@@ -211,7 +167,6 @@ function extractUnresolvedMentions(question, resolvedTickers, lookup) {
   const unresolved = [];
   const seen = new Set();
 
-  // Reverse lookup for the fuzzy re-check
   const strippedToTicker = new Map();
   for (const [rawName, ticker] of lookup.entries()) {
     strippedToTicker.set(stripDiacritics(rawName), ticker);
@@ -421,10 +376,6 @@ async function extractIntent(question, getAllCompaniesFn) {
   };
 }
 
-// =============================================================================
-// SECTION 3: retrieveChunks.js
-// =============================================================================
-
 let embedderPromise = null;
 const getEmbedder = () => {
   if (!embedderPromise) embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
@@ -520,7 +471,6 @@ async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) 
   const tickers = intent.tickers.length ? intent.tickers : [null];
   const perSectionK = Math.max(2, Math.floor(topK / FRAMEWORK_ITEM_CODES.length));
 
-  // If latestOnly, resolve the most recent fiscal year per ticker first.
   const tickerYears = new Map();
   if (latestOnly) {
     for (const ticker of tickers) {
@@ -569,7 +519,9 @@ async function retrieveForIntent(question, intent, opts = {}) {
         facts.push(...await getFinancialFacts(ticker, year));
       }
     }
-    if (intent.questionCategory === 'relationship' && intent.metricsFound.length >= 2) {
+    // If the question asked about 2+ metrics, keep facts for every metric.
+    // Otherwise keep only the single matched metric.
+    if (intent.metricsFound && intent.metricsFound.length >= 2) {
       facts = facts.filter(f => intent.metricsFound.includes(f.metric_name));
     } else if (intent.metric) {
       facts = facts.filter(f => f.metric_name === intent.metric);

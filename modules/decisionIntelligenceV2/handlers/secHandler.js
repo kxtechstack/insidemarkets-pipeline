@@ -26,7 +26,6 @@ const NUMERIC_KEYWORDS = [
 
 const REGION_MIN_HITS = 3;
 
-// Fallback keyword list — only used if the router didn't supply a sector_term.
 const SECTOR_KEYWORDS_FALLBACK = [
   'cosmetic', 'cosmetics', 'beauty',
   'pharma', 'pharmaceutical', 'biotech', 'biotechnology',
@@ -50,29 +49,20 @@ const SECTOR_KEYWORDS_FALLBACK = [
 
 const MAX_SECTOR_COMPANIES = 3;
 
-// Generic English corporate suffixes that carry no identifying value.
-// Used only to strip noise from company names before matching.
 const COMPANY_NAME_STOP = new Set([
   'inc', 'corp', 'co', 'company', 'group', 'holdings', 'ltd', 'plc',
   'sa', 'ag', 'nv', 'se', 'llc', 'lp',
 ]);
 
-/**
- * Does the question literally name any of the given tickers or their
- * companies? General-purpose — reads company names from the DB, no
- * hardcoded industry or brand list.
- */
 async function questionNamesCompany(question, tickers) {
   if (!Array.isArray(tickers) || tickers.length === 0) return false;
   const q = String(question || '').toLowerCase();
 
-  // 1. Ticker itself appears in question?
   for (const t of tickers) {
     const escaped = String(t).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp(`\\b${escaped}\\b`).test(q)) return true;
   }
 
-  // 2. Any significant word from a company name appears in question?
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
   const { data: companies } = await supabase
@@ -650,17 +640,8 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
-    // ── Sector guard ────────────────────────────────────────────────────
-    // Fires ONLY on genuine company-set questions (router says
-    // is_company_set_query: true) where the question itself names no
-    // specific company. Everything else leaves tickers untouched.
-    //
-    // Examples:
-    //   "rank US banks by total assets"        → fires, clears fuzzy tickers
-    //   "top 5 cosmetic companies by revenue"  → fires
-    //   "microsoft revenue last year"          → skipped (not company_set)
-    //   "compare apple profit vs revenue"      → skipped (company named in text)
-    //   "pestle delta air lines"               → skipped (not company_set)
+    // Sector guard — fires ONLY on genuine company-set questions where
+    // the question names no specific company.
     if (
       routerSector &&
       hasTickers &&
@@ -701,6 +682,18 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       }
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
       return null;
+    }
+
+    // ── Dispatch ───────────────────────────────────────────────────────
+    // If shape is company_set BUT we have specific named tickers (kept
+    // by the guard above), use the numeric path — it respects those
+    // tickers and multi-year ranges. The broad company_set path is only
+    // for genuine "top N by metric" sector-wide questions.
+    const tickersStillPresent = Array.isArray(intent.tickers) && intent.tickers.length > 0;
+
+    if (shape === 'company_set' && tickersStillPresent) {
+      console.log(`[secHandler] company_set with named tickers [${intent.tickers.join(',')}] — using numeric path`);
+      return await runNumericPath(question, intent);
     }
 
     if (shape === 'company_set') return await runCompanySetPath(question, intent);
