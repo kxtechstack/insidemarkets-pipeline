@@ -236,8 +236,12 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     return { routerResult, payload };
   }
 
-  if (routerResult.type === 'inference') {
-    // SEC chunks only attach to decision — inference stays client+custom only.
+  // If SEC fired a framework response, SEC chunks MUST reach the decision
+  // handler (inference ignores them). Force decision dispatch regardless
+  // of the router's `type`.
+  const isFrameworkFromSec = secInjectChunks.length > 0;
+
+  if (routerResult.type === 'inference' && !isFrameworkFromSec) {
     const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
     return { routerResult, handlerResult, payload };
