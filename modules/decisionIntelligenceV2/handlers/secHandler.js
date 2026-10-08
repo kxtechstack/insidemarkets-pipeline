@@ -29,6 +29,7 @@
 const { detectNonUSGeography, resolveCompanySet } = require('../sec/resolveCompanySet');
 const {
   resolveCompanySetFacts,
+  findAllowlistTickers,
 } = require('../sec/subsectorResolver');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('../sec/secRetrieval');
 const { buildNumericAnswer } = require('../sec/buildNumericAnswer');
@@ -444,6 +445,112 @@ async function runNumericPath(question, intent) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Sector framework path — "cosmetics industry SWOT" (no ticker named)
+//
+// Matches the industry word in the question against SUBSECTOR_ALLOWLISTS.
+// Pulls the LATEST fiscal year's 10-K chunks for up to 3 companies.
+// Falls through (returns null) if the industry isn't in the allowlist.
+// ─────────────────────────────────────────────────────────────────────────
+const SECTOR_KEYWORDS = [
+  // Every key in SUBSECTOR_ALLOWLISTS is a candidate
+  'cosmetic', 'cosmetics', 'beauty',
+  'pharma', 'pharmaceutical', 'biotech', 'biotechnology',
+  'retail', 'retailer', 'retailers',
+  'bank', 'banks', 'banking', 'insurance', 'insurers',
+  'oil', 'oil and gas', 'energy', 'oilfield services',
+  'tech', 'technology', 'semiconductor', 'semiconductors', 'software', 'cloud',
+  'airline', 'airlines',
+  'auto', 'autos', 'automaker', 'automakers', 'electric vehicle', 'electric vehicles', 'ev',
+  'utility', 'utilities', 'telecom', 'telecommunications', 'media', 'streaming',
+  'food', 'beverage', 'beverages',
+  'aerospace', 'defense', 'healthcare', 'health care',
+  'reit', 'reits', 'restaurant', 'restaurants',
+  'travel', 'hotel', 'hotels',
+  'steel', 'mining', 'chemicals', 'packaging',
+  'railway', 'railroads', 'shipping', 'logistics',
+  'home improvement', 'ecommerce', 'e-commerce', 'ev_charging',
+];
+
+const MAX_SECTOR_COMPANIES = 3;
+
+function detectSectorFromQuestion(question) {
+  const q = String(question || '').toLowerCase();
+  // Longest match wins so "electric vehicle" beats "vehicle" or "ev".
+  const sorted = [...SECTOR_KEYWORDS].sort((a, b) => b.length - a.length);
+  for (const kw of sorted) {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
+    if (re.test(q)) return kw;
+  }
+  return null;
+}
+
+async function runSectorFrameworkPath(question) {
+  const sectorTerm = detectSectorFromQuestion(question);
+  if (!sectorTerm) {
+    console.log(`[secHandler:sector] no sector keyword matched — falling through`);
+    return null;
+  }
+
+  const tickers = findAllowlistTickers(sectorTerm);
+  if (!tickers || tickers.length === 0) {
+    console.log(`[secHandler:sector] "${sectorTerm}" not in allowlist — falling through`);
+    return null;
+  }
+
+  const cappedTickers = tickers.slice(0, MAX_SECTOR_COMPANIES);
+  console.log(`[secHandler:sector] "${sectorTerm}" → tickers=[${cappedTickers.join(',')}] (latest year only)`);
+
+  // Build a fake intent object that retrieveForIntent can consume
+  const sectorIntent = {
+    tickers: cappedTickers,
+    allYears: [],
+    fiscalYear: null,
+    questionCategory: 'swot',
+    isNumericQuestion: false,
+    itemCode: null,
+    metric: null,
+    metricsFound: [],
+  };
+
+  const { chunks } = await retrieveForIntent(question, sectorIntent, { latestOnly: true });
+  if (!chunks || !chunks.length) {
+    console.log(`[secHandler:sector] 0 chunks retrieved for [${cappedTickers.join(',')}]`);
+    return null;
+  }
+
+  const injectChunks = chunks.map((c) => ({
+    id: c.qdrant_point_id || null,
+    score: 1.0,
+    module_id: '__sec__',
+    module_name: 'SEC Filing',
+    title: `${c.ticker} ${c.fiscal_year} 10-K — ${c.item_code}`,
+    chunk_text: c.chunk_text || '',
+    article_id: null,
+    published_date: null,
+    submodule_id: null,
+    _matched: true,
+    _vector_score: 1.0,
+    _boost_mult: 1.0,
+    _boost_penalty: 1.0,
+    _boost_matched: { conceptsInTitle: [], entitiesInTitle: [] },
+    _sec: true,
+    _sec_payload: {
+      ticker: c.ticker,
+      fiscal_year: c.fiscal_year,
+      item_code: c.item_code,
+      qdrant_point_id: c.qdrant_point_id || null,
+    },
+  }));
+
+  console.log(`[secHandler:sector] injecting ${injectChunks.length} SEC chunk(s) for sector "${sectorTerm}"`);
+  return {
+    mode: 'framework',
+    injectChunks,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Framework path — pull SEC chunks, hand back for V2 decisionHandler
 // ─────────────────────────────────────────────────────────────────────────
 async function runFrameworkPath(question, intent) {
@@ -579,6 +686,22 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
+    // Guard: if the question is about a SECTOR/INDUSTRY rather than a
+    // named company, wipe any fuzzy-matched tickers. Prevents false
+    // positives like "automobile industry" → TMUS via fuzzy match.
+    const sectorWordInQuestion = detectSectorFromQuestion(question);
+    if (sectorWordInQuestion && Array.isArray(intent.tickers) && intent.tickers.length > 0) {
+      const q = question.toLowerCase();
+      const literallyNamed = intent.tickers.filter((t) => {
+        const re = new RegExp(`\\b${t.toLowerCase()}\\b`);
+        return re.test(q);
+      });
+      if (literallyNamed.length === 0) {
+        console.log(`[secHandler] sector question ("${sectorWordInQuestion}") — clearing fuzzy tickers [${intent.tickers.join(',')}]`);
+        intent.tickers = [];
+      }
+    }
+
     const shape = detectSecShape(question, routerResult, intent);
     if (!shape) {
       console.log(`[secHandler] not SEC-shaped — falling through`);
@@ -602,6 +725,18 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       // Non-US but not SEC-numeric (framework, narrative, list).
       // Let V2 handle it — it can answer from client signals.
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
+      return null;
+    }
+
+    // ── Framework + no ticker → try sector path ────────────────────────
+    // "cosmetics industry SWOT", "automobile industry SWOT" etc.
+    const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
+    const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
+
+    if (isFrameworkQuestion && !hasTickers) {
+      const sectorResult = await runSectorFrameworkPath(question);
+      if (sectorResult) return sectorResult;
+      console.log(`[secHandler] framework + no ticker + no sector match — falling through`);
       return null;
     }
 

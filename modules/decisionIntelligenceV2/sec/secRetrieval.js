@@ -504,15 +504,40 @@ async function retrieveChunks(question, intent, topK = 6) {
 
 const FRAMEWORK_ITEM_CODES = ['Item 1', 'Item 1A', 'Item 7'];
 
-async function retrieveChunksStratified(question, intent, topK = 12) {
+async function getLatestFiscalYear(ticker) {
+  const { data } = await supabase
+    .from('financial_facts')
+    .select('fiscal_year')
+    .eq('ticker', ticker)
+    .order('fiscal_year', { ascending: false })
+    .limit(1);
+  return data?.[0]?.fiscal_year || null;
+}
+
+async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) {
+  const { latestOnly = false } = opts;
   const queryVector = await embedText(question);
   const tickers = intent.tickers.length ? intent.tickers : [null];
-  const years = intent.allYears.length ? intent.allYears : [intent.fiscalYear];
   const perSectionK = Math.max(2, Math.floor(topK / FRAMEWORK_ITEM_CODES.length));
+
+  // If latestOnly, resolve the most recent fiscal year per ticker first.
+  const tickerYears = new Map();
+  if (latestOnly) {
+    for (const ticker of tickers) {
+      if (!ticker) continue;
+      const latest = await getLatestFiscalYear(ticker);
+      if (latest) tickerYears.set(ticker, [latest]);
+    }
+  }
 
   const allHits = [];
   const seenIds = new Set();
   for (const ticker of tickers) {
+    const years = latestOnly
+      ? (tickerYears.get(ticker) || [])
+      : (intent.allYears.length ? intent.allYears : [intent.fiscalYear]);
+    if (latestOnly && years.length === 0) continue;
+
     for (const year of years) {
       for (const itemCode of FRAMEWORK_ITEM_CODES) {
         const hits = await searchOne(queryVector, ticker, year, itemCode, perSectionK);
@@ -530,10 +555,10 @@ async function retrieveChunksStratified(question, intent, topK = 12) {
 
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'risk_analysis', 'five_forces']);
 
-async function retrieveForIntent(question, intent) {
+async function retrieveForIntent(question, intent, opts = {}) {
   const isFramework = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
   const chunks = isFramework
-    ? await retrieveChunksStratified(question, intent, 12)
+    ? await retrieveChunksStratified(question, intent, 12, opts)
     : await retrieveChunks(question, intent, 6);
 
   let facts = [];
