@@ -188,6 +188,7 @@ function sanitizeQuestionForLLM(question, unresolvedMentions) {
 async function extractIntentFromRouter(question, routerResult, getAllCompaniesFn) {
   const lookup = await loadCompanyLookup(getAllCompaniesFn);
 
+  // 1. Tickers — resolve entity_mentions against companies
   const tickers = [];
   for (const entity of routerResult.entity_mentions || []) {
     const upper = String(entity).toUpperCase().trim();
@@ -199,11 +200,13 @@ async function extractIntentFromRouter(question, routerResult, getAllCompaniesFn
   }
   const ticker = tickers[0] || null;
 
+  // 2. Metrics — from router's metrics_found array
   const metricsFound = Array.isArray(routerResult.metrics_found)
     ? routerResult.metrics_found.filter(Boolean)
     : [];
   const metric = metricsFound.length === 1 ? metricsFound[0] : null;
 
+  // 3. Time — convert time_constraint to year range
   let requestedYearCount = null;
   let allYears = [];
   const tc = routerResult.time_constraint;
@@ -225,32 +228,25 @@ async function extractIntentFromRouter(question, routerResult, getAllCompaniesFn
     if (explicitYears.length) allYears = explicitYears;
   }
 
+  // 4. Framework — from router directly
   const framework = routerResult.framework || null;
   const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'five_forces', 'risk_analysis']);
   const isFrameworkQuestion = framework && FRAMEWORK_CATEGORIES.has(framework);
 
+  // 5. Numeric: any metric mentioned means it's a financial question.
+  //    This is TRUE even for 2-metric questions where `metric` is null.
   const isNumericQuestion = metricsFound.length > 0 && !isFrameworkQuestion;
 
-  // ── Question category ──────────────────────────────────────────────
-  // Order matters:
-  //   1. Framework wins outright.
-  //   2. 2+ metrics on the same ticker = relationship → scatter.
-  //   3. 1 metric → trend / comparison / single_value.
-  //   4. No metrics → qualitative.
+  // 6. Question category
   let questionCategory;
-  if (isFrameworkQuestion) {
-    questionCategory = framework;
-  } else if (metricsFound.length >= 2) {
-    questionCategory = 'relationship';
-  } else if (metricsFound.length === 1) {
+  if (isFrameworkQuestion) questionCategory = framework;
+  else if (metricsFound.length > 0) {
     const yearCount = allYears.length || (requestedYearCount || 1);
     if (tickers.length > 1 && yearCount > 1) questionCategory = 'comparison_trend';
     else if (tickers.length > 1) questionCategory = 'comparison';
     else if (yearCount > 1) questionCategory = 'trend';
     else questionCategory = 'single_value';
-  } else {
-    questionCategory = 'qualitative';
-  }
+  } else questionCategory = 'qualitative';
 
   const dataType = isNumericQuestion ? 'quantitative' : 'qualitative';
 
@@ -431,7 +427,7 @@ async function extractIntent(question, getAllCompaniesFn) {
   else if (isRiskAnalysis) questionCategory = 'risk_analysis';
   else if (isSwot) questionCategory = 'swot';
   else if (dataType === 'qualitative') questionCategory = 'qualitative';
-  else if (metricsFound.length >= 2) questionCategory = 'relationship';
+  else if (isRelationshipQuestion && metricsFound.length >= 2) questionCategory = 'relationship';
   else if (isDistributionQuestion && nEntities >= 5) questionCategory = 'distribution';
   else {
     if (isDistributionQuestion && nEntities < 5) insufficientForDistribution = true;
@@ -573,6 +569,9 @@ async function retrieveForIntent(question, intent, opts = {}) {
 
   let facts = [];
   if (intent.isNumericQuestion) {
+    // Metric used for narrowing DB lookups. For multi-metric questions,
+    // we don't narrow by metric when finding the latest years — we use
+    // the first metric in the array so the year range is consistent.
     const metricForLookup = (intent.metricsFound && intent.metricsFound[0]) || intent.metric || 'Revenue';
 
     for (const ticker of intent.tickers) {
@@ -592,11 +591,13 @@ async function retrieveForIntent(question, intent, opts = {}) {
       }
     }
 
+    // Filter by metric — handle 0, 1, or 2+ metrics.
     if (intent.metricsFound && intent.metricsFound.length >= 1) {
       facts = facts.filter(f => intent.metricsFound.includes(f.metric_name));
     } else if (intent.metric) {
       facts = facts.filter(f => f.metric_name === intent.metric);
     }
+    // No metric filter → return whatever matched ticker + years.
 
     if (intent.requestedYearCount && intent.tickers.length === 1 && facts.length > 0) {
       const distinctYears = [...new Set(facts.map(f => f.fiscal_year))];
