@@ -2,47 +2,33 @@
  * modules/decisionIntelligenceV2/sec/subsectorResolver.js
  *
  * Extracted from the old modules/decisionIntelligence/route.js.
- * Contains ONLY the SEC-related helpers, moved as-is:
- *   - SUBSECTOR_ALLOWLISTS
- *   - SECTOR_ALIASES + expandSectorAliases
- *   - findAllowlistTickers
- *   - selectCompaniesForSubsector
- *   - resolveCompanySetFacts
- *
- * No logic changed. Just relocated so V2 owns its own SEC code and the
- * old route.js stays as reference.
+ * Contains ONLY the SEC-related helpers.
  */
 
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// ── Subsector allow-lists ────────────────────────────────────────────────
 const SUBSECTOR_ALLOWLISTS = {
-  // ── Pharma / Biotech ────────────────────────────────────────────────
   pharma: ['JNJ','LLY','PFE','MRK','ABBV','BMY','AMGN','GILD','VRTX','REGN','BIIB','MRNA'],
   pharmaceutical: ['JNJ','LLY','PFE','MRK','ABBV','BMY','AMGN','GILD','VRTX','REGN','BIIB','MRNA'],
   biotech: ['AMGN','GILD','VRTX','REGN','BIIB','MRNA','INCY','BMRN','ALNY','SGEN'],
   biotechnology: ['AMGN','GILD','VRTX','REGN','BIIB','MRNA','INCY','BMRN','ALNY','SGEN'],
 
-  // ── Retail ──────────────────────────────────────────────────────────
   retail: ['WMT','AMZN','COST','HD','LOW','TGT','KR','BBY','ROST','TJX','DG','DLTR','ORLY','AZO','TSCO','ULTA','LULU','NKE'],
   retailer: ['WMT','AMZN','COST','HD','LOW','TGT','KR','BBY','ROST','TJX','DG','DLTR','ORLY','AZO','TSCO','ULTA','LULU','NKE'],
   retailers: ['WMT','AMZN','COST','HD','LOW','TGT','KR','BBY','ROST','TJX','DG','DLTR','ORLY','AZO','TSCO','ULTA','LULU','NKE'],
 
-  // ── Banks / Financials ──────────────────────────────────────────────
   bank: ['JPM','BAC','WFC','C','USB','PNC','TFC','GS','MS','SCHW','COF','BK','STT','FITB','HBAN','RF','CFG','MTB','KEY'],
   banks: ['JPM','BAC','WFC','C','USB','PNC','TFC','GS','MS','SCHW','COF','BK','STT','FITB','HBAN','RF','CFG','MTB','KEY'],
   banking: ['JPM','BAC','WFC','C','USB','PNC','TFC','GS','MS','SCHW','COF','BK','STT','FITB','HBAN','RF','CFG','MTB','KEY'],
   insurance: ['BRK.B','PGR','AIG','MET','PRU','AFL','ALL','TRV','CB','HIG','AON','MMC','AJG','WTW','GL','AIZ','CINF','WRB'],
   insurers: ['BRK.B','PGR','AIG','MET','PRU','AFL','ALL','TRV','CB','HIG','AON','MMC','AJG','WTW','GL','AIZ','CINF','WRB'],
 
-  // ── Energy / Oil & Gas ──────────────────────────────────────────────
   oil: ['XOM','CVX','COP','EOG','OXY','PSX','VLO','MPC','SLB','HAL','BKR','DVN','FANG','HES','APA','MRO','PXD','KMI','WMB','OKE','TRGP'],
   'oil and gas': ['XOM','CVX','COP','EOG','OXY','PSX','VLO','MPC','SLB','HAL','BKR','DVN','FANG','HES','APA','MRO','PXD','KMI','WMB','OKE','TRGP'],
   energy: ['XOM','CVX','COP','EOG','OXY','PSX','VLO','MPC','SLB','HAL','BKR','NEE','DUK','SO','D','AEP','EXC','SRE','PEG','XEL'],
   'oilfield services': ['SLB','HAL','BKR','NOV','FTI','WHD','OIS','RES'],
 
-  // ── Tech / Semiconductors ───────────────────────────────────────────
   tech: ['AAPL','MSFT','NVDA','GOOGL','AMZN','META','AVGO','ORCL','CRM','ADBE','AMD','INTC','CSCO','QCOM','TXN','INTU','NOW','AMAT','MU','ADI','LRCX','KLAC','PANW','SNPS','CDNS'],
   technology: ['AAPL','MSFT','NVDA','GOOGL','AMZN','META','AVGO','ORCL','CRM','ADBE','AMD','INTC','CSCO','QCOM','TXN','INTU','NOW','AMAT','MU','ADI','LRCX','KLAC','PANW','SNPS','CDNS'],
   semiconductor: ['NVDA','AVGO','AMD','INTC','QCOM','TXN','MU','AMAT','LRCX','KLAC','ADI','MCHP','NXPI','ON','SWKS','MRVL','TER','MPWR'],
@@ -50,25 +36,24 @@ const SUBSECTOR_ALLOWLISTS = {
   software: ['MSFT','ORCL','CRM','ADBE','INTU','NOW','SNPS','CDNS','PANW','WDAY','TEAM','MDB','DDOG','SNOW','CRWD','FTNT','ADSK','ANSS','PTC','TYL'],
   cloud: ['AMZN','MSFT','GOOGL','ORCL','CRM','NOW','SNOW','DDOG','MDB','TEAM'],
 
-  // ── Airlines / Industrials ──────────────────────────────────────────
   airline: ['DAL','UAL','AAL','LUV','ALK','JBLU','SAVE','HA'],
   airlines: ['DAL','UAL','AAL','LUV','ALK','JBLU','SAVE','HA'],
 
-  // ── Autos ───────────────────────────────────────────────────────────
   auto: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
   autos: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
   automaker: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
   automakers: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
+  automobile: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
+  automobiles: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
+  automotive: ['TSLA','F','GM','RIVN','LCID','TM','HMC','STLA'],
   'electric vehicle': ['TSLA','RIVN','LCID','NIO','XPEV','LI','FSR'],
   'electric vehicles': ['TSLA','RIVN','LCID','NIO','XPEV','LI','FSR'],
   ev: ['TSLA','RIVN','LCID','NIO','XPEV','LI','FSR'],
 
-  // ── Cosmetics / Beauty ──────────────────────────────────────────────
   cosmetic: ['EL','ULTA','COTY','ELF','BBWI','IPAR'],
   cosmetics: ['EL','ULTA','COTY','ELF','BBWI','IPAR'],
   beauty: ['EL','ULTA','COTY','ELF','BBWI','IPAR'],
 
-  // ── Utilities / Telecom / Media ─────────────────────────────────────
   utility: ['NEE','DUK','SO','D','AEP','EXC','SRE','PEG','XEL','ED','WEC','ES','DTE','PPL','FE','ETR','AEE','CMS','CNP','NI','ATO','LNT','EVRG','PNW','NRG','VST','AES','CEG'],
   utilities: ['NEE','DUK','SO','D','AEP','EXC','SRE','PEG','XEL','ED','WEC','ES','DTE','PPL','FE','ETR','AEE','CMS','CNP','NI','ATO','LNT','EVRG','PNW','NRG','VST','AES','CEG'],
   telecom: ['T','VZ','TMUS','LUMN','USM','SHEN'],
@@ -76,12 +61,10 @@ const SUBSECTOR_ALLOWLISTS = {
   media: ['DIS','CMCSA','NFLX','WBD','PARA','FOXA','NWSA','LYV','OMC','TTWO','EA','PSKY'],
   streaming: ['NFLX','DIS','WBD','PARA','CMCSA','FOXA'],
 
-  // ── Food / Beverage / Consumer ──────────────────────────────────────
   food: ['PEP','KO','MDLZ','GIS','KHC','HSY','SYY','KR','ADM','TSN','CAG','CPB','MKC','HRL','SJM'],
   beverage: ['KO','PEP','MNST','STZ','KDP','TAP','BF.B','SAM'],
   beverages: ['KO','PEP','MNST','STZ','KDP','TAP','BF.B','SAM'],
 
-  // ── Misc high-frequency ─────────────────────────────────────────────
   aerospace: ['BA','RTX','LMT','NOC','GD','LHX','HII','TDG','HEI','TXT','AXON','HWM','GE'],
   defense: ['LMT','RTX','NOC','GD','BA','LHX','HII','TDG','LDOS','SAIC','KTOS'],
   healthcare: ['UNH','CVS','CI','ELV','HUM','CNC','HCA','UHS','MCK','COR','CAH','JNJ','PFE','ABT','TMO','DHR'],
@@ -105,11 +88,39 @@ const SUBSECTOR_ALLOWLISTS = {
   ecommerce: ['AMZN','EBAY','ETSY','W','CHWY','SHOP','PDD','BABA'],
   'e-commerce': ['AMZN','EBAY','ETSY','W','CHWY','SHOP','PDD','BABA'],
   ev_charging: ['TSLA','CHPT','EVGO','BLNK'],
+
+  'k-beauty': ['EL','ULTA'],
+};
+
+// Alias → canonical key normalization. Applied before lookup.
+const NORMALIZE_SECTOR = {
+  'automobile': 'auto',
+  'automobiles': 'auto',
+  'automotive': 'auto',
+  'autos': 'auto',
+  'automaker': 'auto',
+  'automakers': 'auto',
+  'cosmetics': 'cosmetic',
+  'airlines': 'airline',
+  'pharmaceutical': 'pharma',
+  'pharmaceuticals': 'pharma',
+  'banking': 'bank',
+  'banks': 'bank',
+  'retailers': 'retail',
+  'insurers': 'insurance',
+  'semiconductors': 'semiconductor',
+  'beverages': 'beverage',
+  'hotels': 'hotel',
+  'restaurants': 'restaurant',
+  'railroads': 'railway',
 };
 
 function findAllowlistTickers(subsectorTerm) {
   if (!subsectorTerm) return null;
-  const key = String(subsectorTerm).toLowerCase().trim();
+  let key = String(subsectorTerm).toLowerCase().trim();
+
+  if (NORMALIZE_SECTOR[key]) key = NORMALIZE_SECTOR[key];
+
   if (SUBSECTOR_ALLOWLISTS[key]) return SUBSECTOR_ALLOWLISTS[key];
   if (key.endsWith('s') && SUBSECTOR_ALLOWLISTS[key.slice(0, -1)]) {
     return SUBSECTOR_ALLOWLISTS[key.slice(0, -1)];
@@ -117,7 +128,6 @@ function findAllowlistTickers(subsectorTerm) {
   return null;
 }
 
-// ── Sector alias map ────────────────────────────────────────────────────────
 const SECTOR_ALIASES = {
   'Information Technology': ['Information Technology', 'Technology'],
 };
@@ -127,10 +137,7 @@ function expandSectorAliases(sector) {
   return SECTOR_ALIASES[sector] || [sector];
 }
 
-// ── Subsector company picker ────────────────────────────────────────────────
 async function selectCompaniesForSubsector(subsectorTerm, sectorHint = null, metric = null) {
-  const candidates0 = [];
-
   let candidates = null;
   let source = null;
   let reasoning = '';
@@ -279,7 +286,6 @@ If no companies qualify, return: { "tickers": [], "reasoning": "no matches" }`;
   return { tickers: surviving, reasoning, source, dropped, totalConsidered };
 }
 
-// ── Company-set facts resolver ──────────────────────────────────────────────
 async function resolveCompanySetFacts(filter) {
   let coverageInfo = null;
 
@@ -420,6 +426,7 @@ async function resolveCompanySetFacts(filter) {
 module.exports = {
   SUBSECTOR_ALLOWLISTS,
   SECTOR_ALIASES,
+  NORMALIZE_SECTOR,
   findAllowlistTickers,
   expandSectorAliases,
   selectCompaniesForSubsector,

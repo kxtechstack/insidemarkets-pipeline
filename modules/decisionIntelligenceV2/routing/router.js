@@ -2,27 +2,10 @@
  * modules/decisionIntelligenceV2/routing/router.js
  *
  * STAGE 2 (unified) — single LLM call classifies the user's question.
- *
- * Produces:
- *   intent, type, time_constraint, entity_mentions, concept_keywords,
- *   is_company_set_query, primary_intent
- *
- * Key design principle:
- *   Code enforces SHAPE. The prompt enforces CONTENT.
- *
- * Only two post-LLM corrections live in code:
- *   - stripIndustryName() — removes the exact industry string passed in
- *   - normalizeTimeConstraint() — uses the user's phrase as ground truth
- *
- * NOTE ON PROMPTS-IN-CODE: prompt lives in code during Stage 2. Moves to
- * public.prompts at Stage 6 cutover.
  */
 
 const { callLLM } = require('../../llmClient');
 
-// ─────────────────────────────────────────────────────────────────────────
-// TODO (Stage 6): move to DB under id 'di_v2_router_v1'
-// ─────────────────────────────────────────────────────────────────────────
 const ROUTER_PROMPT = `You are a classifier for a market intelligence chat assistant.
 
 The user has asked a question. Analyze it and return structured metadata
@@ -41,6 +24,7 @@ Return ONLY this JSON object:
   },
   "entity_mentions": ["<proper nouns from the question>"],
   "concept_keywords": ["<literal 1-2 word search terms>"],
+  "sector_term": "<the industry or sector word the question is about, or null>",
   "is_company_set_query": true | false,
   "primary_intent": "<one sentence summarizing what the user wants, or a short reply if intent is not market_intelligence>"
 }
@@ -97,7 +81,7 @@ CRITICAL: value and unit MUST AGREE.
   "yesterday"      → { "value": 2,  "unit": "days", "phrase": "yesterday" }
 
 Never use a value greater than what fits in one year for that unit:
-  ✗ { "value": 7, "unit": "weeks" }    — that's 7 weeks, not "a week"
+  ✗ { "value": 7, "unit": "weeks" }
   ✓ { "value": 7, "unit": "days" }
 
 --- entity_mentions ---
@@ -125,9 +109,7 @@ in the TITLE of a relevant article.
 
 CRITICAL RULES:
 
-1. DO NOT include GENERIC SYNONYMS that could apply to many different topics.
-   These words are NEVER useful as concepts because almost every article
-   contains them:
+1. DO NOT include GENERIC SYNONYMS that could apply to many different topics:
      ✗ compliance, requirements, obligations, rules, laws
      ✗ updates, update, news, recent
      ✗ activity, activities
@@ -147,24 +129,22 @@ WORKED EXAMPLES:
 
   Q: "List recent funding rounds in our Cosmetics industry"
   GOOD: ["funding", "round", "raise"]
-  BAD:  ["funding", "rounds", "industry"]  ← "industry" is generic filler
+  BAD:  ["funding", "rounds", "industry"]
 
   Q: "Any new AML compliance requirements?"
   GOOD: ["aml", "anti-money laundering"]
-  BAD:  ["aml", "compliance", "requirements"]  ← "compliance" and "requirements" are filler
+  BAD:  ["aml", "compliance", "requirements"]
 
   Q: "List recent licensing updates"
   GOOD: ["licensing", "license", "permit"]
-  BAD:  ["licensing", "update"]  ← "update" is filler
+  BAD:  ["licensing", "update"]
 
   Q: "What are the latest tech trends in K-beauty?"
   GOOD: ["k-beauty", "technology", "innovation"]
-  BAD:  ["tech", "trends", "k-beauty"]  ← "trends" is filler
+  BAD:  ["tech", "trends", "k-beauty"]
 
   Q: "What are the major policy changes in the last week?"
   GOOD: ["regulation", "policy", "compliance", "reform"]
-       (here "compliance" IS specific because the question is about
-        policy, not about compliance in general)
   BAD:  ["policy", "changes", "week"]
 
   Q: "What is the New Excise Duty on Vaping Products?"
@@ -182,6 +162,31 @@ Include synonyms that JOURNALISTS use for the topic:
   Layoff topics     → layoff, workforce, reduction
   Launch topics     → launch, introduced, unveiled
 
+--- sector_term ---
+The industry or sector the question is about, as a single lowercase word
+or short phrase. Set to null if the question is about a specific named
+company, or if there is no clear sector.
+
+Examples:
+  "SWOT for cosmetics industry"         → "cosmetics"
+  "PESTLE for the beauty sector"        → "beauty"
+  "automobile industry SWOT"            → "automobile"
+  "five forces of the pharma market"    → "pharma"
+  "household products industry SWOT"    → "household products"
+  "dairy industry outlook"              → "dairy"
+  "SWOT for Estée Lauder"               → null
+  "top 5 cosmetic companies by revenue" → "cosmetics"
+  "risk analysis for K-beauty"          → "k-beauty"
+  "should we enter the K-beauty market?"→ "k-beauty"
+  "what's happening with L'Oréal?"      → null
+
+Rules:
+- Include product-category words and industry names.
+- Do NOT include generic words like "market", "industry", "sector",
+  "business", "company".
+- Do NOT include country/region names.
+- If the question is about a specific named company, output null.
+
 --- is_company_set_query ---
 TRUE only if the user asks to COMPARE FINANCIAL METRICS across a SET of
 public companies ("top 5 cosmetic companies by revenue", "which tech
@@ -190,6 +195,17 @@ income"). FALSE for everything else.
 
 A question about "our Cosmetics industry" is NOT a company-set query,
 even though it mentions cosmetics.
+
+"rank X by Y", "top N X by Y", "which X have the highest Y",
+"compare X by Y" — ALL of these ARE company-set queries when X refers
+to a sector/subsector of public companies and Y is a financial metric.
+
+  "rank US banks by total assets"           → is_company_set_query: true, sector_term: "banks"
+  "top 10 pharma companies by revenue"      → is_company_set_query: true, sector_term: "pharma"
+  "which tech companies have the highest margins" → true, "tech"
+  "compare automotive companies' net income" → true, "automotive"
+  "top 5 airlines by revenue"               → true, "airlines"
+  "rank US insurance companies by assets"   → true, "insurance"
 
 =========================
 EXAMPLES
@@ -202,6 +218,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": [],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "Hi! What would you like to know about your market data?"
 }
@@ -213,6 +230,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": [],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "I focus on market and business intelligence — I can't help with weather. Ask me about your industry data instead."
 }
@@ -224,6 +242,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": [],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "Could you give me a bit more to go on? Try asking about recent developments in your industry."
 }
@@ -235,6 +254,7 @@ Output: {
   "time_constraint": { "present": true, "value": 7, "unit": "days", "phrase": "last week" },
   "entity_mentions": [],
   "concept_keywords": ["regulation", "policy", "compliance", "reform"],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "List the major policy changes that occurred in the last week."
 }
@@ -246,6 +266,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": ["funding", "round", "raise"],
+  "sector_term": "cosmetics",
   "is_company_set_query": false,
   "primary_intent": "List recent funding rounds in the Cosmetics industry."
 }
@@ -257,6 +278,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": ["aml", "anti-money-laundering"],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "List any new AML compliance requirements."
 }
@@ -268,6 +290,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": ["LG H&H"],
   "concept_keywords": ["lg", "h&h"],
+  "sector_term": null,
   "is_company_set_query": false,
   "primary_intent": "Provide recent updates about LG H&H."
 }
@@ -279,6 +302,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": ["swot"],
+  "sector_term": "cosmetics",
   "is_company_set_query": false,
   "primary_intent": "SWOT analysis of the cosmetics industry."
 }
@@ -290,6 +314,7 @@ Output: {
   "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
   "entity_mentions": [],
   "concept_keywords": ["revenue"],
+  "sector_term": "cosmetics",
   "is_company_set_query": true,
   "primary_intent": "Rank the top 5 cosmetic companies by revenue."
 }
@@ -298,7 +323,6 @@ Output: {
 
 Respond with ONLY the JSON object. No markdown fences, no explanation.`;
 
-// ─────────────────────────────────────────────────────────────────────────
 const UNIT_DAYS = {
   days: 1, weeks: 7, months: 30, quarters: 90, years: 365,
 };
@@ -337,6 +361,7 @@ function fallbackResult(question) {
     time_constraint: { present: false, value: null, unit: null, phrase: null },
     entity_mentions: [],
     concept_keywords: [],
+    sector_term: null,
     is_company_set_query: false,
     primary_intent: String(question || '').slice(0, 200),
     _fallback: true,
@@ -444,6 +469,10 @@ function sanitize(parsed, question) {
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0)
       .slice(0, 8);
+  }
+
+  if (typeof parsed.sector_term === 'string' && parsed.sector_term.trim()) {
+    out.sector_term = parsed.sector_term.trim().toLowerCase().slice(0, 60);
   }
 
   if (typeof parsed.is_company_set_query === 'boolean') {

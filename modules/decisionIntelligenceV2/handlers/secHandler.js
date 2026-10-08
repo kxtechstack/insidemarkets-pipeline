@@ -2,29 +2,9 @@
  * modules/decisionIntelligenceV2/handlers/secHandler.js
  *
  * SEC sidecar for V2.
- *
- * This file is OPTIONAL. If anything inside it throws, it returns null
- * and V2 runs exactly as it does today. No V2 behavior is modified by
- * the presence of this file.
- *
- * Decides whether a question is SEC-shaped, and if so:
- *   1. Company-set ("top 5 cosmetic companies by revenue") → numeric path
- *      with allowlist subsector picking + financial_facts + chart. 0 LLM.
- *   2. Named ticker + numeric ("Apple revenue last 3 years") → numeric
- *      path from financial_facts. 0 LLM.
- *   3. Named ticker + framework ("SWOT for Estée Lauder") → pulls SEC
- *      narrative chunks and returns them as `injectChunks` so V2's
- *      decisionHandler merges them into its writer context.
- *
- * Non-US geography:
- *   · If the question names a non-US region and is SEC-numeric-shaped
- *     (ranking / financial metric / company-set), we NEVER fall through.
- *     Instead we look for hits that mention the region AND match the
- *     question's topic. If we find enough, return a list. Otherwise
- *     return no_data.
- *   · If the question names a non-US region but is NOT SEC-numeric (e.g.
- *     a SWOT for a non-US market), we fall through to V2 as before.
  */
+
+console.log('[secHandler] MODULE LOADED');
 
 const { detectNonUSGeography, resolveCompanySet } = require('../sec/resolveCompanySet');
 const {
@@ -33,16 +13,8 @@ const {
 } = require('../sec/subsectorResolver');
 const { extractIntent, retrieveForIntent, getAllCompanies } = require('../sec/secRetrieval');
 const { buildNumericAnswer } = require('../sec/buildNumericAnswer');
-const { decideChartFormat, renderChart } = require('../sec/chartPipeline');
 const { getRegionAliases } = require('../sec/regionAliases');
 const { containsPhrase, normalizeConcepts } = require('../retrieval/filterListHits');
-
-// ─────────────────────────────────────────────────────────────────────────
-// Module IDs
-// ─────────────────────────────────────────────────────────────────────────
-const POLICY_MODULE_ID = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
-const MD_MODULE_ID     = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
-const FO_MODULE_ID     = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'five_forces', 'risk_analysis']);
 
@@ -52,13 +24,56 @@ const NUMERIC_KEYWORDS = [
   'what was the', 'capital expenditure', 'r&d spending',
 ];
 
-// Threshold for the region fallback: how many topic+region-matching hits
-// we need before we surface them as a list. Below this we return no_data.
 const REGION_MIN_HITS = 3;
 
-// ─────────────────────────────────────────────────────────────────────────
-// Shape detection
-// ─────────────────────────────────────────────────────────────────────────
+// Fallback keyword list — only used if the router didn't supply a sector_term.
+const SECTOR_KEYWORDS_FALLBACK = [
+  'cosmetic', 'cosmetics', 'beauty',
+  'pharma', 'pharmaceutical', 'biotech', 'biotechnology',
+  'retail', 'retailer', 'retailers',
+  'bank', 'banks', 'banking', 'insurance', 'insurers',
+  'oil', 'oil and gas', 'energy', 'oilfield services',
+  'tech', 'technology', 'semiconductor', 'semiconductors', 'software', 'cloud',
+  'airline', 'airlines',
+  'auto', 'autos', 'automaker', 'automakers', 'automobile', 'automobiles', 'automotive',
+  'electric vehicle', 'electric vehicles', 'ev',
+  'utility', 'utilities', 'telecom', 'telecommunications', 'media', 'streaming',
+  'food', 'beverage', 'beverages',
+  'aerospace', 'defense', 'healthcare', 'health care',
+  'reit', 'reits', 'restaurant', 'restaurants',
+  'travel', 'hotel', 'hotels',
+  'steel', 'mining', 'chemicals', 'packaging',
+  'railway', 'railroads', 'shipping', 'logistics',
+  'home improvement', 'ecommerce', 'e-commerce', 'ev_charging',
+  'k-beauty',
+];
+
+const MAX_SECTOR_COMPANIES = 3;
+
+// Reject entity mentions that are sector descriptors, not proper nouns.
+// "US banks" → rejected. "Delta Air Lines" → kept. No industry keyword list.
+function isValidEntity(mention) {
+  const m = String(mention || '').trim();
+  if (!m) return false;
+  if (!/^[A-Z]/.test(m)) return false;
+
+  // Single-word entities: must be pure letters (with optional one
+  // internal apostrophe / ampersand / period). Rejects "K-beauty",
+  // "US-banks", "3M-corp", etc. Keeps "Glossier", "FDA", "L'Oréal".
+  if (!m.includes(' ')) {
+    return /^[A-Za-zÀ-ÿ]+(?:['&.][A-Za-zÀ-ÿ]+)?$/.test(m);
+  }
+
+  // Multi-word entities: reject if the last word is a generic business
+  // suffix ("US banks", "European companies").
+  const lastWord = m.split(/\s+/).pop().toLowerCase();
+  const genericSuffixes = [
+    'banks', 'companies', 'firms', 'businesses',
+    'brands', 'sector', 'industry', 'market', 'markets',
+  ];
+  return !genericSuffixes.includes(lastWord);
+}
+
 function detectSecShape(question, routerResult, intent) {
   const q = String(question || '').toLowerCase();
 
@@ -79,50 +94,28 @@ function detectSecShape(question, routerResult, intent) {
   return null;
 }
 
-/**
- * Is the question unambiguously asking for SEC-grade numeric data?
- *
- * Broad on purpose — a false positive here just costs one extra filter
- * pass and produces an honest list or no_data response. A false negative
- * means V2 gets to hallucinate a ranked answer from news signals.
- */
 function isSecNumericQuestion(question, routerResult, intent) {
   if (routerResult && routerResult.is_company_set_query === true) return true;
 
   const q = String(question || '').toLowerCase();
 
-  // Ranking phrases
   const hasRanking =
     /\btop\s+\d+\b/.test(q) ||
     /\brank(ed|ing)?\b/.test(q) ||
     /\bhighest\b|\blargest\b|\bbiggest\b|\bbest\b\s+by\b/.test(q) ||
     /\bcompare\b.*\bby\b/.test(q);
 
-  // Financial metric phrases
   const hasMetric = NUMERIC_KEYWORDS.some((k) => q.includes(k)) ||
     /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q);
 
   if (hasRanking && hasMetric) return true;
 
-  // Named ticker + numeric keyword is also SEC-numeric
   const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
   if (hasTickers && hasMetric) return true;
 
   return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Region fallback helpers
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * Deterministic filter: returns hits whose title or chunk_text mentions
- * the region (or one of its aliases) AND matches at least one of the
- * question's concepts.
- *
- * If concepts is empty, we only require the region match — otherwise a
- * router failure would turn a valid region answer into no_data.
- */
 function findRegionHits(hits, region, concepts) {
   const aliases = getRegionAliases(region);
   if (!aliases.length) return { passing: [], regionMatchCount: 0 };
@@ -136,12 +129,10 @@ function findRegionHits(hits, region, concepts) {
   for (const h of hits || []) {
     const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
 
-    // Region check
     const regionMatch = aliases.some((a) => containsPhrase(haystack, a));
     if (!regionMatch) continue;
     regionMatchCount++;
 
-    // Topic check (skip if no concepts available)
     if (requireTopic) {
       const topicMatch = cleanConcepts.some((c) => containsPhrase(haystack, c));
       if (!topicMatch) continue;
@@ -153,17 +144,10 @@ function findRegionHits(hits, region, concepts) {
   return { passing, regionMatchCount };
 }
 
-/**
- * Builds the response payload when a non-US SEC-numeric question is
- * detected. Either surfaces region+topic-matching hits as a list, or
- * returns no_data with an explanatory message.
- */
-async function buildRegionFallbackPayload(region, passingHits, regionMatchCount, question) {
-  const { getVerifiedSuggestions } = require('../decisionIntelligence/suggestionEngine');
+async function buildRegionFallbackPayload(region, passingHits, regionMatchCount, question, clientId) {
+  const { getVerifiedSuggestions } = require('../../decisionIntelligence/suggestionEngine');
 
   if (passingHits.length >= REGION_MIN_HITS) {
-    // Surface the hits as a list with an explanatory message.
-    // Reuse listHandler to produce clean items from the filtered hits.
     const { buildListItems } = require('./listHandler');
 
     let items = [];
@@ -184,12 +168,12 @@ async function buildRegionFallbackPayload(region, passingHits, regionMatchCount,
           `for ${region} instead.`,
       };
     }
+    console.log(`[secHandler:region] passing hits=${passingHits.length} but built items=${items.length} — falling to no_data`);
   }
 
-  // Not enough signal — return no_data
   let suggestions = [];
   try {
-    suggestions = await getVerifiedSuggestions(null, 4);
+    suggestions = await getVerifiedSuggestions(clientId, 4);
   } catch (err) {
     console.log(`[secHandler:region] suggestions failed: ${err.message}`);
   }
@@ -224,11 +208,6 @@ async function buildRegionFallbackPayload(region, passingHits, regionMatchCount,
   };
 }
 
-/**
- * Top-level region fallback. Retrieves client + custom hits, filters by
- * region + topic, and produces a payload. Wrapped so any failure is
- * caught by the outer try in buildSecAnswer.
- */
 async function buildRegionFallback(question, region, clientId, industry, routerResult) {
   const { retrieveClientSignals } = require('../retrieval/clientSignalsRetrieval');
   const { retrieveCustomSourceHits } = require('../retrieval/customSourceRetrieval');
@@ -238,7 +217,6 @@ async function buildRegionFallback(question, region, clientId, industry, routerR
     ...((routerResult && routerResult.entity_mentions) || []),
   ];
 
-  // Fetch both sides in parallel — same retrieval V2 would use.
   let clientHits = [];
   let customHits = [];
   try {
@@ -254,8 +232,6 @@ async function buildRegionFallback(question, region, clientId, industry, routerR
     console.log(`[secHandler:region] retrieval failed: ${err.message}`);
   }
 
-  // Normalize custom hits to the same shape used by buildListItems —
-  // they carry their fields under .payload.
   const normalizedCustom = customHits.map((c, idx) => ({
     id: c.id || `custom_${idx}`,
     score: c.score || 0,
@@ -283,15 +259,21 @@ async function buildRegionFallback(question, region, clientId, industry, routerR
 
   return {
     mode: 'region_fallback',
-    payload: await buildRegionFallbackPayload(region, passing, regionMatchCount, question),
+    payload: await buildRegionFallbackPayload(region, passing, regionMatchCount, question, clientId),
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Chart helper
-// ─────────────────────────────────────────────────────────────────────────
 async function tryBuildChart(intent, facts) {
   if (!Array.isArray(facts) || facts.length < 2) return { chart: null, chartMeta: null };
+
+  let decideChartFormat, renderChart;
+  try {
+    ({ decideChartFormat, renderChart } = require('../sec/chartPipeline'));
+  } catch (err) {
+    console.log(`[secHandler] chartPipeline unavailable (${err.message}) — skipping chart`);
+    return { chart: null, chartMeta: null };
+  }
+
   try {
     const display = decideChartFormat(intent, facts);
     if (display.format === 'chart') {
@@ -341,9 +323,6 @@ async function tryBuildChart(intent, facts) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Numeric path — company-set
-// ─────────────────────────────────────────────────────────────────────────
 async function runCompanySetPath(question, intent) {
   const filter = await resolveCompanySet(question);
   if (!filter) return null;
@@ -406,9 +385,6 @@ async function runCompanySetPath(question, intent) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Numeric path — named tickers
-// ─────────────────────────────────────────────────────────────────────────
 async function runNumericPath(question, intent) {
   const { facts } = await retrieveForIntent(question, intent);
   if (!facts || !facts.length) {
@@ -444,51 +420,21 @@ async function runNumericPath(question, intent) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Sector framework path — "cosmetics industry SWOT" (no ticker named)
-//
-// Matches the industry word in the question against SUBSECTOR_ALLOWLISTS.
-// Pulls the LATEST fiscal year's 10-K chunks for up to 3 companies.
-// Falls through (returns null) if the industry isn't in the allowlist.
-// ─────────────────────────────────────────────────────────────────────────
-const SECTOR_KEYWORDS = [
-  // Every key in SUBSECTOR_ALLOWLISTS is a candidate
-  'cosmetic', 'cosmetics', 'beauty',
-  'pharma', 'pharmaceutical', 'biotech', 'biotechnology',
-  'retail', 'retailer', 'retailers',
-  'bank', 'banks', 'banking', 'insurance', 'insurers',
-  'oil', 'oil and gas', 'energy', 'oilfield services',
-  'tech', 'technology', 'semiconductor', 'semiconductors', 'software', 'cloud',
-  'airline', 'airlines',
-  'auto', 'autos', 'automaker', 'automakers', 'electric vehicle', 'electric vehicles', 'ev',
-  'utility', 'utilities', 'telecom', 'telecommunications', 'media', 'streaming',
-  'food', 'beverage', 'beverages',
-  'aerospace', 'defense', 'healthcare', 'health care',
-  'reit', 'reits', 'restaurant', 'restaurants',
-  'travel', 'hotel', 'hotels',
-  'steel', 'mining', 'chemicals', 'packaging',
-  'railway', 'railroads', 'shipping', 'logistics',
-  'home improvement', 'ecommerce', 'e-commerce', 'ev_charging',
-];
+async function runSectorFrameworkPath(question, sectorTermFromRouter = null) {
+  let sectorTerm = sectorTermFromRouter && String(sectorTermFromRouter).trim();
 
-const MAX_SECTOR_COMPANIES = 3;
-
-function detectSectorFromQuestion(question) {
-  const q = String(question || '').toLowerCase();
-  // Longest match wins so "electric vehicle" beats "vehicle" or "ev".
-  const sorted = [...SECTOR_KEYWORDS].sort((a, b) => b.length - a.length);
-  for (const kw of sorted) {
-    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
-    if (re.test(q)) return kw;
-  }
-  return null;
-}
-
-async function runSectorFrameworkPath(question) {
-  const sectorTerm = detectSectorFromQuestion(question);
   if (!sectorTerm) {
-    console.log(`[secHandler:sector] no sector keyword matched — falling through`);
+    const q = String(question || '').toLowerCase();
+    const sorted = [...SECTOR_KEYWORDS_FALLBACK].sort((a, b) => b.length - a.length);
+    for (const kw of sorted) {
+      const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
+      if (re.test(q)) { sectorTerm = kw; break; }
+    }
+  }
+
+  if (!sectorTerm) {
+    console.log(`[secHandler:sector] no sector term — falling through`);
     return null;
   }
 
@@ -501,7 +447,6 @@ async function runSectorFrameworkPath(question) {
   const cappedTickers = tickers.slice(0, MAX_SECTOR_COMPANIES);
   console.log(`[secHandler:sector] "${sectorTerm}" → tickers=[${cappedTickers.join(',')}] (latest year only)`);
 
-  // Build a fake intent object that retrieveForIntent can consume
   const sectorIntent = {
     tickers: cappedTickers,
     allYears: [],
@@ -550,9 +495,6 @@ async function runSectorFrameworkPath(question) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Framework path — pull SEC chunks, hand back for V2 decisionHandler
-// ─────────────────────────────────────────────────────────────────────────
 async function runFrameworkPath(question, intent) {
   const { chunks } = await retrieveForIntent(question, intent);
   if (!chunks || !chunks.length) {
@@ -595,9 +537,6 @@ async function runFrameworkPath(question, intent) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────
 async function enrichFactsWithNames(facts) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -671,9 +610,6 @@ async function buildNumericSources(facts) {
   return sources;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Main entry
-// ─────────────────────────────────────────────────────────────────────────
 async function buildSecAnswer({ question, routerResult, clientId, industry }) {
   try {
     if (!question || typeof question !== 'string' || !question.trim()) return null;
@@ -686,20 +622,38 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
-    // Guard: if the question is about a SECTOR/INDUSTRY rather than a
-    // named company, wipe any fuzzy-matched tickers. Prevents false
-    // positives like "automobile industry" → TMUS via fuzzy match.
-    const sectorWordInQuestion = detectSectorFromQuestion(question);
-    if (sectorWordInQuestion && Array.isArray(intent.tickers) && intent.tickers.length > 0) {
-      const q = question.toLowerCase();
-      const literallyNamed = intent.tickers.filter((t) => {
-        const re = new RegExp(`\\b${t.toLowerCase()}\\b`);
-        return re.test(q);
-      });
-      if (literallyNamed.length === 0) {
-        console.log(`[secHandler] sector question ("${sectorWordInQuestion}") — clearing fuzzy tickers [${intent.tickers.join(',')}]`);
+    const routerSector = routerResult && typeof routerResult.sector_term === 'string'
+      ? routerResult.sector_term.trim()
+      : null;
+
+    const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
+    const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
+
+    // Sector guard — only clear fuzzy-matched tickers when there are
+    // NO valid company names in the router's entity_mentions. If the user
+    // named a specific company, we keep the ticker even if a sector
+    // term was also extracted.
+    if (routerSector && hasTickers) {
+      const entityMentions = (routerResult && Array.isArray(routerResult.entity_mentions))
+        ? routerResult.entity_mentions
+            .filter((e) => e && String(e).trim().length >= 3)
+            .filter(isValidEntity)
+        : [];
+
+      if (entityMentions.length === 0) {
+        console.log(`[secHandler] sector "${routerSector}" + no company names — clearing fuzzy tickers [${intent.tickers.join(',')}]`);
         intent.tickers = [];
+      } else {
+        console.log(`[secHandler] sector "${routerSector}" + company names present [${entityMentions.join(', ')}] — keeping tickers [${intent.tickers.join(',')}]`);
       }
+    }
+
+    // Early check: framework + no ticker → sector path (runs BEFORE detectSecShape).
+    if (isFrameworkQuestion && !(Array.isArray(intent.tickers) && intent.tickers.length > 0)) {
+      const sectorResult = await runSectorFrameworkPath(question, routerSector);
+      if (sectorResult) return sectorResult;
+      console.log(`[secHandler] framework + no ticker + no sector match — falling through`);
+      return null;
     }
 
     const shape = detectSecShape(question, routerResult, intent);
@@ -710,37 +664,17 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
 
     console.log(`[secHandler] shape=${shape} tickers=[${(intent.tickers || []).join(',')}]`);
 
-    // ── Non-US geography handling ──────────────────────────────────────
     const nonUs = detectNonUSGeography(question);
 
     if (nonUs) {
-      // Is this an SEC-numeric question? Ranking, financial metric, etc.
       if (isSecNumericQuestion(question, routerResult, intent)) {
-        // SEC-numeric + non-US → never fall through. Look for
-        // region+topic-matching hits, or return no_data.
         console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → region fallback`);
         return await buildRegionFallback(question, nonUs, clientId, industry, routerResult);
       }
-
-      // Non-US but not SEC-numeric (framework, narrative, list).
-      // Let V2 handle it — it can answer from client signals.
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
       return null;
     }
 
-    // ── Framework + no ticker → try sector path ────────────────────────
-    // "cosmetics industry SWOT", "automobile industry SWOT" etc.
-    const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
-    const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
-
-    if (isFrameworkQuestion && !hasTickers) {
-      const sectorResult = await runSectorFrameworkPath(question);
-      if (sectorResult) return sectorResult;
-      console.log(`[secHandler] framework + no ticker + no sector match — falling through`);
-      return null;
-    }
-
-    // ── Dispatch ───────────────────────────────────────────────────────
     if (shape === 'company_set') return await runCompanySetPath(question, intent);
     if (shape === 'numeric')     return await runNumericPath(question, intent);
     if (shape === 'framework')   return await runFrameworkPath(question, intent);

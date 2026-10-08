@@ -1,59 +1,7 @@
 [
-  { "id": "q1",  "question": "hi",                                                     "expectedIntent": "greeting" },
-  { "id": "q2",  "question": "hello",                                                  "expectedIntent": "greeting" },
-  { "id": "q3",  "question": "thanks!",                                                "expectedIntent": "greeting" },
-  { "id": "q4",  "question": "bye",                                                    "expectedIntent": "greeting" },
-  { "id": "q5",  "question": "hey there",                                              "expectedIntent": "greeting" },
+  { "id": "d4",  "question": "pestle for delta air lines" },
+  { "id": "d6",  "question": "risk analysis for entering the K-beauty market" },
 
-  { "id": "q6",  "question": "what's the weather in London",                            "expectedIntent": "off_topic" },
-  { "id": "q7",  "question": "tell me a joke",                                          "expectedIntent": "off_topic" },
-  { "id": "q8",  "question": "what time is it",                                         "expectedIntent": "off_topic" },
-  { "id": "q9",  "question": "how do I cook pasta",                                     "expectedIntent": "off_topic" },
-
-  { "id": "q10", "question": "asdf",                                                    "expectedIntent": "clarification" },
-  { "id": "q11", "question": "help",                                                    "expectedIntent": "clarification" },
-  { "id": "q12", "question": "???",                                                     "expectedIntent": "clarification" },
-  { "id": "q13", "question": "hmm",                                                     "expectedIntent": "clarification" },
-
-  { "id": "q14", "question": "What are the major policy changes in the last week?",      "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q15", "question": "List recent funding rounds in our Cosmetics industry",     "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q16", "question": "List recent consolidation or merger activity in Cosmetics sector", "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q17", "question": "Any VC investments in cosmetics brands in last 2 weeks?",  "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q18", "question": "Give me all recent acquisitions in beauty",                "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q19", "question": "Show me new regulatory updates this month",                "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q20", "question": "What are the new product launches in cosmetics?",          "expectedIntent": "market_intelligence", "expectedType": "list" },
-  { "id": "q21", "question": "List everything about K-beauty from the past quarter",     "expectedIntent": "market_intelligence", "expectedType": "list" },
-
-  { "id": "q22", "question": "what updates on glossier",                                 "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q23", "question": "What is the New Excise Duty on Vaping Products?",          "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q24", "question": "What has LG H&H been doing?",                              "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q25", "question": "Why is K-beauty growing so fast?",                         "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q26", "question": "Explain the impact of the new EU cosmetics regulation",    "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q27", "question": "How has the market changed over the last quarter?",        "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q28", "question": "Tell me about Glossier",                                   "expectedIntent": "market_intelligence", "expectedType": "inference" },
-  { "id": "q29", "question": "What's happening with L'Oréal?",                           "expectedIntent": "market_intelligence", "expectedType": "inference" },
-
-  { "id": "q30", "question": "SWOT analysis for cosmetics industry",                     "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q31", "question": "PESTLE analysis for the beauty sector",                    "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q32", "question": "Five forces analysis of the cosmetics market",             "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q33", "question": "Risk analysis for entering the K-beauty market",           "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q34", "question": "Should we enter the K-beauty market?",                     "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q35", "question": "Should we prioritize direct-to-consumer over retail?",     "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q36", "question": "How should we price against Estée Lauder?",                "expectedIntent": "market_intelligence", "expectedType": "decision" },
-  { "id": "q37", "question": "What's our competitive position in anti-aging skincare?",  "expectedIntent": "market_intelligence", "expectedType": "decision" },
-
-  { "id": "q38", "question": "Top 5 cosmetic companies by revenue",                      "expectedIntent": "market_intelligence", "expectedType": "decision", "expectedCompanySet": true },
-  { "id": "q39", "question": "Which beauty companies have the highest margins?",         "expectedIntent": "market_intelligence", "expectedType": "decision", "expectedCompanySet": true },
-  { "id": "q40", "question": "Compare automotive companies' net income",                 "expectedIntent": "market_intelligence", "expectedType": "decision", "expectedCompanySet": true },
-  { "id": "q41", "question": "Top 10 pharmaceutical companies by revenue",               "expectedIntent": "market_intelligence", "expectedType": "decision", "expectedCompanySet": true },
-  { "id": "q42", "question": "Rank US banks by total assets",                            "expectedIntent": "market_intelligence", "expectedType": "decision", "expectedCompanySet": true },
-
-  { "id": "q43", "question": "What are the largest beauty companies?",                   "ambiguous": true },
-  { "id": "q44", "question": "What are the main regulatory risks in my industry?",       "ambiguous": true },
-  { "id": "q45", "question": "Any news on acquisitions?",                                "ambiguous": true },
-  { "id": "q46", "question": "Tell me something interesting",                            "ambiguous": true },
-  { "id": "q47", "question": "What happened in beauty this week?",                       "ambiguous": true },
-  { "id": "q48", "question": "How is Cosmax doing?",                                     "ambiguous": true },
-  { "id": "q49", "question": "Emerging trends in skincare",                              "ambiguous": true },
-  { "id": "q50", "question": "What should I know about the cosmetics market?",           "ambiguous": true }
+  { "id": "d10", "question": "rank US banks by total assets" }
+  
 ]

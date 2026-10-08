@@ -75,6 +75,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       time_constraint: { present: false, value: null, unit: null, phrase: null },
       entity_mentions: [],
       concept_keywords: [],
+      sector_term: null,
       is_company_set_query: false,
       primary_intent: question,
       _fallback: false,
