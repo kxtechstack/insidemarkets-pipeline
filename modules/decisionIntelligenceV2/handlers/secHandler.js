@@ -11,7 +11,12 @@ const {
   resolveCompanySetFacts,
   findAllowlistTickers,
 } = require('../sec/subsectorResolver');
-const { extractIntent, retrieveForIntent, getAllCompanies } = require('../sec/secRetrieval');
+const {
+  extractIntent,
+  extractIntentFromRouter,
+  retrieveForIntent,
+  getAllCompanies,
+} = require('../sec/secRetrieval');
 const { buildNumericAnswer } = require('../sec/buildNumericAnswer');
 const { getRegionAliases } = require('../sec/regionAliases');
 const { containsPhrase, normalizeConcepts } = require('../retrieval/filterListHits');
@@ -97,8 +102,12 @@ function detectSecShape(question, routerResult, intent) {
 
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) return 'framework';
 
+  // Numeric if the router gave us a metric OR a year range — either is
+  // a strong signal we're looking at a financial-data question.
+  if (intent.metric || intent.requestedYearCount) return 'numeric';
+
   const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
-  if (looksNumeric || intent.metric || intent.requestedYearCount) return 'numeric';
+  if (looksNumeric) return 'numeric';
 
   if (intent.questionCategory === 'qualitative') return 'framework';
 
@@ -107,6 +116,8 @@ function detectSecShape(question, routerResult, intent) {
 
 function isSecNumericQuestion(question, routerResult, intent) {
   if (routerResult && routerResult.is_company_set_query === true) return true;
+
+  if (intent && intent.metric) return true;
 
   const q = String(question || '').toLowerCase();
 
@@ -117,8 +128,7 @@ function isSecNumericQuestion(question, routerResult, intent) {
     /\bcompare\b.*\bby\b/.test(q);
 
   const hasMetric = NUMERIC_KEYWORDS.some((k) => q.includes(k)) ||
-    /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q) ||
-    Boolean(intent && intent.metric);
+    /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q);
 
   if (hasRanking && hasMetric) return true;
 
@@ -407,8 +417,6 @@ async function runNumericPath(question, intent) {
   const enrichedFacts = await enrichFactsWithNames(facts);
   let bodyText = buildNumericAnswer(enrichedFacts);
 
-  // If the intent has a note (e.g. "only 2 of 3 requested years available"),
-  // prepend it so the user sees the caveat.
   if (intent.noDataNote) {
     bodyText = `_${intent.noDataNote}_\n\n${bodyText}`;
   }
@@ -634,13 +642,29 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
   try {
     if (!question || typeof question !== 'string' || !question.trim()) return null;
 
+    // Prefer the router-driven intent (LLM already parsed entities, metric,
+    // time, framework). Fall back to the keyword parser if anything throws
+    // or the router output is missing critical fields.
     let intent;
     try {
-      intent = await extractIntent(question, getAllCompanies);
+      intent = await extractIntentFromRouter(question, routerResult, getAllCompanies);
     } catch (err) {
-      console.log(`[secHandler] extractIntent failed: ${err.message}`);
-      return null;
+      console.log(`[secHandler] extractIntentFromRouter failed: ${err.message} — falling back to keyword parser`);
+      intent = null;
     }
+
+    // If router-driven intent looks empty, try the keyword parser as backup.
+    if (!intent || (intent.tickers.length === 0 && !intent.metric && !intent.requestedYearCount)) {
+      try {
+        intent = await extractIntent(question, getAllCompanies);
+        if (intent) intent._fallback = true;
+      } catch (err) {
+        console.log(`[secHandler] extractIntent fallback also failed: ${err.message}`);
+        return null;
+      }
+    }
+
+    if (!intent) return null;
 
     const routerSector = routerResult && typeof routerResult.sector_term === 'string'
       ? routerResult.sector_term.trim()
@@ -677,7 +701,7 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
-    console.log(`[secHandler] shape=${shape} tickers=[${(intent.tickers || []).join(',')}]`);
+    console.log(`[secHandler] shape=${shape} tickers=[${(intent.tickers || []).join(',')}] metric=${intent.metric || 'null'} years=${intent.requestedYearCount || 'null'}`);
 
     const nonUs = detectNonUSGeography(question);
 
