@@ -240,6 +240,55 @@ const METRIC_KEYWORDS = [
   ['CapEx', ['capital expenditure', 'capex', 'r&d spending']],
 ];
 
+// Fuzzy-tolerant metric detection. For each metric keyword, first try the
+// fast includes() path; if that fails, fuzzy-compare each question word
+// (>=5 chars) against single-word keywords with a 0.75 threshold. Handles
+// typos like "reveue" → "revenue" without a hardcoded typo list.
+function detectMetric(question) {
+  const q = String(question || '').toLowerCase();
+  const words = q.split(/\s+/).filter((w) => w.length >= 5);
+
+  for (const [name, kws] of METRIC_KEYWORDS) {
+    for (const kw of kws) {
+      if (q.includes(kw)) return name;
+    }
+    for (const kw of kws) {
+      if (kw.includes(' ')) continue;
+      for (const w of words) {
+        const sim = stringSimilarity.compareTwoStrings(w, kw);
+        if (sim >= 0.75) return name;
+      }
+    }
+  }
+  return null;
+}
+
+function detectAllMetrics(question) {
+  const q = String(question || '').toLowerCase();
+  const words = q.split(/\s+/).filter((w) => w.length >= 5);
+  const found = new Set();
+
+  for (const [name, kws] of METRIC_KEYWORDS) {
+    let matched = false;
+    for (const kw of kws) {
+      if (q.includes(kw)) { matched = true; break; }
+    }
+    if (!matched) {
+      for (const kw of kws) {
+        if (kw.includes(' ')) continue;
+        for (const w of words) {
+          const sim = stringSimilarity.compareTwoStrings(w, kw);
+          if (sim >= 0.75) { matched = true; break; }
+        }
+        if (matched) break;
+      }
+    }
+    if (matched) found.add(name);
+  }
+
+  return [...found];
+}
+
 const LATEST_FISCAL_YEAR = 2025;
 
 const WORD_TO_NUM = {
@@ -309,11 +358,9 @@ async function extractIntent(question, getAllCompaniesFn) {
     'margin', 'total assets', 'total liabilities', 'cash flow', 'how much',
     'what was the', 'capital expenditure', 'r&d spending'].some(k => qLower.includes(k));
 
-  let metric = null;
-  for (const [name, kws] of METRIC_KEYWORDS) {
-    if (kws.some(k => qLower.includes(k))) { metric = name; break; }
-  }
-  const metricsFound = METRIC_KEYWORDS.filter(([, kws]) => kws.some(k => qLower.includes(k))).map(([n]) => n);
+  // Fuzzy-tolerant metric detection
+  const metric = detectMetric(question);
+  const metricsFound = detectAllMetrics(question);
 
   const isRelationshipQuestion = qLower.includes('relationship') || qLower.includes('correlat')
     || /\b(vs|versus|against)\b/.test(qLower);
@@ -322,6 +369,8 @@ async function extractIntent(question, getAllCompaniesFn) {
   const isCumulativeQuestion = ['cumulative', 'stacked', 'running total'].some(k => qLower.includes(k));
 
   isNumericQuestion = isNumericQuestion || isRelationshipQuestion || isDistributionQuestion;
+  // Metric detection is also a signal that the question is numeric.
+  if (metric) isNumericQuestion = true;
 
   const COMPOSITION_KEYWORDS = ['share', 'breakdown', 'composition', 'percentage',
     'proportion', 'split of', 'distribution', 'makeup', 'mix of'];
@@ -519,8 +568,6 @@ async function retrieveForIntent(question, intent, opts = {}) {
         facts.push(...await getFinancialFacts(ticker, year));
       }
     }
-    // If the question asked about 2+ metrics, keep facts for every metric.
-    // Otherwise keep only the single matched metric.
     if (intent.metricsFound && intent.metricsFound.length >= 2) {
       facts = facts.filter(f => intent.metricsFound.includes(f.metric_name));
     } else if (intent.metric) {
@@ -535,6 +582,7 @@ module.exports = {
   getAllCompanies,
   extractIntent, loadCompanyLookup, extractTickers,
   extractUnresolvedMentions, sanitizeQuestionForLLM,
+  detectMetric, detectAllMetrics,
   embedText, retrieveChunks, retrieveChunksStratified, retrieveForIntent,
   getFinancialFacts, getChunkTextByPointIds,
   stripDiacritics,

@@ -97,8 +97,10 @@ function detectSecShape(question, routerResult, intent) {
 
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) return 'framework';
 
+  // Numeric if either: exact keyword match OR fuzzy-detected metric.
+  // The fuzzy branch catches typos like "reveue" → "revenue".
   const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
-  if (looksNumeric) return 'numeric';
+  if (looksNumeric || intent.metric) return 'numeric';
 
   if (intent.questionCategory === 'qualitative') return 'framework';
 
@@ -117,7 +119,8 @@ function isSecNumericQuestion(question, routerResult, intent) {
     /\bcompare\b.*\bby\b/.test(q);
 
   const hasMetric = NUMERIC_KEYWORDS.some((k) => q.includes(k)) ||
-    /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q);
+    /\bby\s+(revenue|sales|income|profit|earnings|market\s*cap|assets|liabilities)\b/.test(q) ||
+    Boolean(intent && intent.metric);
 
   if (hasRanking && hasMetric) return true;
 
@@ -640,8 +643,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
-    // Sector guard — fires ONLY on genuine company-set questions where
-    // the question names no specific company.
     if (
       routerSector &&
       hasTickers &&
@@ -657,7 +658,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       }
     }
 
-    // Early check: framework + no ticker → sector path (runs BEFORE detectSecShape).
     if (isFrameworkQuestion && !(Array.isArray(intent.tickers) && intent.tickers.length > 0)) {
       const sectorResult = await runSectorFrameworkPath(question, routerSector);
       if (sectorResult) return sectorResult;
@@ -684,11 +684,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
-    // ── Dispatch ───────────────────────────────────────────────────────
-    // If shape is company_set BUT we have specific named tickers (kept
-    // by the guard above), use the numeric path — it respects those
-    // tickers and multi-year ranges. The broad company_set path is only
-    // for genuine "top N by metric" sector-wide questions.
     const tickersStillPresent = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
     if (shape === 'company_set' && tickersStillPresent) {
