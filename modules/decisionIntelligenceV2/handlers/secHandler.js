@@ -50,28 +50,49 @@ const SECTOR_KEYWORDS_FALLBACK = [
 
 const MAX_SECTOR_COMPANIES = 3;
 
-// Reject entity mentions that are sector descriptors, not proper nouns.
-// "US banks" → rejected. "Delta Air Lines" → kept. No industry keyword list.
-function isValidEntity(mention) {
-  const m = String(mention || '').trim();
-  if (!m) return false;
-  if (!/^[A-Z]/.test(m)) return false;
+// Generic English corporate suffixes that carry no identifying value.
+// Used only to strip noise from company names before matching.
+const COMPANY_NAME_STOP = new Set([
+  'inc', 'corp', 'co', 'company', 'group', 'holdings', 'ltd', 'plc',
+  'sa', 'ag', 'nv', 'se', 'llc', 'lp',
+]);
 
-  // Single-word entities: must be pure letters (with optional one
-  // internal apostrophe / ampersand / period). Rejects "K-beauty",
-  // "US-banks", "3M-corp", etc. Keeps "Glossier", "FDA", "L'Oréal".
-  if (!m.includes(' ')) {
-    return /^[A-Za-zÀ-ÿ]+(?:['&.][A-Za-zÀ-ÿ]+)?$/.test(m);
+/**
+ * Does the question literally name any of the given tickers or their
+ * companies? General-purpose — reads company names from the DB, no
+ * hardcoded industry or brand list.
+ */
+async function questionNamesCompany(question, tickers) {
+  if (!Array.isArray(tickers) || tickers.length === 0) return false;
+  const q = String(question || '').toLowerCase();
+
+  // 1. Ticker itself appears in question?
+  for (const t of tickers) {
+    const escaped = String(t).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`).test(q)) return true;
   }
 
-  // Multi-word entities: reject if the last word is a generic business
-  // suffix ("US banks", "European companies").
-  const lastWord = m.split(/\s+/).pop().toLowerCase();
-  const genericSuffixes = [
-    'banks', 'companies', 'firms', 'businesses',
-    'brands', 'sector', 'industry', 'market', 'markets',
-  ];
-  return !genericSuffixes.includes(lastWord);
+  // 2. Any significant word from a company name appears in question?
+  const { createClient } = require('@supabase/supabase-js');
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+  const { data: companies } = await supabase
+    .from('companies')
+    .select('ticker, company_name')
+    .in('ticker', tickers);
+
+  for (const c of companies || []) {
+    const name = String(c.company_name || '').toLowerCase();
+    const words = name
+      .split(/[^a-z0-9&']+/)
+      .filter((w) => w.length >= 4 && !COMPANY_NAME_STOP.has(w));
+
+    for (const w of words) {
+      const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`\\b${escaped}\\b`).test(q)) return true;
+    }
+  }
+
+  return false;
 }
 
 function detectSecShape(question, routerResult, intent) {
@@ -629,22 +650,29 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
-    // Sector guard — only clear fuzzy-matched tickers when there are
-    // NO valid company names in the router's entity_mentions. If the user
-    // named a specific company, we keep the ticker even if a sector
-    // term was also extracted.
-    if (routerSector && hasTickers) {
-      const entityMentions = (routerResult && Array.isArray(routerResult.entity_mentions))
-        ? routerResult.entity_mentions
-            .filter((e) => e && String(e).trim().length >= 3)
-            .filter(isValidEntity)
-        : [];
-
-      if (entityMentions.length === 0) {
-        console.log(`[secHandler] sector "${routerSector}" + no company names — clearing fuzzy tickers [${intent.tickers.join(',')}]`);
+    // ── Sector guard ────────────────────────────────────────────────────
+    // Fires ONLY on genuine company-set questions (router says
+    // is_company_set_query: true) where the question itself names no
+    // specific company. Everything else leaves tickers untouched.
+    //
+    // Examples:
+    //   "rank US banks by total assets"        → fires, clears fuzzy tickers
+    //   "top 5 cosmetic companies by revenue"  → fires
+    //   "microsoft revenue last year"          → skipped (not company_set)
+    //   "compare apple profit vs revenue"      → skipped (company named in text)
+    //   "pestle delta air lines"               → skipped (not company_set)
+    if (
+      routerSector &&
+      hasTickers &&
+      routerResult &&
+      routerResult.is_company_set_query === true
+    ) {
+      const namesCompany = await questionNamesCompany(question, intent.tickers);
+      if (!namesCompany) {
+        console.log(`[secHandler] company-set sector "${routerSector}" + no named company — clearing [${intent.tickers.join(',')}]`);
         intent.tickers = [];
       } else {
-        console.log(`[secHandler] sector "${routerSector}" + company names present [${entityMentions.join(', ')}] — keeping tickers [${intent.tickers.join(',')}]`);
+        console.log(`[secHandler] company-set sector "${routerSector}" but company named in question — keeping [${intent.tickers.join(',')}]`);
       }
     }
 
@@ -694,6 +722,7 @@ module.exports = {
   findRegionHits,
   buildRegionFallback,
   buildRegionFallbackPayload,
+  questionNamesCompany,
   runCompanySetPath,
   runNumericPath,
   runFrameworkPath,

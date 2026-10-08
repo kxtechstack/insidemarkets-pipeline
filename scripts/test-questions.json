@@ -1,7 +1,43 @@
 [
+  { "id": "q1",  "question": "hi" },
+  { "id": "q2",  "question": "thanks!" },
+  { "id": "q3",  "question": "what's the weather in London" },
+  { "id": "q4",  "question": "tell me a joke" },
+  { "id": "q5",  "question": "asdf" },
+
+  { "id": "q6",  "question": "What are the major policy changes in the last week?" },
+  { "id": "q7",  "question": "List recent funding rounds in our Cosmetics industry" },
+  { "id": "q8",  "question": "List recent consolidation or merger activity in Cosmetics sector" },
+  { "id": "q9",  "question": "Show me new regulatory updates this month" },
+  { "id": "q10", "question": "What are the new product launches in cosmetics?" },
+
+  { "id": "q11", "question": "what updates on glossier" },
+  { "id": "q12", "question": "What is the New Excise Duty on Vaping Products?" },
+  { "id": "q13", "question": "Why is K-beauty growing so fast?" },
+  { "id": "q14", "question": "Explain the impact of the new EU cosmetics regulation" },
+  { "id": "q15", "question": "What's happening with L'Oréal?" },
+
+  { "id": "d1",  "question": "do swot analysis for estee lauder" },
+  { "id": "d2",  "question": "do swot analysis for cosmetics industry" },
+  { "id": "d3",  "question": "swot analysis for automobile industry" },
   { "id": "d4",  "question": "pestle for delta air lines" },
+  { "id": "d5",  "question": "five forces analysis of the cosmetics market" },
   { "id": "d6",  "question": "risk analysis for entering the K-beauty market" },
 
-  { "id": "d10", "question": "rank US banks by total assets" }
-  
+  { "id": "d7",  "question": "top 5 cosmetic companies by revenue" },
+  { "id": "d8",  "question": "top 5 airlines by revenue" },
+  { "id": "d9",  "question": "top 10 pharmaceutical companies by revenue" },
+  { "id": "d10", "question": "rank US banks by total assets" },
+  { "id": "d11", "question": "compare automotive companies' net income" },
+
+  { "id": "d12", "question": "Apple revenue last 3 years" },
+  { "id": "d13", "question": "Estée Lauder net income" },
+
+  { "id": "d14", "question": "top 5 cosmetic companies in India by revenue" },
+  { "id": "d15", "question": "top 5 cosmetic companies in Ireland by revenue" },
+  { "id": "d16", "question": "top 5 cosmetic companies in Switzerland by revenue" },
+
+  { "id": "d17", "question": "swot analysis for nanotech industry" },
+  { "id": "d18", "question": "should we enter the K-beauty market?" },
+  { "id": "d19", "question": "how should we price against estee lauder?" }
 ]
