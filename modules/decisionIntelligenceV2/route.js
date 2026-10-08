@@ -13,6 +13,10 @@
  *   (custom sources always kept)
  *
  * Reuses the existing chatHistory for conversation persistence.
+ *
+ * ALSO registers /decision-intelligence-v2/chat-with-memory — the
+ * chatContext-wrapped variant that runs the resolver before the pipeline
+ * and the state updater after. The existing /chat route is untouched.
  */
 
 const {
@@ -40,6 +44,11 @@ const {
   buildInferenceResponse,
   buildDecisionResponse,
 } = require('./responseBuilder');
+
+// chatContext layer (new)
+const { resolveContext } = require('./chatContext/contextResolver');
+const { updateState } = require('./chatContext/stateUpdater');
+const { loadState } = require('./chatContext/stateStore');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Deterministic filter for inference / decision.
@@ -325,64 +334,157 @@ function registerDecisionIntelligenceV2Route(app) {
     }
   });
 
-  app.get('/decision-intelligence-v2/conversations', async (req, res) => {
+  // ───────────────────────────────────────────────────────────────────────
+  // NEW — chatContext-wrapped chat.
+  //
+  // Same as /chat, but:
+  //   1. Loads conversation state
+  //   2. Runs context resolver (LLM) to produce a standalone query
+  //   3. For greeting/off_topic/clarification → pass raw message, skip updater
+  //      Otherwise                              → pass standalone query
+  //   4. Runs state updater after the answer (non-small-talk only)
+  //
+  // Response shape is identical to /chat, plus `resolver` and `state`
+  // for debugging. Existing /chat is untouched.
+  // ───────────────────────────────────────────────────────────────────────
+  app.post('/decision-intelligence-v2/chat-with-memory', async (req, res) => {
     try {
-      const { userId } = req.query;
-      if (!userId) return res.status(400).json({ error: 'userId is required' });
-      const conversations = await listConversations({ userId });
-      return res.json({ conversations });
-    } catch (err) {
-      console.error('[DI V2 listConversations] Error:', err.message);
-      return res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.get('/decision-intelligence-v2/conversations/:id', async (req, res) => {
-    try {
-      const { userId } = req.query;
-      if (!userId) return res.status(400).json({ error: 'userId is required' });
-      const data = await loadConversation({
-        conversationId: req.params.id,
-        userId,
-      });
-      return res.json(data);
-    } catch (err) {
-      console.error('[DI V2 loadConversation] Error:', err.message);
-      return res.status(404).json({ error: err.message });
-    }
-  });
-
-  app.delete('/decision-intelligence-v2/conversations/:id', async (req, res) => {
-    try {
-      const { userId } = req.query;
-      if (!userId) return res.status(400).json({ error: 'userId is required' });
-      await deleteConversation({
-        conversationId: req.params.id,
-        userId,
-      });
-      return res.json({ success: true });
-    } catch (err) {
-      console.error('[DI V2 deleteConversation] Error:', err.message);
-      return res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.get('/decision-intelligence-v2/suggested-questions', async (req, res) => {
-    try {
-      const { clientId, surface, category, industry, companyName } = req.query;
-      if (!clientId || !surface) {
-        return res.status(400).json({ error: 'clientId and surface are required' });
-      }
-      const questions = await getSuggestedQuestions({
+      const {
+        question,
         clientId,
-        surface,
-        category,
         industry,
-        companyName,
+        userId,
+        conversationId: incomingConversationId,
+        type: providedType,
+      } = req.body;
+
+      if (!question || !clientId || !industry || !userId) {
+        return res.status(400).json({
+          error: 'question, clientId, industry, and userId are required',
+        });
+      }
+
+      let conversationId = incomingConversationId;
+      if (!conversationId) {
+        conversationId = await createConversation({
+          clientId,
+          userId,
+          firstQuestion: question,
+        });
+      }
+
+      // ── 1. Load conversation state (before resolver needs it) ─────────
+      let currentState = {};
+      try {
+        currentState = await loadState(conversationId);
+      } catch (err) {
+        console.log(`[chat-with-memory] loadState failed: ${err.message}`);
+      }
+
+      // ── 2. Persist user message BEFORE resolver reads recent messages ─
+      await appendMessage({ conversationId, role: 'user', content: question });
+
+      // ── 3. Run context resolver ───────────────────────────────────────
+      let resolverResult;
+      try {
+        resolverResult = await resolveContext({
+          conversationId,
+          userMessage: question,
+          currentState,
+        });
+      } catch (err) {
+        console.log(`[chat-with-memory] resolver threw, using raw question: ${err.message}`);
+        resolverResult = {
+          kind: 'new_question',
+          standalone_query: question,
+          references: [],
+          context_used: [],
+          new_constraints: [],
+          _fallback: true,
+        };
+      }
+
+      // ── 4. Decide what query to send to the pipeline ──────────────────
+      const skipStateUpdate =
+        resolverResult.kind === 'greeting' ||
+        resolverResult.kind === 'off_topic' ||
+        resolverResult.kind === 'clarification';
+
+      const queryForPipeline = skipStateUpdate
+        ? question
+        : resolverResult.standalone_query;
+
+      console.log(
+        `[chat-with-memory] kind=${resolverResult.kind} ` +
+        `skipUpdater=${skipStateUpdate} ` +
+        `query="${queryForPipeline.slice(0, 120)}"`
+      );
+
+      // ── 5. Run existing V2 pipeline ───────────────────────────────────
+      let result;
+      try {
+        result = await runV2Pipeline({
+          question: queryForPipeline,
+          clientId,
+          industry,
+          forcedType: providedType || null,
+        });
+      } catch (err) {
+        console.error('[chat-with-memory] pipeline error:', err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      const { payload, routerResult } = result;
+
+      const assistantContent =
+        payload.type === 'list'
+          ? `List: ${payload.items?.length ?? 0} items`
+          : (payload.report?.title || '').slice(0, 200);
+
+      try {
+        await appendMessage({
+          conversationId,
+          role: 'assistant',
+          content: assistantContent,
+          type: payload.type,
+          payload,
+        });
+      } catch (err) {
+        console.log(`[chat-with-memory] failed to persist assistant message: ${err.message}`);
+      }
+
+      // ── 6. State updater (skip for small-talk kinds) ──────────────────
+      let finalState = currentState;
+      if (!skipStateUpdate) {
+        try {
+          const updaterResult = await updateState({
+            conversationId,
+            userMessage: queryForPipeline,
+            answer: assistantContent,
+            currentState,
+          });
+          finalState = updaterResult.updatedState;
+        } catch (err) {
+          console.log(`[chat-with-memory] state updater failed: ${err.message}`);
+        }
+      }
+
+      return res.json({
+        ...payload,
+        conversationId,
+        classifierReasoning: routerResult.primary_intent || null,
+        resolver: {
+          kind: resolverResult.kind,
+          standalone_query: resolverResult.standalone_query,
+          references: resolverResult.references,
+          context_used: resolverResult.context_used,
+          new_constraints: resolverResult.new_constraints,
+        },
+        state: finalState,
       });
-      return res.json({ questions });
+
     } catch (err) {
-      console.error('[DI V2 suggested-questions] Error:', err.message);
+      console.error('[DecisionIntelligenceV2 chat-with-memory] Error:', err.message);
       return res.status(500).json({ error: err.message });
     }
   });
