@@ -4,15 +4,99 @@
  * STAGE 3b — inference handler.
  *
  * Input:  retrieval hits (client signals) + custom source chunks
- * Output: { report: { title, bodyText }, sources: [...] }
+ *         (NO SEC — inference is client + custom only)
+ * Output: { report, sources }
  *
- * ONE LLM call (with one retry on JSON parse failure).
- * No schema designer. No sections. No framework.
- * Short, direct answer in prose.
+ * TWO LLM calls now (matching the decision handler's pattern):
+ *   1. Schema designer — designs 3-5 tailored headings for this question
+ *   2. Writer          — fills those headings with bullets from context
+ *
+ * If the schema designer fails or the writer returns an unparseable shape,
+ * the handler falls back to the legacy flat { title, bodyText } shape.
+ * The external function signature and return type are unchanged.
  */
 
 const { callLLM } = require('../../llmClient');
 
+// ─────────────────────────────────────────────────────────────────────────
+// Call 1 — schema designer (same pattern as decisionHandler)
+// ─────────────────────────────────────────────────────────────────────────
+const SCHEMA_DESIGNER_PROMPT = `You design the section structure for a concise market intelligence answer.
+
+Given a client's question, return 3-5 headings that would best organise
+a focused answer. Each heading must be a short noun phrase (2-6 words).
+
+Examples of good headings:
+- "Current Situation"
+- "Key Developments"
+- "Market Impact"
+- "What to Watch"
+- "Strategic Implications"
+- "Supporting Evidence"
+- "Drivers"
+- "Outlook"
+
+Rules:
+- 3-5 headings only.
+- Each heading must be 2-6 words.
+- Headings must be SPECIFIC to the question — not generic templates.
+- Do NOT number them.
+- Do NOT include "Introduction", "Conclusion", "Overview", or "Executive Summary".
+- Do NOT include "Recommendations" or "Next Steps" as headings.
+
+Return ONLY this JSON:
+
+{
+  "sections": [
+    { "heading": "..." },
+    { "heading": "..." },
+    { "heading": "..." }
+  ]
+}
+
+Return ONLY the JSON. No markdown fences, no explanation.`;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Call 2 — writer (fills the headings, matching decisionHandler's shape)
+// ─────────────────────────────────────────────────────────────────────────
+const WRITER_PROMPT = `You are a market intelligence analyst producing a concise, direct answer to a client's question.
+
+You have been given retrieved signals and uploaded documents from the client's own data, plus a required section structure. Fill each section with 2-4 substantive bullets drawn from the context.
+
+Content rules:
+- Each section gets 2-4 bullets.
+- Bullets must be complete thoughts, not single words.
+- Every bullet must be grounded in the provided context. Do not invent facts, numbers, dates, or names.
+- If a section cannot be supported by the context, use a single bullet: "No relevant data in the current dataset."
+- Preserve exactly: organization names, regulation names, dates, numbers, monetary figures.
+- Do not mention "the provided articles", "the context", or "the retrieved data".
+- Do not include citation markers like [1], [2].
+- Plain prose bullets. No tables. No markdown headers inside bullets.
+- The bottom_line must be 1-2 sentences synthesising the key takeaway.
+
+Output format — return EXACTLY this JSON object and NOTHING ELSE:
+
+{
+  "title": "<short descriptive title>",
+  "sections": [
+    { "heading": "<exact heading from the required structure>", "points": ["...", "..."] },
+    ...
+  ],
+  "bottom_line": "<1-2 sentence conclusion>"
+}
+
+Critical formatting requirements:
+- Every "points" array is an array of strings.
+- Inside string values, any line break MUST be written as \\n. NEVER press Enter inside a string.
+- Every heading must EXACTLY match one from the required structure, in the same order.
+- Do not add or remove sections.
+- Do not add any text before the opening { or after the closing }.
+- Do not wrap the JSON in markdown code fences.
+- Return ONLY the JSON object.`;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Legacy flat-text prompt — used ONLY as fallback if schema path fails.
+// ─────────────────────────────────────────────────────────────────────────
 const INFERENCE_PROMPT = `You are a market intelligence analyst writing a short, direct answer to a client's question.
 
 You have been given retrieved signals and uploaded documents from the client's own data. Answer the question using ONLY that context. Never use outside knowledge.
@@ -48,7 +132,6 @@ Critical formatting requirements:
 // ─────────────────────────────────────────────────────────────────────────
 // Context builder
 // ─────────────────────────────────────────────────────────────────────────
-
 const MAX_CLIENT_CHUNKS = 8;
 const MAX_CUSTOM_CHUNKS = 10;
 const ITEM_MAX_CHARS = 1200;
@@ -105,15 +188,6 @@ function findBalancedJson(s) {
   return null;
 }
 
-/**
- * Walk the string character-by-character and escape raw newlines that
- * appear INSIDE a quoted string. This is the most common LLM JSON
- * failure mode — putting literal line breaks inside "bodyText" instead
- * of the \n escape sequence.
- *
- * Character-walk is more reliable than a regex because it handles
- * escaped quotes and multi-line strings correctly.
- */
 function escapeRawNewlinesInStrings(s) {
   let out = '';
   let inString = false;
@@ -127,41 +201,21 @@ function escapeRawNewlinesInStrings(s) {
       escaped = false;
       continue;
     }
-
-    if (ch === '\\') {
-      out += ch;
-      escaped = true;
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = !inString;
-      out += ch;
-      continue;
-    }
-
-    if (inString && (ch === '\n' || ch === '\r')) {
-      out += '\\n';
-      continue;
-    }
+    if (ch === '\\') { out += ch; escaped = true; continue; }
+    if (ch === '"') { inString = !inString; out += ch; continue; }
+    if (inString && (ch === '\n' || ch === '\r')) { out += '\\n'; continue; }
 
     out += ch;
   }
-
   return out;
 }
 
-/**
- * Attempt to parse JSON, applying the raw-newline repair if the first
- * parse fails. Returns the parsed object or null.
- */
 function tryParseJson(block, label = '') {
   if (!block) return null;
 
   try {
     return JSON.parse(block);
   } catch (err) {
-    // Retry with repair
     try {
       const repaired = escapeRawNewlinesInStrings(block);
       const parsed = JSON.parse(repaired);
@@ -174,33 +228,90 @@ function tryParseJson(block, label = '') {
   }
 }
 
+function parseJsonWithTruncation(raw, label) {
+  const stripped = stripFences(raw);
+  let jsonBlock = findBalancedJson(stripped);
+  if (!jsonBlock && stripped.startsWith('{')) {
+    console.log(`[inferenceHandler] JSON appears truncated — attempting close-brace repair (${label})`);
+    jsonBlock = stripped + '}';
+  }
+  return tryParseJson(jsonBlock, label);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
-// Main handler
+// Call 1 — design the section structure
 // ─────────────────────────────────────────────────────────────────────────
-/**
- * @param {string} question
- * @param {Array}  clientHits           retrieval hits from client signals
- * @param {Array}  customSourceHits     retrieval hits from custom sources
- * @returns {Promise<{
- *   report: { title: string, bodyText: string } | null,
- *   sources: Array,
- *   _empty?: boolean,
- *   _reason?: string,
- * }>}
- */
-async function buildInferenceAnswer(question, clientHits = [], customSourceHits = []) {
-  if (!clientHits.length && !customSourceHits.length) {
+async function designInferenceSchema(question) {
+  try {
+    const schemaRaw = await callLLM(
+      [
+        { role: 'system', content: SCHEMA_DESIGNER_PROMPT },
+        { role: 'user', content: question },
+      ],
+      { temperature: 0.3, max_tokens: 500, timeout: 45000 }
+    );
+
+    const parsed = parseJsonWithTruncation(schemaRaw, 'inference-schema');
+    if (parsed && Array.isArray(parsed.sections)) {
+      const valid = parsed.sections
+        .filter((s) => s && typeof s.heading === 'string' && s.heading.trim())
+        .map((s) => String(s.heading).trim())
+        .slice(0, 5);
+
+      if (valid.length >= 3) {
+        console.log(`[inferenceHandler] schema: ${valid.join(' | ')}`);
+        return valid;
+      }
+      console.log(`[inferenceHandler] schema produced only ${valid.length} valid headings — using legacy flat shape`);
+    }
+  } catch (err) {
+    console.log(`[inferenceHandler] schema designer failed: ${err.message}`);
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sanitize the schema-path writer output
+// ─────────────────────────────────────────────────────────────────────────
+function sanitizeSectionsReport(report, headings, question) {
+  const byHeading = new Map();
+  if (report && Array.isArray(report.sections)) {
+    for (const s of report.sections) {
+      if (!s || typeof s.heading !== 'string') continue;
+      const key = s.heading.trim().toLowerCase();
+      const points = Array.isArray(s.points)
+        ? s.points.filter((p) => typeof p === 'string' && p.trim())
+        : [];
+      byHeading.set(key, points);
+    }
+  }
+
+  const finalSections = headings.map((h) => ({
+    heading: h,
+    points: byHeading.get(h.toLowerCase()) || ['No relevant data in the current dataset.'],
+  }));
+
+  if (!report) {
     return {
-      report: null,
-      sources: [],
-      _empty: true,
-      _reason: 'no client signals or uploaded documents matched the question',
+      title: question,
+      sections: finalSections,
+      bottom_line: 'Could not generate a structured report from the retrieved sources.',
     };
   }
 
-  const context = buildContext(clientHits, customSourceHits);
-  const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
+  return {
+    title: (report.title || question).toString().slice(0, 200),
+    sections: finalSections,
+    bottom_line: typeof report.bottom_line === 'string'
+      ? report.bottom_line.trim()
+      : '',
+  };
+}
 
+// ─────────────────────────────────────────────────────────────────────────
+// Legacy flat-text path — used only when schema path fails
+// ─────────────────────────────────────────────────────────────────────────
+async function runLegacyFlatAnswer(question, clientHits, customSourceHits, userPrompt) {
   let raw;
   try {
     raw = await callLLM(
@@ -211,45 +322,20 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       { temperature: 0.2, max_tokens: 2000, timeout: 90000 }
     );
   } catch (err) {
-    console.log(`[inferenceHandler] LLM call failed: ${err.message}`);
-    return {
-      report: null,
-      sources: [],
-      _empty: true,
-      _reason: `LLM call failed: ${err.message}`,
-    };
+    console.log(`[inferenceHandler] legacy LLM call failed: ${err.message}`);
+    return null;
   }
 
   if (process.env.DI_V2_DEBUG_LLM === '1') {
-    console.log('[inferenceHandler] RAW LLM OUTPUT:');
+    console.log('[inferenceHandler] RAW LEGACY LLM OUTPUT:');
     console.log(raw);
     console.log('[inferenceHandler] END RAW');
   }
 
-  // First parse attempt
-  const stripped = stripFences(raw);
-  let jsonBlock = findBalancedJson(stripped);
+  const parsed = parseJsonWithTruncation(raw, 'legacy');
 
-  // If balanced-JSON extraction failed but the text starts with '{', the
-  // model likely truncated the response (missing final '}'). Try appending
-  // one — if the body was complete, this parses cleanly.
-  if (!jsonBlock && stripped.startsWith('{')) {
-    console.log(`[inferenceHandler] JSON appears truncated — attempting close-brace repair`);
-    jsonBlock = stripped + '}';
-  }
-
-  let parsed = tryParseJson(jsonBlock, 'first pass');
-
-    console.log(`[inferenceHandler] parsed object:`, parsed ? Object.keys(parsed) : 'null');
-  console.log(`[inferenceHandler] bodyText type:`, parsed ? typeof parsed.bodyText : 'no-parsed');
-  if (parsed && typeof parsed.bodyText === 'string') {
-    console.log(`[inferenceHandler] bodyText length:`, parsed.bodyText.length);
-  }
-  console.log(`[inferenceHandler] jsonBlock length:`, jsonBlock ? jsonBlock.length : 'null');
-
-  // Retry once if parse failed or shape is wrong
   if (!parsed || typeof parsed.bodyText !== 'string') {
-    console.log(`[inferenceHandler] retrying with stricter JSON instruction`);
+    console.log(`[inferenceHandler] legacy retry with stricter JSON instruction`);
     try {
       const retryRaw = await callLLM(
         [
@@ -265,17 +351,19 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
         ],
         { temperature: 0, max_tokens: 2000, timeout: 90000 }
       );
-      const retryStripped = stripFences(retryRaw);
-      const retryBlock = findBalancedJson(retryStripped);
-      parsed = tryParseJson(retryBlock, 'retry');
+      const retryParsed = parseJsonWithTruncation(retryRaw, 'legacy-retry');
+      if (retryParsed && typeof retryParsed.bodyText === 'string') {
+        return {
+          title: (retryParsed.title || question).toString().slice(0, 200),
+          bodyText: String(retryParsed.bodyText).trim(),
+        };
+      }
     } catch (err) {
-      console.log(`[inferenceHandler] retry LLM call failed: ${err.message}`);
+      console.log(`[inferenceHandler] legacy retry LLM call failed: ${err.message}`);
     }
-  }
 
-  // If still unparseable, fall back to a plain-prose answer (no JSON).
-  if (!parsed || typeof parsed.bodyText !== 'string') {
-    console.log(`[inferenceHandler] JSON failed twice — falling back to plain-prose answer`);
+    // Plain-prose fallback
+    console.log(`[inferenceHandler] legacy JSON failed twice — falling back to plain-prose answer`);
     try {
       const plainRaw = await callLLM(
         [
@@ -294,33 +382,125 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
 
       const plainBody = String(plainRaw || '').trim();
       if (plainBody.length > 20) {
-        return {
-          report: {
-            title: question,
-            bodyText: plainBody,
-          },
-          sources: collectSources(clientHits, customSourceHits),
-        };
+        return { title: question, bodyText: plainBody };
       }
     } catch (err) {
       console.log(`[inferenceHandler] plain-prose fallback failed: ${err.message}`);
     }
 
-    // Absolute last resort
     return {
-      report: {
-        title: question,
-        bodyText: 'I could not generate a structured answer from the retrieved sources.',
-      },
-      sources: collectSources(clientHits, customSourceHits),
+      title: question,
+      bodyText: 'I could not generate a structured answer from the retrieved sources.',
     };
   }
 
   return {
-    report: {
-      title: (parsed.title || question).toString().slice(0, 200),
-      bodyText: String(parsed.bodyText).trim(),
-    },
+    title: (parsed.title || question).toString().slice(0, 200),
+    bodyText: String(parsed.bodyText).trim(),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Main handler
+// ─────────────────────────────────────────────────────────────────────────
+/**
+ * @param {string} question
+ * @param {Array}  clientHits           retrieval hits from client signals
+ * @param {Array}  customSourceHits     retrieval hits from custom sources
+ * @returns {Promise<{
+ *   report: { title, sections, bottom_line } | { title, bodyText } | null,
+ *   sources: Array,
+ *   _empty?: boolean,
+ *   _reason?: string,
+ * }>}
+ */
+async function buildInferenceAnswer(question, clientHits = [], customSourceHits = []) {
+  if (!clientHits.length && !customSourceHits.length) {
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: 'no client signals or uploaded documents matched the question',
+    };
+  }
+
+  const context = buildContext(clientHits, customSourceHits);
+  const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
+
+  // ── Call 1: design headings ──────────────────────────────────────────
+  const headings = await designInferenceSchema(question);
+
+  if (headings) {
+    // ── Call 2 (schema path): writer fills the headings ───────────────
+    const headingsBlock = headings
+      .map((h, i) => `${i + 1}. ${h}`)
+      .join('\n');
+
+    const writerPrompt =
+      `Context:\n${context}\n\nQuestion: ${question}\n\n` +
+      `Required section headings (exact, in this order):\n${headingsBlock}\n\n` +
+      `Fill each section with 2-4 bullets drawn from the context. Return JSON only.`;
+
+    let writerRaw;
+    try {
+      writerRaw = await callLLM(
+        [
+          { role: 'system', content: WRITER_PROMPT },
+          { role: 'user', content: writerPrompt },
+        ],
+        { temperature: 0.2, max_tokens: 2200, timeout: 120000 }
+      );
+    } catch (err) {
+      console.log(`[inferenceHandler] schema writer LLM call failed: ${err.message}`);
+    }
+
+    let report = null;
+    if (writerRaw) {
+      report = parseJsonWithTruncation(writerRaw, 'inference-writer');
+    }
+
+    // Retry once with stricter instruction
+    if (!report || !Array.isArray(report.sections)) {
+      console.log(`[inferenceHandler] schema writer retry with stricter instruction`);
+      try {
+        const retryRaw = await callLLM(
+          [
+            { role: 'system', content: WRITER_PROMPT },
+            { role: 'user', content: writerPrompt + '\n\nIMPORTANT: Return ONLY valid JSON. No prose, no fences.' },
+          ],
+          { temperature: 0, max_tokens: 2200, timeout: 120000 }
+        );
+        report = parseJsonWithTruncation(retryRaw, 'inference-writer-retry');
+      } catch (err) {
+        console.log(`[inferenceHandler] schema writer retry failed: ${err.message}`);
+      }
+    }
+
+    if (report && Array.isArray(report.sections)) {
+      const sanitized = sanitizeSectionsReport(report, headings, question);
+      return {
+        report: sanitized,
+        sources: collectSources(clientHits, customSourceHits),
+      };
+    }
+
+    console.log(`[inferenceHandler] schema writer failed twice — falling back to legacy flat shape`);
+  }
+
+  // ── Fallback: legacy flat path ───────────────────────────────────────
+  const legacyReport = await runLegacyFlatAnswer(question, clientHits, customSourceHits, userPrompt);
+
+  if (!legacyReport) {
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: 'LLM call failed',
+    };
+  }
+
+  return {
+    report: legacyReport,
     sources: collectSources(clientHits, customSourceHits),
   };
 }
@@ -380,4 +560,6 @@ module.exports = {
   tryParseJson,
   escapeRawNewlinesInStrings,
   INFERENCE_PROMPT,
+  SCHEMA_DESIGNER_PROMPT,
+  WRITER_PROMPT,
 };
