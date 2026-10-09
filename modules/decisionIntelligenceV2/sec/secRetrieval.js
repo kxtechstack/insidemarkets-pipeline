@@ -103,8 +103,12 @@ function extractTickers(question, lookup) {
 
     const isFullName = normalizedName.includes(' ');
     const isTicker = normalizedName === ticker;
+    // Long names (≥5 chars) like "AMAZON", "GOOGLE", "MICROSOFT" are safe
+    // to match case-insensitively. Short names still require capitalization
+    // to avoid common English words matching by accident.
+    const isLongName = normalizedName.length >= 5;
     const capitalizedPattern = new RegExp(`\\b${escapeRegex(normalizedName)}\\b`);
-    if (!isFullName && !isTicker && !capitalizedPattern.test(normalizedQuestion)) continue;
+    if (!isFullName && !isTicker && !isLongName && !capitalizedPattern.test(normalizedQuestion)) continue;
 
     const pattern = new RegExp(`\\b${escapeRegex(normalizedName)}\\b`, 'i');
     if (pattern.test(normalizedQuestion) && !found.includes(ticker)) found.push(ticker);
@@ -232,7 +236,7 @@ const RISK_ANALYSIS_KEYWORDS = [
 ];
 
 const METRIC_KEYWORDS = [
-  ['NetIncome', ['net income', 'profit', 'earnings', 'bottom line']],
+  ['NetIncome', ['net income', 'income', 'profit', 'earnings', 'bottom line']],
   ['Revenue', ['revenue', 'sales', 'top line']],
   ['TotalAssets', ['total assets']],
   ['TotalLiabilities', ['total liabilities']],
@@ -293,8 +297,6 @@ const WORD_TO_NUM = {
   nine: 9, ten: 10, couple: 2, few: 3,
 };
 
-// Returns the most recent fiscal_year present in financial_facts for a
-// ticker, optionally scoped by metric_name.
 async function getLatestFiscalYear(ticker, metricName = null) {
   let query = supabase
     .from('financial_facts')
@@ -307,8 +309,6 @@ async function getLatestFiscalYear(ticker, metricName = null) {
   return data?.[0]?.fiscal_year || null;
 }
 
-// Returns the top N most recent fiscal_years present in financial_facts
-// for a ticker, scoped by metric_name.
 async function getLatestFiscalYears(ticker, metricName, n) {
   let query = supabase
     .from('financial_facts')
@@ -328,7 +328,6 @@ async function extractIntent(question, getAllCompaniesFn) {
   const unresolvedMentions = extractUnresolvedMentions(question, tickers, lookup);
   const qLower = question.toLowerCase();
 
-  // Explicit years the user named (e.g. "2023", "2024 and 2023", "between 2022 and 2024")
   let allYears = [...new Set((question.match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
 
   const rangeMatch = question.match(/\b(20\d{2})\s*(?:to|-|through|thru|until)\s*(20\d{2})\b/i);
@@ -342,8 +341,6 @@ async function extractIntent(question, getAllCompaniesFn) {
     allYears = [...new Set([...allYears, ...range])].sort();
   }
 
-  // Relative year requests — count only, resolved against DB later.
-  // Examples: "last 3 years" → 3, "last year" / "this year" → 1.
   let requestedYearCount = null;
 
   const lastNMatch = question.match(
@@ -550,7 +547,6 @@ async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) 
   const seenIds = new Set();
 
   for (const ticker of tickers) {
-    // Resolve years for this ticker, per the intent.
     let years;
     if (latestOnly) {
       const latest = ticker ? await getLatestFiscalYear(ticker) : null;
@@ -591,17 +587,13 @@ async function retrieveForIntent(question, intent, opts = {}) {
     const metricForLookup = intent.metric || 'Revenue';
 
     for (const ticker of intent.tickers) {
-      // Resolve which years to fetch, per ticker, from the DB.
       let yearsForTicker = [];
 
       if (intent.allYears && intent.allYears.length) {
-        // User named specific years — use them as-is.
         yearsForTicker = intent.allYears;
       } else if (intent.requestedYearCount) {
-        // "last year" / "last 3 years" — fetch top N that actually exist.
         yearsForTicker = await getLatestFiscalYears(ticker, metricForLookup, intent.requestedYearCount);
       } else {
-        // No year context — default to just the latest available year.
         const latest = await getLatestFiscalYear(ticker, metricForLookup);
         if (latest) yearsForTicker = [latest];
       }
@@ -617,7 +609,6 @@ async function retrieveForIntent(question, intent, opts = {}) {
       facts = facts.filter(f => f.metric_name === intent.metric);
     }
 
-    // If requestedYearCount was set, note when we couldn't get that many.
     if (
       intent.requestedYearCount &&
       intent.tickers.length === 1 &&

@@ -142,7 +142,37 @@ Output: {
   "new_constraints": ["market: UAE"]
 }
 
-Example 6 — off-topic
+Example 6 — very short follow-up fragment
+Recent:
+  USER: What is the Apple revenue for the last year?
+  ASSISTANT: Apple's FY2025 revenue was $416.16B.
+Current: "microsoft?"
+Output: {
+  "kind": "followup",
+  "standalone_query": "What is Microsoft's revenue for the last year?",
+  "references": [
+    { "text": "microsoft?", "resolved_to": "apply the same question to Microsoft instead of Apple" }
+  ],
+  "context_used": ["prior question about Apple revenue for the last year"],
+  "new_constraints": ["company: Microsoft"]
+}
+
+Example 7 — replacing a set of companies
+Recent:
+  USER: compare amazon and dell revenue for the last 3 years
+  ASSISTANT: Amazon's FY2025 revenue was $716.92B; Dell's FY2025 was $95.57B.
+Current: "what about apple and microsoft"
+Output: {
+  "kind": "followup",
+  "standalone_query": "Compare Apple and Microsoft revenue for the last 3 years.",
+  "references": [
+    { "text": "what about apple and microsoft", "resolved_to": "apply the same comparison to Apple and Microsoft instead of Amazon and Dell" }
+  ],
+  "context_used": ["prior revenue comparison for Amazon and Dell, last 3 years"],
+  "new_constraints": ["companies: Apple, Microsoft"]
+}
+
+Example 8 — off-topic
 Current: "what's the weather in London"
 Output: {
   "kind": "off_topic",
@@ -151,6 +181,36 @@ Output: {
   "context_used": [],
   "new_constraints": []
 }
+
+=========================
+SPECIAL RULE — SHORT FRAGMENTS
+=========================
+
+Very short messages (one or two words plus a question mark) that
+contain a company, brand, entity, or topic name are FOLLOWUPS, not
+off_topic. A message like "microsoft?", "ulta?", or "apple?" after a
+previous question means: "answer the same question for that entity".
+
+Only classify as off_topic when the message has no business content
+AND no plausible referent in the recent conversation or current state.
+
+=========================
+SPECIAL RULE — REPLACING COMPANIES
+=========================
+
+When the user says "what about X and Y" (or similar) AFTER a comparison
+involving different companies, the standalone query should REPLACE the
+previous company set with the new one. Do NOT mention both old and new
+companies in the standalone query.
+
+Signals that a replacement is happening:
+  - The new company set is a full alternative ("apple and microsoft"
+    instead of "amazon and dell")
+  - The user did not say "also", "add", or "in addition"
+  - The metric and timeframe stay the same
+
+If the user says "also" or "and also" or "add", THEN keep the old
+companies and append the new ones.
 
 =========================
 
@@ -251,26 +311,12 @@ async function loadRecentMessages(conversationId, limit = RECENT_MESSAGE_LIMIT) 
     return [];
   }
 
-  // Reverse so oldest-first
   return (data || []).reverse();
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────
-/**
- * @param {object} args
- * @param {string} args.conversationId
- * @param {string} args.userMessage
- * @param {object} args.currentState  - from stateStore.loadState()
- * @returns {Promise<{
- *   kind: 'greeting'|'off_topic'|'clarification'|'followup'|'new_question',
- *   standalone_query: string,
- *   references: Array<{text: string, resolved_to: string}>,
- *   context_used: string[],
- *   new_constraints: string[],
- * }>}
- */
 async function resolveContext({ conversationId, userMessage, currentState }) {
   if (!userMessage || typeof userMessage !== 'string' || !userMessage.trim()) {
     return fallbackResult(userMessage);

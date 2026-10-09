@@ -79,6 +79,21 @@ RULES
    If the exchange doesn't establish anything new and doesn't change
    anything, return the SAME state and an empty changed_keys array.
 
+8. ALWAYS EXTRACT THESE SPECIFIC FIELDS WHEN PRESENT.
+   For ANY business exchange — even a simple single-company question —
+   capture these fields if the message or answer mentions them:
+     - "topic":   what the user is asking about, in plain words
+                  (e.g. "revenue", "pricing strategy", "revenue comparison")
+     - "metric":  the financial metric being discussed
+                  (e.g. "revenue", "net income", "margin", "total assets")
+     - "entities": companies discussed (as short names or tickers)
+                  (e.g. ["Apple"] or ["EL", "ULTA"])
+     - "timeframe": the time period being discussed
+                  (e.g. "last year", "last 3 years", "FY2024", "Q3 2025")
+
+   These fields are essential for resolving short follow-up messages
+   like "microsoft?" into complete questions on the next turn.
+
 =========================
 TOPIC SWITCHING
 =========================
@@ -107,6 +122,28 @@ On a TOPIC SWITCH:
   same company, same product, same market mentioned by name in the
   new exchange). Otherwise clear them too.
 - Do NOT append new entities to the old entities list. Start fresh.
+
+A company change is NOT a topic switch when:
+- The metric (revenue, net income, etc.) stays the same.
+- The timeframe stays the same.
+- The question type (comparison, single-company lookup) stays the same.
+- Only the companies being discussed change.
+
+In that case, treat it as a CONTINUATION of the same topic. Replace
+"entities" with the new company set, update "revenue_data" to reflect
+the new companies, but KEEP "topic", "metric", "timeframe" unchanged.
+
+Example:
+  State before: {topic: "revenue comparison", metric: "revenue",
+                 entities: [Amazon, Dell], timeframe: "last 3 years"}
+  User: "what about apple and microsoft"
+  State after:  {topic: "revenue comparison", metric: "revenue",
+                 entities: [Apple, Microsoft], timeframe: "last 3 years"}
+  (topic, metric, timeframe unchanged — only entities replaced)
+
+A TRUE topic switch is when the metric changes (revenue → pricing),
+or the domain changes (financial comparison → market overview), or
+the timeframe meaningfully changes (last year → 5-year outlook).
 
 On a CONTINUATION:
 - MERGE as before — add new facts, update changed ones, keep the rest.
