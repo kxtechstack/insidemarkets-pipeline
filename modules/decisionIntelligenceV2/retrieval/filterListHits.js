@@ -16,6 +16,10 @@
  *   - drop common filler words ("industry", "update", "trends", etc.)
  *   - drop words under 3 chars
  *   - dedupe
+ *
+ * TWO FILTERS EXPORTED:
+ *   - filterListHits             — OR-logic (list answers)
+ *   - filterListHitsConjunctive  — AND-logic on market+topic (inference/decision)
  */
 
 const FILLER_CONCEPTS = new Set([
@@ -95,6 +99,10 @@ function normalizeConcepts(concepts) {
 /**
  * List filter — keeps any hit where at least one cleaned concept appears
  * in title or chunk_text. If no concepts survive cleaning, keeps all hits.
+ *
+ * Uses OR-logic deliberately: list answers are browsing surfaces, and a
+ * looser filter gives the user more to scan. Strict AND-logic lives in
+ * filterListHitsConjunctive below, used by inference/decision.
  */
 function filterListHits(hits, concepts) {
   if (!Array.isArray(hits) || hits.length === 0) return [];
@@ -107,8 +115,73 @@ function filterListHits(hits, concepts) {
   });
 }
 
+/**
+ * Conjunctive filter for inference / decision.
+ *
+ * A hit passes only if it contains:
+ *   - at least one MARKET concept (typically entity_mentions — geography,
+ *     company, or regulator names), AND
+ *   - at least one TOPIC concept (typically concept_keywords — the actual
+ *     subject: "retail", "funding", "regulation").
+ *
+ * Rationale: a question like "retail in Saudi Arabia" should NOT be
+ * answered by "ice cream in Saudi Arabia" (topic miss) or by "US retail
+ * acquisition" (market miss). It needs BOTH dimensions represented.
+ *
+ * Self-correcting behaviour:
+ *   The router occasionally leaks topic words into entity_mentions, which
+ *   would make the market bucket overlap with the topic bucket. To stay
+ *   robust to that, any word that appears in BOTH cleaned buckets is
+ *   removed from the topic bucket before matching. This means the rule
+ *   always distinguishes market-anchor from topic regardless of how the
+ *   router populates its fields.
+ *
+ * Fallback behaviour:
+ *   - If both buckets are empty after cleaning, all hits pass.
+ *   - If only one bucket has entries, require ≥1 from that bucket
+ *     (equivalent to the old OR-logic).
+ */
+function filterListHitsConjunctive(hits, marketConcepts, topicConcepts) {
+  if (!Array.isArray(hits) || hits.length === 0) return [];
+
+  const cleanMarket = normalizeConcepts(marketConcepts);
+  const marketSet   = new Set(cleanMarket);
+
+  // Self-correction: strip market words out of the topic bucket so that
+  // a geography-only hit cannot pass both checks on the same word.
+  const cleanTopic = normalizeConcepts(topicConcepts).filter((w) => !marketSet.has(w));
+
+  // Both buckets empty → no filter possible, pass everything
+  if (cleanMarket.length === 0 && cleanTopic.length === 0) return hits;
+
+  // Only market bucket populated → require ≥1 market word
+  if (cleanTopic.length === 0) {
+    return hits.filter((h) => {
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
+      return cleanMarket.some((c) => containsPhrase(haystack, c));
+    });
+  }
+
+  // Only topic bucket populated → require ≥1 topic word
+  if (cleanMarket.length === 0) {
+    return hits.filter((h) => {
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
+      return cleanTopic.some((c) => containsPhrase(haystack, c));
+    });
+  }
+
+  // Both populated → require ≥1 from EACH bucket
+  return hits.filter((h) => {
+    const haystack = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
+    const marketHit = cleanMarket.some((c) => containsPhrase(haystack, c));
+    if (!marketHit) return false;
+    return cleanTopic.some((c) => containsPhrase(haystack, c));
+  });
+}
+
 module.exports = {
   filterListHits,
+  filterListHitsConjunctive,
   containsPhrase,
   phraseVariants,
   normalizeConcepts,

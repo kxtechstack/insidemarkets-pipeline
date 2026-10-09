@@ -6,15 +6,25 @@
  * actually about the question, short-circuit to "no data".
  *
  * Deterministic. No LLM. Uses only:
- *   - the router's concept_keywords and entity_mentions
- *   - the retrieval hits themselves (title + score)
+ *   - the router's concept_keywords, entity_mentions, sector_term
+ *   - the retrieval hits themselves (title + chunk_text + score)
  *
- * Client gate — PASSES when EITHER:
- *   A. Top hit's score >= STRONG_SCORE (0.55), OR
- *   B. At least MIN_TITLE_MATCHES (3) hits have a concept or entity in
- *      their title (concept signal overrides low numeric score)
+ * Client gate — PASSES when BOTH:
+ *   1. At least one of:
+ *        A. Top hit's score >= STRONG_SCORE (0.55), OR
+ *        B. At least MIN_TITLE_MATCHES (3) hits have a concept or entity
+ *           in their title (concept signal overrides low numeric score)
+ *   2. AND at least MIN_ON_TOPIC_HITS (2) hits contain the router's
+ *      sector_term (title OR chunk_text). If the router didn't produce
+ *      a sector_term, we fall back to requiring concept_keywords or
+ *      entity_mentions to appear in title OR chunk_text.
  *
- * Custom gate — PASSES when score >= CUSTOM_SCORE (0.55).
+ * The topicality requirement is the second gate. Score alone is not
+ * evidence of relevance — the Saudi retail trace showed ice-cream-shop
+ * hits scoring 0.69 on a "retail industry" question. Requiring the
+ * sector word to appear in at least N hits filters those out.
+ *
+ * Custom gate — PASSES when score >= CUSTOM_SCORE (0.55). Unchanged.
  *
  * The handler runs if EITHER gate passes.
  *
@@ -22,9 +32,10 @@
  * exact phrase doesn't match, try each significant word individually.
  */
 
-const STRONG_SCORE      = Number(process.env.DI_CONFIDENCE_STRONG_SCORE) || 0.55;
-const CUSTOM_SCORE      = Number(process.env.DI_CUSTOM_CONFIDENCE_FLOOR) || 0.55;
-const MIN_TITLE_MATCHES = Number(process.env.DI_CONFIDENCE_MIN_TITLE_MATCHES) || 3;
+const STRONG_SCORE       = Number(process.env.DI_CONFIDENCE_STRONG_SCORE) || 0.55;
+const CUSTOM_SCORE       = Number(process.env.DI_CUSTOM_CONFIDENCE_FLOOR) || 0.55;
+const MIN_TITLE_MATCHES  = Number(process.env.DI_CONFIDENCE_MIN_TITLE_MATCHES) || 3;
+const MIN_ON_TOPIC_HITS  = Number(process.env.DI_CONFIDENCE_MIN_ON_TOPIC_HITS) || 2;
 
 const PHRASE_STOPWORDS = new Set(['of', 'and', 'the', 'in', 'on', 'at', 'to', 'for', 'a', 'an']);
 
@@ -91,6 +102,57 @@ function countTitleMatches(hits, routerResult) {
   return { count: matched.length, matched };
 }
 
+/**
+ * Counts how many hits contain the router's topical anchor in title OR
+ * chunk_text. Anchor preference order:
+ *   1. routerResult.sector_term (single best signal — the industry word)
+ *   2. any routerResult.concept_keywords
+ *   3. any routerResult.entity_mentions
+ * Returns { count, anchor, mode } where mode is
+ * 'sector' | 'concepts' | 'entities' | 'none'.
+ */
+function countOnTopicHits(hits, routerResult) {
+  if (!Array.isArray(hits) || hits.length === 0) {
+    return { count: 0, anchor: null, mode: 'none' };
+  }
+
+  const sectorTerm = routerResult && typeof routerResult.sector_term === 'string'
+    ? routerResult.sector_term.trim()
+    : '';
+
+  if (sectorTerm) {
+    let count = 0;
+    for (const h of hits) {
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+      if (containsPhrase(haystack, sectorTerm)) count++;
+    }
+    return { count, anchor: sectorTerm, mode: 'sector' };
+  }
+
+  const concepts = (routerResult?.concept_keywords || []).filter(Boolean);
+  if (concepts.length > 0) {
+    let count = 0;
+    for (const h of hits) {
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+      if (concepts.some((c) => containsPhrase(haystack, c))) count++;
+    }
+    return { count, anchor: concepts[0], mode: 'concepts' };
+  }
+
+  const entities = (routerResult?.entity_mentions || []).filter(Boolean);
+  if (entities.length > 0) {
+    let count = 0;
+    for (const h of hits) {
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
+      if (entities.some((e) => containsPhrase(haystack, e))) count++;
+    }
+    return { count, anchor: entities[0], mode: 'entities' };
+  }
+
+  // No anchor at all — cannot enforce topicality, pass by default.
+  return { count: hits.length, anchor: null, mode: 'none' };
+}
+
 function passesClientConfidence(hits, routerResult) {
   if (!Array.isArray(hits) || hits.length === 0) {
     return { pass: false, reason: 'no client hits' };
@@ -99,16 +161,50 @@ function passesClientConfidence(hits, routerResult) {
   const topHit = hits[0];
   const topScore = topHit?.score || 0;
 
+  // ── Topicality check ────────────────────────────────────────────────
+  // Score alone is not evidence of relevance. Require at least
+  // MIN_ON_TOPIC_HITS hits to contain the router's sector_term (or, if
+  // none, the concept_keywords / entity_mentions) in title OR chunk_text.
+  const onTopic = countOnTopicHits(hits, routerResult);
+
   if (topScore >= STRONG_SCORE) {
+    if (onTopic.mode !== 'none' && onTopic.count < MIN_ON_TOPIC_HITS) {
+      return {
+        pass: false,
+        reason:
+          `top score ${topScore.toFixed(3)} >= strong floor ${STRONG_SCORE} ` +
+          `BUT only ${onTopic.count} hit(s) are on-topic ` +
+          `(< ${MIN_ON_TOPIC_HITS}; anchor="${onTopic.anchor}")`,
+        topScore,
+        onTopic,
+      };
+    }
     return {
       pass: true,
-      reason: `top score ${topScore.toFixed(3)} >= strong floor ${STRONG_SCORE}`,
+      reason:
+        `top score ${topScore.toFixed(3)} >= strong floor ${STRONG_SCORE}` +
+        (onTopic.mode !== 'none'
+          ? ` AND ${onTopic.count} on-topic hit(s) (anchor="${onTopic.anchor}")`
+          : ''),
       topScore,
+      onTopic,
     };
   }
 
   const titleMatches = countTitleMatches(hits, routerResult);
   if (titleMatches.count >= MIN_TITLE_MATCHES) {
+    if (onTopic.mode !== 'none' && onTopic.count < MIN_ON_TOPIC_HITS) {
+      return {
+        pass: false,
+        reason:
+          `${titleMatches.count} hits have a concept/entity in their title ` +
+          `(>= ${MIN_TITLE_MATCHES}) BUT only ${onTopic.count} hit(s) are ` +
+          `on-topic (< ${MIN_ON_TOPIC_HITS}; anchor="${onTopic.anchor}")`,
+        topScore,
+        titleMatches,
+        onTopic,
+      };
+    }
     return {
       pass: true,
       reason:
@@ -174,8 +270,10 @@ module.exports = {
   passesClientConfidence,
   passesCustomConfidence,
   countTitleMatches,
+  countOnTopicHits,
   containsPhrase,
   STRONG_SCORE,
   CUSTOM_SCORE,
   MIN_TITLE_MATCHES,
+  MIN_ON_TOPIC_HITS,
 };

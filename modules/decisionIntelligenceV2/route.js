@@ -31,7 +31,7 @@ const {
 const { route } = require('./routing/router');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
-const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
+const { filterListHits, filterListHitsConjunctive, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
 const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
@@ -53,15 +53,20 @@ const { loadState } = require('./chatContext/stateStore');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Deterministic filter for inference / decision.
+//
+// Requires a hit to contain BOTH a market anchor (entity_mentions —
+// geography / company names) AND a topic word (concept_keywords — the
+// subject the user is asking about). If the router put topic words in
+// entity_mentions (it sometimes does), the filter self-corrects by
+// removing overlap before applying the rule.
+//
+// Framework questions bypass this filter entirely (handled at the call
+// site so SWOT/PESTLE/etc. still see all retrieved hits).
 // ─────────────────────────────────────────────────────────────────────────
-function filterForInferenceOrDecision(clientHits, concepts) {
-  const clean = normalizeConcepts(concepts);
-  if (clean.length === 0) return clientHits;
-
-  return clientHits.filter((h) => {
-    const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
-    return clean.some((c) => containsPhrase(haystack, c));
-  });
+function filterForInferenceOrDecision(clientHits, routerResult) {
+  const marketConcepts = (routerResult && routerResult.entity_mentions) || [];
+  const topicConcepts  = (routerResult && routerResult.concept_keywords) || [];
+  return filterListHitsConjunctive(clientHits, marketConcepts, topicConcepts);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -188,7 +193,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 
   const keptClient = isFrameworkQuestion
     ? clientRetr.hits
-    : filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
+    : filterForInferenceOrDecision(clientRetr.hits, routerResult);
 
   const keptCustom = customHits;
 
