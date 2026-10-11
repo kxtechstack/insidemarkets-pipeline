@@ -252,10 +252,27 @@ async function main() {
       console.log(` reason:         ${handlerResult._reason}`);
     } else {
       console.log(` title:          ${handlerResult.report.title}`);
-      console.log(` bodyText (${handlerResult.report.bodyText.length} chars):`);
-      console.log(SUB);
-      console.log(handlerResult.report.bodyText);
-      console.log(SUB);
+
+      if (Array.isArray(handlerResult.report.sections)) {
+        console.log(` sections:       ${handlerResult.report.sections.length}`);
+        console.log(SUB);
+        handlerResult.report.sections.forEach((s) => {
+          console.log(` ▸ ${s.heading}`);
+          (s.points || []).forEach((p) => console.log(`     • ${p}`));
+          console.log('');
+        });
+        if (handlerResult.report.bottom_line) {
+          console.log(` Bottom line: ${handlerResult.report.bottom_line}`);
+        }
+        console.log(SUB);
+      } else if (typeof handlerResult.report.bodyText === 'string') {
+        console.log(` bodyText (${handlerResult.report.bodyText.length} chars):`);
+        console.log(SUB);
+        console.log(handlerResult.report.bodyText);
+        console.log(SUB);
+      } else {
+        console.log(` [unknown report shape] ${JSON.stringify(handlerResult.report).slice(0, 200)}`);
+      }
       console.log(` sources:        ${handlerResult.sources.length}`);
     }
     console.log(` (${Date.now() - t2}ms)`);

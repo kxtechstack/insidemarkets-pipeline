@@ -11,12 +11,14 @@
  *   1. Schema designer — designs 3-5 tailored headings for this question
  *   2. Writer          — fills those headings with bullets from context
  *
+ * 
  * If the schema designer fails or the writer returns an unparseable shape,
  * the handler falls back to the legacy flat { title, bodyText } shape.
  * The external function signature and return type are unchanged.
  */
 
 const { callLLM } = require('../../llmClient');
+const { checkTopicalCoverage } = require('./topicalCoverage');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Call 1 — schema designer (same pattern as decisionHandler)
@@ -421,6 +423,20 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       sources: [],
       _empty: true,
       _reason: 'no client signals or uploaded documents matched the question',
+    };
+  }
+    // ── Topical coverage check ─────────────────────────────────────────
+  // Before spending a writer call, verify the retrieved chunks are actually
+  // about the same topic as the question. Stops the writer from reframing
+  // "cosmetics" chunks into a "retail" answer.
+  const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
+  if (!coverage.covered) {
+    console.log(`[inferenceHandler] Topical coverage FAILED: ${coverage.reason}`);
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: `The available data does not cover this topic. ${coverage.reason}`,
     };
   }
 

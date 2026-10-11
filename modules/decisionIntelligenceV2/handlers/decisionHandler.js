@@ -15,7 +15,7 @@
  */
 
 const { callLLM } = require('../../llmClient');
-
+const { checkTopicalCoverage } = require('./topicalCoverage');
 // ─────────────────────────────────────────────────────────────────────────
 // Call 1 — schema designer
 // ─────────────────────────────────────────────────────────────────────────
@@ -225,6 +225,21 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
       sources: [],
       _empty: true,
       _reason: 'no client signals or uploaded documents matched the question',
+    };
+  }
+
+  // ── Topical coverage check ─────────────────────────────────────────
+  // Before spending a writer call, verify the retrieved chunks are actually
+  // about the same topic as the question. Stops the writer from reframing
+  // "cosmetics" chunks into a "retail" answer.
+  const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
+  if (!coverage.covered) {
+    console.log(`[decisionHandler] Topical coverage FAILED: ${coverage.reason}`);
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: `The available data does not cover this topic. ${coverage.reason}`,
     };
   }
 
