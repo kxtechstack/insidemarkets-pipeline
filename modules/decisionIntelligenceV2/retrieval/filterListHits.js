@@ -7,10 +7,6 @@
  * For each hit, keeps it if at least one cleaned concept appears in
  * title or chunk_text (case-insensitive, plural-tolerant, word-boundary).
  *
- * Multi-word concepts: if the exact phrase doesn't match, also try each
- * significant word in the phrase (skip fillers like "of", "and", "the").
- * Example: "vapour duty" → also matches "duty stamps".
- *
  * Cleaning rules:
  *   - split multi-word concepts into individual words
  *   - drop common filler words ("industry", "update", "trends", etc.)
@@ -27,8 +23,6 @@ const FILLER_CONCEPTS = new Set([
   'report', 'reports', 'article', 'articles',
   'analysis', 'overview', 'summary',
 ]);
-
-const PHRASE_STOPWORDS = new Set(['of', 'and', 'the', 'in', 'on', 'at', 'to', 'for', 'a', 'an']);
 
 function phraseVariants(phrase) {
   const p = String(phrase).toLowerCase().trim();
@@ -48,32 +42,15 @@ function phraseVariants(phrase) {
   return [...variants];
 }
 
-function escapeRegex(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function containsPhrase(text, phrase) {
   if (!text || !phrase) return false;
   const t = String(text).toLowerCase();
-
-  // 1. Try exact phrase (with plural variants for single words)
   for (const v of phraseVariants(phrase)) {
     if (!v) continue;
-    const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(v)}(?:[^a-z0-9]|$)`, 'i');
+    const escaped = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
     if (re.test(t)) return true;
   }
-
-  // 2. Multi-word fallback — try each significant word individually
-  const words = String(phrase).toLowerCase().trim().split(/\s+/);
-  if (words.length > 1) {
-    for (const w of words) {
-      if (w.length < 3) continue;
-      if (PHRASE_STOPWORDS.has(w)) continue;
-      const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(w)}(?:[^a-z0-9]|$)`, 'i');
-      if (re.test(t)) return true;
-    }
-  }
-
   return false;
 }
 

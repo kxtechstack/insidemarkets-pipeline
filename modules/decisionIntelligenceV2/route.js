@@ -36,7 +36,6 @@ const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
 const { buildSecAnswer } = require('./handlers/secHandler');
-const { evaluateConfidence } = require('./handlers/confidenceGate');
 const {
   buildGreetingResponse,
   buildOffTopicResponse,
@@ -46,13 +45,17 @@ const {
   buildDecisionResponse,
 } = require('./responseBuilder');
 
-// chatContext layer
+// chatContext layer (new)
 const { resolveContext } = require('./chatContext/contextResolver');
 const { updateState } = require('./chatContext/stateUpdater');
 const { loadState } = require('./chatContext/stateStore');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Deterministic filter for inference / decision.
+//
+// Same concept normalization as list. Keeps any hit where at least one
+// clean concept appears in title OR body. If no concepts survive cleaning,
+// keeps all hits (nothing to filter on).
 // ─────────────────────────────────────────────────────────────────────────
 function filterForInferenceOrDecision(clientHits, concepts) {
   const clean = normalizeConcepts(concepts);
@@ -91,6 +94,11 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   }
 
   // ── 1.5 SEC pre-check ───────────────────────────────────────────────
+  // Only runs for market_intelligence questions. Wrapped so any failure
+  // in the SEC layer silently falls through to normal V2.
+  //   - mode:'numeric'   → returns a full payload (numeric answer + chart)
+  //   - mode:'framework' → returns injectChunks to merge into decision context
+  //   - null             → not SEC-shaped, or SEC failed; V2 runs unmodified
   let secResult = null;
   if (routerResult.intent === 'market_intelligence') {
     try {
@@ -106,6 +114,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
   }
 
+  // SEC numeric answer is authoritative — return it directly.
   if (secResult && secResult.mode === 'numeric' && secResult.payload) {
     console.log(`[V2 route] SEC numeric answer returned directly`);
     return {
@@ -115,6 +124,8 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     };
   }
 
+  // SEC region fallback (non-US + SEC-numeric) — return directly.
+  // Either a list of region+topic-matching signals, or a no_data payload.
   if (secResult && secResult.mode === 'region_fallback' && secResult.payload) {
     console.log(`[V2 route] SEC region fallback returned directly (type=${secResult.payload.type})`);
     return {
@@ -124,6 +135,8 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     };
   }
 
+  // SEC framework chunks (if any) will be merged into the decision context
+  // further down. Held in `secResult.injectChunks`.
   const secInjectChunks = (secResult && secResult.mode === 'framework' && Array.isArray(secResult.injectChunks))
     ? secResult.injectChunks
     : [];
@@ -184,18 +197,29 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     ...(routerResult.entity_mentions || []),
   ];
 
+  // Framework questions (SWOT / PESTLE / Five Forces / Risk) are STRUCTURAL —
+  // they apply a template to whatever data exists; they don't ask "does
+  // this hit mention the framework name". The concept filter is guaranteed
+  // to drop all client hits on those questions because no client signal
+  // literally says "swot" / "pestle" / etc. So we skip the filter for
+  // framework questions and let the writer decide relevance.
   const isFrameworkQuestion = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(question);
 
   const keptClient = isFrameworkQuestion
     ? clientRetr.hits
     : filterForInferenceOrDecision(clientRetr.hits, conceptsForFilter);
 
-  const keptCustom = customHits;
+  const keptCustom = customHits; // custom sources always kept
 
+  // Merge SEC chunks (if the SEC handler produced any) into the client
+  // hits. SEC chunks bypass the deterministic concept filter because they
+  // were retrieved by SEC-specific logic (ticker + framework item codes).
   const keptClientWithSec = secInjectChunks.length
     ? [...secInjectChunks, ...keptClient]
     : keptClient;
 
+  // For inference, SEC chunks don't count toward material — inference
+  // never consumes them. For decision, they do.
   const materialCount = routerResult.type === 'decision'
     ? keptClientWithSec.length + keptCustom.length
     : keptClient.length + keptCustom.length;
@@ -205,34 +229,6 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     `[V2 route] ${routerResult.type} filter: kept client=${keptClient.length}/${clientRetr.hits.length} ` +
     `sec=${secInjectChunks.length} custom=${keptCustom.length} (concepts=[${conceptsForFilter.join(', ')}])`
   );
-
-  // ── Confidence gate ─────────────────────────────────────────────────
-  // Runs for inference and decision. Skipped when:
-  //   - SEC framework chunks were injected (SEC-side authority)
-  //   - hasMaterial is false (handled below as no_data anyway)
-  if (hasMaterial && secInjectChunks.length === 0) {
-    const gate = evaluateConfidence({
-      clientHits: keptClient,
-      customHits: keptCustom,
-      routerResult,
-    });
-    if (!gate.pass) {
-      console.log(`[V2 route] confidence gate BLOCKED — ${gate.reason}`);
-      if (routerResult.type === 'inference') {
-        const payload = await buildInferenceResponse({
-          handlerResult: { _empty: true, _reason: 'retrieved context is not confident enough to answer this question' },
-          clientId,
-        });
-        return { routerResult, payload };
-      }
-      const payload = await buildDecisionResponse({
-        handlerResult: { _empty: true, _reason: 'retrieved context is not confident enough to answer this question' },
-        clientId,
-      });
-      return { routerResult, payload };
-    }
-    console.log(`[V2 route] confidence gate PASSED — ${gate.reason}`);
-  }
 
   if (!hasMaterial) {
     if (routerResult.type === 'inference') {
@@ -250,11 +246,13 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   }
 
   if (routerResult.type === 'inference') {
+    // SEC chunks only attach to decision — inference stays client+custom only.
     const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
     return { routerResult, handlerResult, payload };
   }
 
+  // decision — SEC chunks merged in (empty array if SEC didn't fire)
   const handlerResult = await buildDecisionAnswer(question, keptClientWithSec, keptCustom);
   const payload = await buildDecisionResponse({ handlerResult, clientId });
   return { routerResult, handlerResult, payload };
@@ -337,7 +335,17 @@ function registerDecisionIntelligenceV2Route(app) {
   });
 
   // ───────────────────────────────────────────────────────────────────────
-  // chatContext-wrapped chat.
+  // NEW — chatContext-wrapped chat.
+  //
+  // Same as /chat, but:
+  //   1. Loads conversation state
+  //   2. Runs context resolver (LLM) to produce a standalone query
+  //   3. For greeting/off_topic/clarification → pass raw message, skip updater
+  //      Otherwise                              → pass standalone query
+  //   4. Runs state updater after the answer (non-small-talk only)
+  //
+  // Response shape is identical to /chat, plus `resolver` and `state`
+  // for debugging. Existing /chat is untouched.
   // ───────────────────────────────────────────────────────────────────────
   app.post('/decision-intelligence-v2/chat-with-memory', async (req, res) => {
     try {
@@ -365,6 +373,7 @@ function registerDecisionIntelligenceV2Route(app) {
         });
       }
 
+      // ── 1. Load conversation state (before resolver needs it) ─────────
       let currentState = {};
       try {
         currentState = await loadState(conversationId);
@@ -372,8 +381,10 @@ function registerDecisionIntelligenceV2Route(app) {
         console.log(`[chat-with-memory] loadState failed: ${err.message}`);
       }
 
+      // ── 2. Persist user message BEFORE resolver reads recent messages ─
       await appendMessage({ conversationId, role: 'user', content: question });
 
+      // ── 3. Run context resolver ───────────────────────────────────────
       let resolverResult;
       try {
         resolverResult = await resolveContext({
@@ -393,6 +404,7 @@ function registerDecisionIntelligenceV2Route(app) {
         };
       }
 
+      // ── 4. Decide what query to send to the pipeline ──────────────────
       const skipStateUpdate =
         resolverResult.kind === 'greeting' ||
         resolverResult.kind === 'off_topic' ||
@@ -408,6 +420,7 @@ function registerDecisionIntelligenceV2Route(app) {
         `query="${queryForPipeline.slice(0, 120)}"`
       );
 
+      // ── 5. Run existing V2 pipeline ───────────────────────────────────
       let result;
       try {
         result = await runV2Pipeline({
@@ -440,6 +453,7 @@ function registerDecisionIntelligenceV2Route(app) {
         console.log(`[chat-with-memory] failed to persist assistant message: ${err.message}`);
       }
 
+      // ── 6. State updater (skip for small-talk kinds) ──────────────────
       let finalState = currentState;
       if (!skipStateUpdate) {
         try {
