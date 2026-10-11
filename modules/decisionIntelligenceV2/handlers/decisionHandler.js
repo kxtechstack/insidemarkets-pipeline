@@ -5,6 +5,7 @@
  *
  * Input:  retrieval hits (client signals) + custom source chunks
  * Output: { report: { title, sections: [{heading, points}], bottom_line }, sources }
+ *         OR { report: null, sources: [], _empty: true, _reason: "..." }
  *
  * TWO LLM calls:
  *   1. Schema designer — designs 4-5 tailored headings for this question
@@ -76,6 +77,7 @@ Content rules:
 - Bullets must be complete thoughts, not single words.
 - Every bullet must be grounded in the provided context. Do not invent facts, numbers, dates, or names.
 - If a section cannot be supported by the context, use a single bullet: "No relevant data in the current dataset."
+- If a section has no supporting content, return EXACTLY the string "No relevant data in the current dataset." as its single bullet. Do not return an empty array. Do not return a header with no bullets.
 - Preserve exactly: organization names, regulation names, dates, numbers, monetary figures.
 - Do not mention "the provided articles", "the context", or "the retrieved data".
 - Do not include citation markers like [1], [2].
@@ -123,7 +125,7 @@ function buildContext(clientHits, customHits) {
     let text = h.chunk_text || '';
     if (text.length > ITEM_MAX_CHARS) text = text.slice(0, ITEM_MAX_CHARS) + '…';
     const label = h._sec ? '[SEC FILING]' : '[CLIENT SIGNAL]';
-parts.push(`${label} ${title}\n${text}`);
+    parts.push(`${label} ${title}\n${text}`);
   }
 
   const customPool = (customHits || []).slice(0, MAX_CUSTOM_CHUNKS);
@@ -138,7 +140,7 @@ parts.push(`${label} ${title}\n${text}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// JSON parsing helpers (same pattern as inferenceHandler)
+// JSON parsing helpers
 // ─────────────────────────────────────────────────────────────────────────
 function stripFences(raw) {
   return String(raw || '')
@@ -216,6 +218,20 @@ const FALLBACK_HEADINGS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
+// Detect an all-empty report (every section only contains the fallback
+// "No relevant data..." bullet). Used to short-circuit to _empty instead
+// of returning an empty report shell to the frontend.
+// ─────────────────────────────────────────────────────────────────────────
+function isAllEmptyReport(rep) {
+  if (!rep || !Array.isArray(rep.sections) || rep.sections.length === 0) return false;
+  return rep.sections.every((s) =>
+    Array.isArray(s.points) &&
+    s.points.length === 1 &&
+    /no relevant data/i.test(s.points[0])
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Main handler
 // ─────────────────────────────────────────────────────────────────────────
 async function buildDecisionAnswer(question, clientHits = [], customSourceHits = []) {
@@ -224,7 +240,7 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
       report: null,
       sources: [],
       _empty: true,
-      _reason: 'no client signals or uploaded documents matched the question',
+      _reason: "Our current intelligence doesn't cover this yet. Here are some questions you might find useful:",
     };
   }
 
@@ -311,6 +327,21 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
   // Sanitize sections
   const sanitizedReport = sanitizeReport(report, headings, question);
 
+  // ── All-empty report check ──────────────────────────────────────────
+  // If every section ended up as just the fallback bullet, treat the
+  // response as no_data instead of showing an empty report shell to the
+  // user. The responseBuilder turns _empty:true into a clean "no data"
+  // message with suggestions.
+  if (isAllEmptyReport(sanitizedReport)) {
+    console.log(`[decisionHandler] all sections empty — returning no_data`);
+    return {
+      report: null,
+      sources: [],
+      _empty: true,
+      _reason: "Our current intelligence doesn't cover this yet. Here are some questions you might find useful:",
+    };
+  }
+
   return {
     report: sanitizedReport,
     sources: collectSources(clientHits, customSourceHits),
@@ -321,7 +352,6 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
 // Sanitize the writer output — enforce heading list, shape, and types
 // ─────────────────────────────────────────────────────────────────────────
 function sanitizeReport(report, headings, question) {
-  // Build a map from heading → points (case-insensitive)
   const byHeading = new Map();
   if (report && Array.isArray(report.sections)) {
     for (const s of report.sections) {
@@ -334,13 +364,17 @@ function sanitizeReport(report, headings, question) {
     }
   }
 
-  // Force the sections to be exactly the required headings, in order
-  const finalSections = headings.map((h) => ({
-    heading: h,
-    points: byHeading.get(h.toLowerCase()) || ['No relevant data in the current dataset.'],
-  }));
+  // Force the sections to be exactly the required headings, in order.
+  // Empty points arrays get the fallback bullet so we never ship a header
+  // with no content.
+  const finalSections = headings.map((h) => {
+    const points = byHeading.get(h.toLowerCase()) || [];
+    return {
+      heading: h,
+      points: points.length > 0 ? points : ['No relevant data in the current dataset.'],
+    };
+  });
 
-  // Fallback if no report at all
   if (!report) {
     return {
       title: question,
@@ -425,6 +459,7 @@ module.exports = {
   buildContext,
   collectSources,
   sanitizeReport,
+  isAllEmptyReport,
   SCHEMA_DESIGNER_PROMPT,
   WRITER_PROMPT,
   FALLBACK_HEADINGS,
