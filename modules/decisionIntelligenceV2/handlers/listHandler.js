@@ -35,7 +35,8 @@ async function fetchPolicySignals(articleIds) {
   const { data, error } = await supabase
     .from('policy_signals')
     .select('id, article_id, signal_title, summary, category, impact_level, country, source_article_url, source_published_date')
-    .in('article_id', articleIds);
+    .in('article_id', articleIds)
+    .eq('is_duplicate', false);
   if (error) {
     console.log(`[listHandler] policy_signals lookup failed: ${error.message}`);
     return new Map();
@@ -48,7 +49,8 @@ async function fetchMDSignals(articleIds) {
   const { data: signalRows, error } = await supabase
     .from('market_dynamics_signals')
     .select('id, article_id, insight_id, signal_title, summary, organization, country, source_url, published_date, category')
-    .in('article_id', articleIds);
+    .in('article_id', articleIds)
+    .eq('is_duplicate', false);
   if (error) {
     console.log(`[listHandler] market_dynamics_signals lookup failed: ${error.message}`);
     return new Map();
@@ -82,7 +84,8 @@ async function fetchFOSignals(articleIds) {
   const { data: signalRows, error } = await supabase
     .from('trend_signals')
     .select('id, article_id, signal_title, summary, sector, horizon_estimate, source_article_url')
-    .in('article_id', articleIds);
+    .in('article_id', articleIds)
+    .eq('is_duplicate', false);
   if (error) {
     console.log(`[listHandler] trend_signals lookup failed: ${error.message}`);
     return new Map();
