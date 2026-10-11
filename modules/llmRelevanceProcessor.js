@@ -111,6 +111,33 @@ const qdrant = new QdrantClient({
 
 const { callLLM } = require('./llmClient');
 
+// ─────────────────────────────────────────────────────────────────────────
+// Which signal table a given module's relevant articles land in.
+//
+// Extend this when a new module is added — the dedup + storage logic reads
+// from this map, so nothing else in the pipeline needs to change.
+//
+// Post-synthesis dedup: syndicated copies of the same press release arrive
+// with wildly different raw titles and body ledes (per-publisher noise),
+// so title/body-based checks cannot reliably catch them. But the LLM
+// synthesis step rewrites each copy into original wording driven by the
+// SHARED underlying content, so copies converge on the SAME synthesized
+// title. The check reads from this map to know which table to search.
+// ─────────────────────────────────────────────────────────────────────────
+const SIGNAL_TABLE_BY_MODULE = {
+  '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960': 'policy_signals',            // Policy & Risk
+  '55c5ee19-bfca-468b-81b3-b89ca4f303c8': 'market_dynamics_signals',  // Market Dynamics
+  '2eb989fd-0ea0-4320-b73a-f7eb8b970473': 'trend_signals',            // Forward Outlook
+};
+
+const getSignalTableForModule = (moduleId) => {
+  const table = SIGNAL_TABLE_BY_MODULE[moduleId];
+  if (!table) {
+    console.log(`  [SignalTable] no signal table mapped for module_id ${moduleId}`);
+  }
+  return table || null;
+};
+
 const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 const VECTOR_SIZE = Number(process.env.EMBEDDING_VECTOR_SIZE) || 384;
 const DELAY_BETWEEN_CALLS_MS = Number(process.env.LLM_CALL_DELAY_MS) || 1000;
@@ -912,6 +939,63 @@ const setupPolicyCollection = async () => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// Post-synthesis duplicate check.
+//
+// After the LLM rewrites an article into its own words, syndicated copies
+// of the same PR converge on the same synthesized title. If a non-duplicate
+// signal with that title already exists for the same (client, module,
+// submodule) within the dedup window, this article is a duplicate and the
+// caller skips storage.
+//
+// Non-destructive: on any error, returns { isDuplicate: false } and the
+// normal flow continues unchanged.
+// ─────────────────────────────────────────────────────────────────────────
+const DEDUP_WINDOW_DAYS = Number(process.env.SIGNAL_DEDUP_WINDOW_DAYS) || 90;
+
+async function findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, moduleId, submoduleId) {
+  if (!synthesizedTitle || typeof synthesizedTitle !== 'string') {
+    return { isDuplicate: false };
+  }
+  const title = synthesizedTitle.trim();
+  if (title.length < 5) return { isDuplicate: false };
+
+  const signalTable = getSignalTableForModule(moduleId);
+  if (!signalTable) return { isDuplicate: false };
+
+  const cutoffIso = new Date(
+    Date.now() - DEDUP_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  try {
+    const { data, error } = await supabase
+      .from(signalTable)
+      .select('id, signal_title, created_at')
+      .eq('client_id', clientId)
+      .eq('module_id', moduleId)
+      .eq('submodule_id', submoduleId)
+      .eq('is_duplicate', false)
+      .ilike('signal_title', title)   // case-insensitive exact match
+      .gte('created_at', cutoffIso)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.log(`  [SynthesizedDedup] lookup error (non-fatal): ${error.message}`);
+      return { isDuplicate: false };
+    }
+
+    if (data && data.id) {
+      return { isDuplicate: true, existingSignalId: data.id, existingSignalTable: signalTable };
+    }
+    return { isDuplicate: false };
+  } catch (err) {
+    console.log(`  [SynthesizedDedup] lookup threw (non-fatal): ${err.message}`);
+    return { isDuplicate: false };
+  }
+}
+
 // ── Store relevant article ───────────────────────────────────────────────────
 // CHANGED: now takes moduleId and submoduleId, tags every insert + Qdrant payload with them
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId, moduleId, submoduleId) => {
@@ -924,6 +1008,19 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   const contentToChunk = synthesized.body || classification.summary || '';
   const chunks = chunkText(contentToChunk);
   const articleId = uuidv4();
+
+    // ── Post-synthesis duplicate check ──────────────────────────────────
+  // Runs AFTER synthesis (so we get the canonical semantic title) and
+  // BEFORE any storage (so we don't leave orphan rows in Qdrant or
+  // Supabase). If a non-duplicate signal with this synthesized title
+  // already exists, this article is a syndicated copy — skip storage.
+  const dupCheck = await findExistingSignalBySynthesizedTitle(
+    synthesizedTitle, clientId, moduleId, submoduleId
+  );
+  if (dupCheck.isDuplicate) {
+    console.log(`  [SynthesizedDedup] SKIP: "${synthesizedTitle}" already stored as ${dupCheck.existingSignalTable}/${dupCheck.existingSignalId}`);
+    return { skipped: true, duplicateOf: dupCheck.existingSignalId, synthesizedTitle };
+  }
 
   // Step 2 — Chunk synthesized body and store in Qdrant
   const points = [];
@@ -1034,7 +1131,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     } catch (mdErr) {
       console.error(`  [MarketDynamics] Failed to enrich/create insight for "${article.title}": ${mdErr.message} — skipping, continuing to next article`);
     }
-    return chunks.length;
+    return { stored: true, chunks: chunks.length };
   }
 
   // Step 5 — Store structured signal for frontend
@@ -1084,7 +1181,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     }
   }
 
-  return chunks.length;
+  return { stored: true, chunks: chunks.length };
 };
 
 // ── Main processing function ─────────────────────────────────────────────────
@@ -1202,7 +1299,7 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
           );
         }
       } else if (classification.is_relevant) {
-        const chunkCount = await storeRelevantArticle(
+        const storeResult = await storeRelevantArticle(
           article,
           classification,
           clientId,
@@ -1211,22 +1308,40 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
           moduleId,
           submoduleId
         );
-        await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
-        // Article is now fully stored -- commit dedup state so future runs
-        // recognize it as handled.
-        await commitUrlSeen(article, clientId, moduleId);
-        await commitTopicSeen(article, clientId, moduleId);
-        relevantCount++;
-        consecutiveTechnicalFailures = 0;  // success resets the breaker counter
 
-        if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
-          console.log(
-            `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
+        if (storeResult && storeResult.skipped) {
+          // Duplicate of an existing signal — not stored, but fully handled.
+          // Log as 'skipped' (report counts remain correct), commit dedup,
+          // and DO NOT increment relevantCount.
+          await logArticle(
+            jobId, clientId, article, 'skipped',
+            `Duplicate of existing signal ${storeResult.duplicateOf}`,
+            submoduleId, existingLogId
           );
+          await commitUrlSeen(article, clientId, moduleId);
+          await commitTopicSeen(article, clientId, moduleId);
+          irrelevantCount++;
+          consecutiveTechnicalFailures = 0;
+          console.log(`  [=] DUPLICATE (skipped storage) | ${storeResult.synthesizedTitle}`);
         } else {
-          console.log(
-            `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
-          );
+          const chunkCount = (storeResult && storeResult.chunks) ? storeResult.chunks : 0;
+          await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
+          // Article is now fully stored -- commit dedup state so future runs
+          // recognize it as handled.
+          await commitUrlSeen(article, clientId, moduleId);
+          await commitTopicSeen(article, clientId, moduleId);
+          relevantCount++;
+          consecutiveTechnicalFailures = 0;  // success resets the breaker counter
+
+          if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+            console.log(
+              `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
+            );
+          } else {
+            console.log(
+              `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
+            );
+          }
         }
       } else {
         await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
