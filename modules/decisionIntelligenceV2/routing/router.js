@@ -378,6 +378,15 @@ to a sector/subsector of public companies and Y is a financial metric.
   "compare automotive companies' net income" → true, "automotive"
   "top 5 airlines by revenue"               → true, "airlines"
   "rank US insurance companies by assets"   → true, "insurance"
+    "top cosmetic companies in usa"           → is_company_set_query: true, sector_term: "cosmetics"
+  "top cosmetic companies in uk"            → is_company_set_query: true, sector_term: "cosmetics"
+  "leading tech companies in india"         → is_company_set_query: true, sector_term: "tech"
+  "biggest banks in japan"                  → is_company_set_query: true, sector_term: "banks"
+
+The word "top" / "leading" / "biggest" / "major" implies a ranking; a number
+(like "top 5") is NOT required. If the question asks to identify or rank
+companies in a sector/region, that IS a company-set query — even without a
+number and even without a financial metric named.
 
 =========================
 EXAMPLES
