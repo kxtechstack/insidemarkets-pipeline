@@ -8,22 +8,14 @@
  *   3. Handler
  *   4. Sources
  *
- * Two modes:
- *   node scripts\di-v2-trace.js                          → interactive REPL
- *   node scripts\di-v2-trace.js --q "your question"      → one-shot trace
- *   node scripts\di-v2-trace.js --q "..." --client <id> --industry "Cosmetics"
- *   node scripts\di-v2-trace.js --q "..." --type decision
- *
- * In interactive mode, prefix with "list:", "inference:", or "decision:"
- * to force a path for that single turn.
+ *   node scripts\di-v2-trace.js --q "your question"
+ *   node scripts\di-v2-trace.js --q "..." --client <uuid> --industry "Cosmetics"
  *
  * Env:
  *   DI_V2_TRACE_VERBOSE=1   print full chunk text (no truncation)
  */
 
 require('dotenv').config();
-
-const readline = require('readline');
 
 const { route } = require('../modules/decisionIntelligenceV2/routing/router');
 const { retrieveClientSignals } = require('../modules/decisionIntelligenceV2/retrieval/clientSignalsRetrieval');
@@ -39,11 +31,8 @@ const SUB  = '─'.repeat(90);
 const VERBOSE = process.env.DI_V2_TRACE_VERBOSE === '1';
 const CHUNK_LIMIT = VERBOSE ? 5000 : 400;
 
-const DEFAULT_CLIENT_ID = process.env.DI_CLIENT_ID || 'b61b4d3b-caeb-457b-9971-636c83688ee4';
-const DEFAULT_INDUSTRY  = process.env.DI_INDUSTRY  || 'Cosmetics';
-
 function parseArgs(argv) {
-  const args = { question: null, client: null, industry: null, type: null, user: null };
+  const args = { question: null, client: null, industry: null, type: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -51,7 +40,6 @@ function parseArgs(argv) {
     else if (a === '--client') args.client = next();
     else if (a === '--industry') args.industry = next();
     else if (a === '--type')   args.type = next();
-    else if (a === '--user')   args.user = next();
   }
   return args;
 }
@@ -84,17 +72,22 @@ function filterForInferenceOrDecision(clientHits, concepts) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Run the full trace for one question. Returns nothing (prints stages).
-// ─────────────────────────────────────────────────────────────────────────
-async function traceOne({ question, clientId, industry, userName, forcedType }) {
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (!args.question) {
+    console.error('Provide --q "<question>"');
+    process.exit(1);
+  }
+  const clientId = args.client || process.env.DI_CLIENT_ID || 'b61b4d3b-caeb-457b-9971-636c83688ee4';
+  const industry = args.industry || process.env.DI_INDUSTRY || 'Cosmetics';
+
   console.log(LINE);
   console.log(' DI V2 — FULL PIPELINE TRACE');
   console.log(LINE);
-  console.log(` Q:          ${question}`);
+  console.log(` Q:          ${args.question}`);
   console.log(` clientId:   ${clientId}`);
   console.log(` industry:   ${industry}`);
-  console.log(` forcedType: ${forcedType || '(auto)'}`);
+  console.log(` forcedType: ${args.type || '(auto)'}`);
   console.log(` verbose:    ${VERBOSE ? 'ON' : 'off (set DI_V2_TRACE_VERBOSE=1 for full text)'}`);
 
   const tTotal = Date.now();
@@ -103,26 +96,24 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
   stageHeader(1, 'Router');
   const t0 = Date.now();
   let routerResult;
-  if (forcedType) {
+  if (args.type) {
     const valid = ['list', 'inference', 'decision'];
-    if (!valid.includes(forcedType)) {
-      console.error(`Invalid --type "${forcedType}". Must be list|inference|decision.`);
-      return;
+    if (!valid.includes(args.type)) {
+      console.error(`Invalid --type "${args.type}". Must be list|inference|decision.`);
+      process.exit(1);
     }
     routerResult = {
       intent: 'market_intelligence',
-      type: forcedType,
+      type: args.type,
       time_constraint: { present: false, value: null, unit: null, phrase: null },
       entity_mentions: [],
       concept_keywords: [],
-      sector_term: null,
       is_company_set_query: false,
-      primary_intent: question,
-      user_message: null,
+      primary_intent: args.question,
       _fallback: false,
     };
   } else {
-    routerResult = await route(question, industry, { userName });
+    routerResult = await route(args.question, industry);
   }
   console.log(` intent:          ${routerResult.intent}`);
   console.log(` type:            ${routerResult.type}`);
@@ -135,13 +126,12 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
     console.log(` time:            none`);
   }
   console.log(` primary_intent:  ${show(routerResult.primary_intent, 200)}`);
-  console.log(` user_message:    ${show(routerResult.user_message, 200)}`);
   console.log(` fallback:        ${routerResult._fallback ? '⚠ YES' : 'no'}`);
   console.log(` (${Date.now() - t0}ms)`);
 
   if (routerResult.intent !== 'market_intelligence') {
     console.log('\n → Non-market-intelligence intent — pipeline short-circuits here.');
-    console.log(` → reply would be: ${routerResult.user_message || routerResult.primary_intent}`);
+    console.log(` → reply would be: ${routerResult.primary_intent}`);
     console.log('\n' + LINE);
     console.log(` TOTAL TIME: ${Date.now() - tTotal}ms`);
     console.log(LINE + '\n');
@@ -152,12 +142,12 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
   stageHeader(2, 'Retrieval');
 
   const t1 = Date.now();
-  const clientRetr = await retrieveClientSignals(question, clientId, industry, {
+  const clientRetr = await retrieveClientSignals(args.question, clientId, industry, {
     precomputedUnderstanding: routerResult,
   });
   const customHits = routerResult.type === 'list'
     ? []
-    : await retrieveCustomSourceHits(question, clientId);
+    : await retrieveCustomSourceHits(args.question, clientId);
   const retrMs = Date.now() - t1;
 
   console.log(` Client hits: ${clientRetr.hits.length}  (matched ${clientRetr.matchedCount} / un-matched ${clientRetr.unmatchedCount})`);
@@ -256,7 +246,7 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
 
   } else if (routerResult.type === 'inference') {
     const t2 = Date.now();
-    handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
+    handlerResult = await buildInferenceAnswer(args.question, keptClient, keptCustom);
     console.log(` empty:          ${handlerResult._empty ? 'yes' : 'no'}`);
     if (handlerResult._empty) {
       console.log(` reason:         ${handlerResult._reason}`);
@@ -289,7 +279,7 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
 
   } else if (routerResult.type === 'decision') {
     const t2 = Date.now();
-    handlerResult = await buildDecisionAnswer(question, keptClient, keptCustom);
+    handlerResult = await buildDecisionAnswer(args.question, keptClient, keptCustom);
     console.log(` empty:          ${handlerResult._empty ? 'yes' : 'no'}`);
     if (handlerResult._empty) {
       console.log(` reason:         ${handlerResult._reason}`);
@@ -332,126 +322,4 @@ async function traceOne({ question, clientId, industry, userName, forcedType }) 
   console.log(LINE + '\n');
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// One-shot mode — called when --q is provided
-// ─────────────────────────────────────────────────────────────────────────
-async function runOnce() {
-  const args = parseArgs(process.argv.slice(2));
-  if (!args.question) {
-    console.error('Provide --q "<question>"');
-    process.exit(1);
-  }
-  const clientId = args.client || DEFAULT_CLIENT_ID;
-  const industry = args.industry || DEFAULT_INDUSTRY;
-
-  // Optional: look up user's first name for personalized greeting test
-  let userName = null;
-  if (args.user) {
-    try {
-      const { createClient } = require('@supabase/supabase-js');
-      const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-      const { data } = await supa
-        .schema('admin')
-        .from('client_users')
-        .select('first_name')
-        .eq('id', args.user)
-        .maybeSingle();
-      userName = data?.first_name || null;
-      console.log(`[trace] resolved user_name="${userName}" for userId=${args.user}`);
-    } catch (err) {
-      console.log(`[trace] user first-name lookup failed: ${err.message}`);
-    }
-  }
-
-  await traceOne({
-    question: args.question,
-    clientId,
-    industry,
-    userName,
-    forcedType: args.type || null,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Interactive mode — REPL for one question at a time
-// ─────────────────────────────────────────────────────────────────────────
-async function interactive() {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  // Optional: parse --user from argv for personalized greetings
-  const args = parseArgs(process.argv.slice(2));
-  let userName = null;
-  if (args.user) {
-    try {
-      const { createClient } = require('@supabase/supabase-js');
-      const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-      const { data } = await supa
-        .schema('admin')
-        .from('client_users')
-        .select('first_name')
-        .eq('id', args.user)
-        .maybeSingle();
-      userName = data?.first_name || null;
-      console.log(`[trace] resolved user_name="${userName}" for userId=${args.user}`);
-    } catch (err) {
-      console.log(`[trace] user first-name lookup failed: ${err.message}`);
-    }
-  }
-
-  console.log(LINE);
-  console.log(' DI V2 — interactive trace');
-  console.log(LINE);
-  console.log(` clientId: ${DEFAULT_CLIENT_ID}`);
-  console.log(` industry: ${DEFAULT_INDUSTRY}`);
-  console.log('');
-  console.log(' Type a question and press Enter.');
-  console.log(' Prefix with "list:", "inference:", or "decision:" to force a path.');
-  console.log(' Type "exit" or Ctrl+C to quit.');
-  console.log(LINE);
-
-  const prompt = () => rl.question('\n❯ ', async (line) => {
-    const q = (line || '').trim();
-    if (!q) return prompt();
-    if (q.toLowerCase() === 'exit' || q.toLowerCase() === 'quit') {
-      rl.close();
-      return;
-    }
-
-    // Detect "type: question" prefix to force a path for this turn only
-    let forcedForTurn = null;
-    let actualQ = q;
-    const prefixMatch = q.match(/^(list|inference|decision):\s*(.+)$/i);
-    if (prefixMatch) {
-      forcedForTurn = prefixMatch[1].toLowerCase();
-      actualQ = prefixMatch[2].trim();
-    }
-
-    try {
-      await traceOne({
-        question: actualQ,
-        clientId: DEFAULT_CLIENT_ID,
-        industry: DEFAULT_INDUSTRY,
-        userName,
-        forcedType: forcedForTurn,
-      });
-    } catch (err) {
-      console.log('[pipeline error]', err.message);
-      console.log(err.stack);
-    }
-    prompt();
-  });
-
-  prompt();
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Entry point
-// ─────────────────────────────────────────────────────────────────────────
-(async () => {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.question) {
-    runOnce().catch((err) => { console.error('Fatal:', err); process.exit(1); });
-  } else {
-    interactive().catch((err) => { console.error('Fatal:', err); process.exit(1); });
-  }
-})();
+main().catch((err) => { console.error('Fatal:', err); process.exit(1); });

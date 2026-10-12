@@ -19,33 +19,10 @@ const { getSuggestedQuestions } = require('../decisionIntelligence/chatHistory')
 const { getVerifiedSuggestions } = require('../decisionIntelligence/suggestionEngine');
 const { enrichSourcesWithSignalIds } = require('../decisionIntelligence/enrichSources');
 
-// User-facing no-data messages. Rotated randomly so users don't see the
-// same phrasing every time. Internal reasons (handlerResult._reason) are
-// logged for debugging but never shown to the user.
-const NO_DATA_MESSAGES = [
-  "I don't have details on that yet — it may not be in your tracked sources. Here are some things I can look into instead:",
-  "I couldn't find relevant data for this question in your current sources. Try exploring one of these instead:",
-  "Nothing in your currently tracked sources matches this. Here are some related areas I can help with:",
+const DEFAULT_NO_DATA_SUGGESTIONS = [
+  'What are the major policy changes affecting my industry?',
+  'What recent market activity is happening in my sector?',
 ];
-
-const SYSTEM_ERROR_MESSAGE =
-  "We hit a temporary snag while generating this answer. Please try again in a moment.";
-
-function pickNoDataMessage() {
-  const idx = Math.floor(Math.random() * NO_DATA_MESSAGES.length);
-  return NO_DATA_MESSAGES[idx];
-}
-
-// Decides which user-facing message to show for an empty handler result.
-// Technical failures get the system-error message; everything else gets
-// a warm no-data variant.
-function messageForEmptyHandler(handlerResult) {
-  const reason = (handlerResult && handlerResult._reason) || '';
-  if (/llm call failed|llm.*failed|timeout|exception/i.test(reason)) {
-    return SYSTEM_ERROR_MESSAGE;
-  }
-  return pickNoDataMessage();
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Suggestion loaders
@@ -106,9 +83,8 @@ async function buildGreetingResponse({ routerResult, clientId, industry }) {
     items: [],
     greeting: true,
     message:
-      routerResult.user_message ||
       routerResult.primary_intent ||
-      'Hi! What would you like to know about your market today?',
+      'Hi! What would you like to know about your market data?',
     suggestions,
   };
 }
@@ -120,9 +96,8 @@ async function buildOffTopicResponse({ routerResult, clientId, industry }) {
     items: [],
     no_data: true,
     message:
-      routerResult.user_message ||
       routerResult.primary_intent ||
-      "I focus on market and business intelligence — I'm not the right assistant for that. Here are some things I can help you with:",
+      "I focus on market and business intelligence. Ask me about your industry data instead.",
     suggestions,
   };
 }
@@ -134,9 +109,8 @@ async function buildClarificationResponse({ routerResult, clientId, industry }) 
     items: [],
     no_data: true,
     message:
-      routerResult.user_message ||
       routerResult.primary_intent ||
-      'I couldn\u2019t quite parse that — could you say a bit more? What company, market, or topic should I look into?',
+      'Could you give me a bit more to go on? Try asking about recent developments in your industry.',
     suggestions,
   };
 }
@@ -148,7 +122,7 @@ async function buildListResponse({ handlerResult, clientId, industry }) {
       type: 'list',
       items: [],
       no_data: true,
-      message: pickNoDataMessage(),
+      message: "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?",
       suggestions,
     };
   }
@@ -161,15 +135,14 @@ async function buildListResponse({ handlerResult, clientId, industry }) {
 
 async function buildInferenceResponse({ handlerResult, clientId }) {
   if (!handlerResult || handlerResult._empty || !handlerResult.report) {
-    if (handlerResult?._reason) {
-      console.log(`[V2 responseBuilder] inference no_data reason: ${handlerResult._reason}`);
-    }
     const suggestions = await loadVerifiedSuggestions(clientId);
     return {
       type: 'list',
       items: [],
       no_data: true,
-      message: messageForEmptyHandler(handlerResult),
+      message:
+        handlerResult?._reason ||
+        "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?",
       suggestions,
     };
   }
@@ -184,15 +157,14 @@ async function buildInferenceResponse({ handlerResult, clientId }) {
 
 async function buildDecisionResponse({ handlerResult, clientId }) {
   if (!handlerResult || handlerResult._empty || !handlerResult.report) {
-    if (handlerResult?._reason) {
-      console.log(`[V2 responseBuilder] decision no_data reason: ${handlerResult._reason}`);
-    }
     const suggestions = await loadVerifiedSuggestions(clientId);
     return {
       type: 'list',
       items: [],
       no_data: true,
-      message: messageForEmptyHandler(handlerResult),
+      message:
+        handlerResult?._reason ||
+        "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?",
       suggestions,
     };
   }
@@ -216,7 +188,8 @@ async function buildDecisionResponse({ handlerResult, clientId }) {
       type: 'list',
       items: [],
       no_data: true,
-      message: pickNoDataMessage(),
+      message:
+        "I don't have relevant data on that in your current dataset. Would you like to explore one of these instead?",
       suggestions,
     };
   }

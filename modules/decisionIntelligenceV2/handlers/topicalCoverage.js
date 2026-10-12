@@ -18,121 +18,40 @@
 
 const { callLLM } = require('../../llmClient');
 
-const TOPICAL_COVERAGE_PROMPT = `You are a coarse topical sanity checker for a market intelligence system.
+const TOPICAL_COVERAGE_PROMPT = `You are a strict topical relevance checker for a market intelligence system.
 
 You will be given:
   (1) a user's question
   (2) the titles and excerpts of documents the system retrieved from the client's data
 
-Your job: decide whether the retrieved documents belong to the same BROAD
-SECTOR/DOMAIN as the question.
+Your job: decide whether the retrieved documents ACTUALLY discuss the same topic as the question. If they do, a downstream analyst will write an answer. If they don't, the system will say "no relevant data" instead of writing a fabricated answer.
 
 =========================
-THE CORE DISTINCTION
+WHAT COUNTS AS "COVERED"
 =========================
 
-There are two kinds of difference to keep separate:
+YES — the documents cover the question when:
+  - They discuss the same sector, industry, or domain the question asks about.
+  - A cosmetics document counts for a cosmetics question.
+  - A broader document covers a narrower question (a "Korea beauty market" document covers a "Korea skincare market" question).
+  - A narrower document covers a broader question IF the narrower topic is a clear sub-topic of the broader question (a "Korea cosmetics e-commerce" document covers a "Korea beauty market" question).
+  - A differently-angled document on the same subject (a "Korea cosmetics regulation" document covers a "Korea cosmetics market" question).
 
-(A) TERMINOLOGY difference — same underlying thing, different word.
-    Examples:
-      "vapour duty" vs "vaping duty"
-      "regulation" vs "rules" vs "compliance"
-      "companies" vs "firms" vs "brands"
-      "retailers" vs "retail stores"
-    → These are COVERED. Answer YES.
+NO — the documents do NOT cover the question when:
+  - They discuss a DIFFERENT SECTOR. A "Korea cosmetics" document does NOT cover a "Korea retail" question. Cosmetics is not retail, retail is not cosmetics, even though they overlap commercially.
+  - They discuss a DIFFERENT INDUSTRY. A "banking" document does NOT cover a "fintech" question.
+  - They discuss a DIFFERENT COUNTRY or region than the question is bounded to.
+  - They discuss a DIFFERENT SUBJECT ENTIRELY.
 
-(B) SECTOR difference — genuinely different business domain.
-    Examples:
-      "retail industry" vs "cosmetics industry"  ← different sectors
-      "banking" vs "pharmaceuticals"
-      "automotive" vs "beauty"
-      "logistics" vs "food"
-    → These are NOT COVERED. Answer NO.
-
-The presence of a few sector-adjacent words does NOT convert a sector
-mismatch into a match. If the question is about "retail" and the documents
-are about cosmetics (even if some cosmetics articles mention "retail
-distribution" in passing), answer NO. The client's dataset is about a
-different sector than the question asks about.
+The bar is: could a careful analyst honestly write an answer to THIS question using ONLY these documents, without having to reframe one subject as another? If they'd have to say "well, the data is about cosmetics, but I'll write about retail anyway" — the answer is NO.
 
 =========================
-WHAT COUNTS AS COVERED (YES)
+IMPORTANT — do not be fooled by shared vocabulary
 =========================
 
-Answer YES (covered) if:
-  - The documents and the question are about the same industry, sector,
-    company, product category, or regulatory area.
-  - The documents use DIFFERENT TERMINOLOGY for the same subject (see A
-    above). Same underlying thing, different words — still covered.
-  - The documents are ABOUT the entity or topic the question names, even
-    if they don't directly answer the question. A request for a
-    framework-style analysis (like a SWOT) of a specific company is COVERED
-    as long as the documents are about that company — the writer will
-    construct the framework from the facts.
-  - The documents are on a BROADER subject than the question, or a NARROWER
-    subject within the question's domain.
-  - The documents cover the same regulatory/tax/policy area at a different
-    level of specificity (e.g. question about one specific duty, docs
-    about the broader tax regime that includes it — still the same domain).
+Two documents can share the words "Korea," "market," "growth," "consumer," and still be about completely different topics. Do not pass a document just because it shares words with the question. Judge the actual subject.
 
-=========================
-WHAT COUNTS AS NOT COVERED (NO)
-=========================
-
-Answer NO (not covered) if:
-  - The question is about one SECTOR and the documents are about a
-    DIFFERENT SECTOR — even if some documents mention the question's
-    sector-adjacent words in passing. See (B) above.
-  - The question is about a specific company and the documents are about
-    an entirely unrelated company.
-  - The question is bounded to one country/region and every document is
-    about a different country/region.
-  - The documents are about a completely unrelated subject.
-
-=========================
-THE HARD TEST
-=========================
-
-Before answering YES, ask yourself: "Would a careful analyst honestly be
-able to write an answer to this specific question using ONLY these
-documents, without having to import the sector the question asks about
-from outside the documents?"
-
-If the answer is "no, they'd be writing about a sector the documents don't
-actually cover" → answer NO.
-
-If the answer is "yes, but they'd need to phrase it differently or apply
-a framework" → answer YES.
-
-=========================
-EXAMPLES
-=========================
-
-Question: "What is happening in Saudi Arabia retail industry?"
-Documents: All cosmetics industry articles — regulations, product news,
-           K-beauty trends. Some of them mention "retail distribution"
-           in passing.
-→ NO. The documents are about the cosmetics sector; the question is
-     about the retail sector. A couple of "retail" mentions do not
-     make this covered.
-
-Question: "Do a SWOT for Estée Lauder?"
-Documents: Estée Lauder market performance, brand acquisitions,
-           research awards.
-→ YES. The documents are about the company. The writer will construct
-     the SWOT.
-
-Question: "Updates on vapour duty?"
-Documents: UK Vaping Products Duty, duty stamps, excise tax on vaping.
-→ YES. Vapour/vaping is the same subject with different spelling.
-
-Question: "Recent cosmetics regulations?"
-Documents: EU cosmetics regulation, K-beauty regulatory news, FDA MoCRA.
-→ YES. Same sector.
-
-Question: "Recent cosmetics regulations?"
-Documents: Automotive safety standards, driver licensing rules.
-→ NO. Different sector.
+If the question is "What is happening in Korean retail?" and every document is about Korean cosmetics — that is NOT coverage, even if the documents mention "retail distribution" or "consumer demand" in passing.
 
 =========================
 OUTPUT
@@ -145,6 +64,8 @@ Return ONLY this JSON object and NOTHING ELSE:
   "confidence": 0.0 - 1.0,
   "reason": "<one short sentence>"
 }
+
+Bias: if the documents clearly share the same main topic as the question, return true. Return false only when there is a real domain mismatch.
 
 No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 

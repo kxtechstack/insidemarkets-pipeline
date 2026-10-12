@@ -70,7 +70,7 @@ function filterForInferenceOrDecision(clientHits, concepts) {
 // ─────────────────────────────────────────────────────────────────────────
 // Pipeline runner
 // ─────────────────────────────────────────────────────────────────────────
-async function runV2Pipeline({ question, clientId, industry, userId, forcedType }) {
+async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   // ── 1. Route ────────────────────────────────────────────────────────
   let routerResult;
   if (forcedType) {
@@ -87,30 +87,10 @@ async function runV2Pipeline({ question, clientId, industry, userId, forcedType 
       sector_term: null,
       is_company_set_query: false,
       primary_intent: question,
-      user_message: null,
       _fallback: false,
     };
   } else {
-    // Look up the user's first name for personalized greetings. One SELECT
-    // per turn — cheap and rare enough not to warrant a cache yet.
-    let userName = null;
-    if (userId) {
-      try {
-        const { createClient } = require('@supabase/supabase-js');
-        const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-        const { data } = await supa
-          .schema('admin')
-          .from('client_users')
-          .select('first_name')
-          .eq('id', userId)
-          .maybeSingle();
-        userName = data?.first_name || null;
-      } catch (err) {
-        console.log(`[V2 route] user first-name lookup failed (non-fatal): ${err.message}`);
-      }
-    }
-
-    routerResult = await route(question, industry, { userName });
+    routerResult = await route(question, industry);
   }
 
   // ── 1.5 SEC pre-check ───────────────────────────────────────────────
@@ -197,32 +177,6 @@ async function runV2Pipeline({ question, clientId, industry, userId, forcedType 
         industry,
       });
       return { routerResult, handlerResult: { items: [] }, payload };
-    }
-
-    // Topical coverage gate — list questions now go through the same
-    // domain check as inference/decision, so a user asking about a
-    // different domain doesn't get a list of unrelated client signals.
-    // Framework questions are skipped (they describe a structure, not a
-    // topic).
-    const isFrameworkQuestionForList = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(question);
-
-    if (!isFrameworkQuestionForList) {
-      try {
-        const { checkTopicalCoverage } = require('./handlers/topicalCoverage');
-        const coverage = await checkTopicalCoverage(question, filtered, []);
-        if (!coverage.covered) {
-          console.log(`[V2 route] list topical coverage FAILED: ${coverage.reason}`);
-          const payload = await buildListResponse({
-            handlerResult: { items: [] },
-            clientId,
-            industry,
-          });
-          return { routerResult, handlerResult: { items: [] }, payload };
-        }
-      } catch (err) {
-        // Fail open — if the check itself errors, proceed with the list.
-        console.log(`[V2 route] list topical coverage check threw (non-fatal): ${err.message}`);
-      }
     }
 
     const handlerResult = await buildListItems(filtered);
@@ -342,7 +296,6 @@ function registerDecisionIntelligenceV2Route(app) {
           question,
           clientId,
           industry,
-          userId,
           forcedType: providedType || null,
         });
       } catch (err) {
@@ -474,7 +427,6 @@ function registerDecisionIntelligenceV2Route(app) {
           question: queryForPipeline,
           clientId,
           industry,
-          userId,
           forcedType: providedType || null,
         });
       } catch (err) {
