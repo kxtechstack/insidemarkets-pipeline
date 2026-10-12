@@ -16,13 +16,17 @@ Return ONLY this JSON object:
 {
   "intent": "greeting" | "off_topic" | "clarification" | "market_intelligence",
   "type": "list" | "inference" | "decision",
-  "time_constraint": { ... },
-  "entity_mentions": ["..."],
-  "concept_keywords": ["..."],
-  "sector_term": "...",
+  "time_constraint": {
+    "present": true | false,
+    "value": <number|null>,
+    "unit": "days" | "weeks" | "months" | "quarters" | "years" | null,
+    "phrase": "<exact phrase from the question, or null>"
+  },
+  "entity_mentions": ["<proper nouns from the question>"],
+  "concept_keywords": ["<literal 1-2 word search terms>"],
+  "sector_term": "<the industry or sector word the question is about, or null>",
   "is_company_set_query": true | false,
-  "primary_intent": "<internal one-line summary>",
-  "user_message": "<only when intent != market_intelligence; null otherwise>"
+  "primary_intent": "<one sentence summarizing what the user wants, or a short reply if intent is not market_intelligence>"
 }
 
 =========================
@@ -35,184 +39,8 @@ FIELD RULES
 - "clarification" = too vague to answer ("hmm", "i don't know", "help")
 - "market_intelligence" = a real business/market/finance question
 
---- primary_intent vs user_message ---
-Two separate fields with different jobs:
-
-"primary_intent"  = for internal logging. One sentence summarizing what
-                    the user wants (or asking, for non-business intents).
-
-"user_message"    = ONLY when intent is NOT "market_intelligence" —
-                    this is the exact text the assistant shows the user.
-                    When intent IS "market_intelligence", set it to null.
-
---- TONE FOR user_message ---
-
-Write the user_message in a warm, human tone — think ChatGPT/Claude, not a
-corporate IVR system.
-
-DO:
-  - Address the user by name if "user_name" is provided in CONTEXT.
-  - Mirror the user's greeting style:
-      user: "hi"              → "Hi Sneha! ..."
-      user: "hello"           → "Hello Sneha! ..."
-      user: "good morning"    → "Good morning, Sneha! ..."
-      user: "hey"             → "Hey Sneha! ..."
-      user: "thanks"          → "You're welcome, Sneha! ..."
-  - Keep it to 1-2 short sentences. Warm and human, not formal.
-  - VARY the opening. Do not always start with "Hi". Rotate between
-    "Hi", "Hello", "Hey", "Good morning", and other natural openings.
-  - For clarification, refer to the user's input naturally (you may quote
-    it once in double quotes) so they know you read it, then give
-    concrete guidance. VARY the opening — do NOT always start with
-    "I'm not sure what you meant by". Rotate phrases like:
-      "I didn't catch that."
-      "Not quite sure what you're after."
-      "Sorry, I didn't follow that."
-      "I couldn't quite parse that."
-      "Hmm, that's a bit unclear."
-
-  - For off-topic: name the SUBJECT the user asked about (weather, sports,
-    jokes, geography, etc.) naturally, then pivot to what you can help with.
-    Do NOT list limitations ("I don't have X data"). Do NOT use the same
-    opener every time — pick a different pattern each turn.
-    Patterns to draw from (rotate — don't fixate on one):
-      "Weather's outside my wheelhouse — I'm built for market intelligence."
-      "I don't do sports, but I can dig into your market for you."
-      "That's a bit outside what I cover (geography, not markets)."
-      "Jokes aren't really my thing — market intelligence is."
-      "Recipes aren't my strength, but market trends are."
-    Always end with a lead-in to the suggestions, such as:
-      "Here are some things I can help with:"
-      "A few things I can help with:"
-      "Try one of these instead:"
-
-DON'T:
-  - Never say "As an AI...", "I am an assistant...", "I'm sorry, but...".
-  - Never say "I don't have X data" or "I'm not the right assistant for that"
-    — these sound dismissive. Pivot instead of listing limitations.
-  - Never use jargon like "market intelligence assistant" as a self-description.
-  - Never produce the same phrasing twice in a row if you can help it.
-
---- GOOD EXAMPLES ---
-Input:  "hi"
-(with user_name: Sneha)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User greeted the assistant.",
-  "user_message": "Hi Sneha! What would you like to explore today?"
-}
-
-Input:  "hi"
-(no user_name)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User greeted the assistant.",
-  "user_message": "Hi there! What can I help you look into?"
-}
-
-Input:  "hello"
-(with user_name: Sneha)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User greeted the assistant.",
-  "user_message": "Hello Sneha! What can I help you dig into?"
-}
-
-Input:  "hey"
-(with user_name: Sneha)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User greeted the assistant.",
-  "user_message": "Hey Sneha! What are you working on today?"
-}
-
-Input:  "good morning"
-(with user_name: Sneha)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User greeted the assistant.",
-  "user_message": "Good morning, Sneha! What would you like to know today?"
-}
-
-Input:  "how are you"
-(with user_name: Sneha)
-Output: {
-  ...
-  "intent": "greeting",
-  "primary_intent": "User asked how the assistant is doing.",
-  "user_message": "Doing well, thanks for asking, Sneha! What can I help you with?"
-}
-
-Input:  "what's the weather in London"
-Output: {
-  ...
-  "intent": "off_topic",
-  "primary_intent": "User asked about the weather, which is outside scope.",
-  "user_message": "Weather's outside my wheelhouse — I'm built for market intelligence. Here are some things I can help with:"
-}
-
-Input:  "who won the cricket match"
-Output: {
-  ...
-  "intent": "off_topic",
-  "primary_intent": "User asked about sports, which is outside scope.",
-  "user_message": "I don't do sports, but I can dig into your market for you. A few things I can help with:"
-}
-
-Input:  "tell me a joke"
-Output: {
-  ...
-  "intent": "off_topic",
-  "primary_intent": "User asked for a joke, which is outside scope.",
-  "user_message": "Jokes aren't really my thing — market intelligence is. Try one of these instead:"
-}
-
-Input:  "what's the capital of Peru"
-Output: {
-  ...
-  "intent": "off_topic",
-  "primary_intent": "User asked a geography question, which is outside scope.",
-  "user_message": "That's a bit outside what I cover (geography, not markets). Here are a few things I can help with:"
-}
-
-Input:  "asdf"
-Output: {
-  ...
-  "intent": "clarification",
-  "primary_intent": "User sent an unparseable string.",
-  "user_message": "I'm not sure what you meant by \"asdf\" — could you rephrase? Try naming a company, country, topic, or time period."
-}
-
-Input:  "hmm"
-Output: {
-  ...
-  "intent": "clarification",
-  "primary_intent": "User sent an incomplete or unclear message.",
-  "user_message": "Not quite sure what you're after — could you say a bit more? A company, market, or topic helps."
-}
-
-Input:  "???"
-Output: {
-  ...
-  "intent": "clarification",
-  "primary_intent": "User sent a punctuation-only message.",
-  "user_message": "I didn't catch that. What would you like me to look into? Something like \"Korean beauty regulations\" or \"recent funding rounds\" works well."
-}
-
-Input:  "hmm ok"
-Output: {
-  ...
-  "intent": "clarification",
-  "primary_intent": "User sent an unclear follow-up.",
-  "user_message": "Sorry, I didn't quite follow that one. Could you try rephrasing? A specific company, market, or topic gets me going."
-}
-
---- END TONE EXAMPLES ---
+If intent is NOT "market_intelligence", put a short friendly reply in
+"primary_intent" that the assistant can say back to the user.
 
 --- type --- (only matters when intent = market_intelligence)
 - "list"      = user wants a LIST of items. Examples:
@@ -383,6 +211,42 @@ to a sector/subsector of public companies and Y is a financial metric.
 EXAMPLES
 =========================
 
+Input: "hi"
+Output: {
+  "intent": "greeting",
+  "type": "list",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": [],
+  "concept_keywords": [],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "Hi! What would you like to know about your market data?"
+}
+
+Input: "what's the weather in London"
+Output: {
+  "intent": "off_topic",
+  "type": "list",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": [],
+  "concept_keywords": [],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "I focus on market and business intelligence — I can't help with weather. Ask me about your industry data instead."
+}
+
+Input: "asdf"
+Output: {
+  "intent": "clarification",
+  "type": "list",
+  "time_constraint": { "present": false, "value": null, "unit": null, "phrase": null },
+  "entity_mentions": [],
+  "concept_keywords": [],
+  "sector_term": null,
+  "is_company_set_query": false,
+  "primary_intent": "Could you give me a bit more to go on? Try asking about recent developments in your industry."
+}
+
 Input: "What are the major policy changes in the last week?"
 Output: {
   "intent": "market_intelligence",
@@ -490,60 +354,6 @@ function findBalancedJson(s) {
   return null;
 }
 
-// Repairs JSON strings with unescaped interior double quotes, which LLMs
-// commonly produce when told to "quote" a user's input. The heuristic:
-// walk the string tracking whether we're inside a JSON string. When we see
-// a `"` while inside a string, look ahead: if the next non-whitespace
-// character is `,`, `}`, `]`, or `:`, it's the real closing quote. Anything
-// else means the quote is a literal and must be escaped.
-function repairUnescapedQuotes(json) {
-  let out = '';
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < json.length; i++) {
-    const ch = json[i];
-
-    if (escaped) {
-      out += ch;
-      escaped = false;
-      continue;
-    }
-
-    if (ch === '\\') {
-      out += ch;
-      escaped = true;
-      continue;
-    }
-
-    if (ch === '"') {
-      if (!inString) {
-        inString = true;
-        out += ch;
-      } else {
-        // We're inside a string and hit a `"`. Is this the real close,
-        // or an interior quote? Look ahead past whitespace.
-        let j = i + 1;
-        while (j < json.length && /\s/.test(json[j])) j++;
-        const next = json[j];
-        if (next === ',' || next === '}' || next === ']' || next === ':' || j >= json.length) {
-          // Real closing quote
-          inString = false;
-          out += ch;
-        } else {
-          // Interior quote — escape it
-          out += '\\"';
-        }
-      }
-      continue;
-    }
-
-    out += ch;
-  }
-
-  return out;
-}
-
 function fallbackResult(question) {
   return {
     intent: 'market_intelligence',
@@ -554,7 +364,6 @@ function fallbackResult(question) {
     sector_term: null,
     is_company_set_query: false,
     primary_intent: String(question || '').slice(0, 200),
-    user_message: null,
     _fallback: true,
   };
 }
@@ -674,50 +483,24 @@ function sanitize(parsed, question) {
     out.primary_intent = parsed.primary_intent.trim().slice(0, 400);
   }
 
-  // user_message is only meaningful for greeting / off_topic / clarification.
-  // For market_intelligence, force null so nothing leaks into the response.
-  if (
-    out.intent !== 'market_intelligence' &&
-    typeof parsed.user_message === 'string' &&
-    parsed.user_message.trim()
-  ) {
-    out.user_message = parsed.user_message.trim().slice(0, 500);
-  } else {
-    out.user_message = null;
-  }
-
   out._fallback = false;
   return out;
 }
 
-async function route(question, industry = null, context = {}) {
+async function route(question, industry = null) {
   if (!question || typeof question !== 'string' || !question.trim()) {
     return fallbackResult(question);
   }
 
-  // Build a small context block the model can use for tone/personalization.
-  // Kept minimal on purpose — this is not the place for large context.
-  const contextLines = [];
-  if (context.userName) contextLines.push(`user_name: ${context.userName}`);
-  if (industry)         contextLines.push(`industry: ${industry}`);
-  const contextBlock = contextLines.length
-    ? `CONTEXT:\n${contextLines.join('\n')}\n\n`
-    : '';
-
-  const userMessage = `${contextBlock}Question: ${question}`;
-
   let raw;
   try {
-      raw = await callLLM(
-    [
-      { role: 'system', content: ROUTER_PROMPT },
-      { role: 'user', content: userMessage },
-    ],
-    // temperature 0.4: enough variety in the generated user_message to avoid
-    // repetitive greetings, while the classification fields (intent, type,
-    // entities) stay stable thanks to the strong examples in the prompt.
-    { temperature: 0.4, max_tokens: 700, timeout: 30000 }
-  );
+    raw = await callLLM(
+      [
+        { role: 'system', content: ROUTER_PROMPT },
+        { role: 'user', content: question },
+      ],
+      { temperature: 0, max_tokens: 700, timeout: 30000 }
+    );
   } catch (err) {
     console.log(`[router] LLM call failed: ${err.message}`);
     return fallbackResult(question);
@@ -740,22 +523,8 @@ async function route(question, industry = null, context = {}) {
   try {
     parsed = JSON.parse(jsonBlock);
   } catch (err) {
-    console.log(`[router] JSON parse failed: ${err.message} — attempting repair`);
-
-    // Common LLM failure: unescaped double quotes inside string values,
-    // e.g.  "user_message": "I'm not sure what you meant by "asdf" — ..."
-    // Repair strategy: iterate character by character, tracking whether
-    // we're inside a string. When we encounter a " that is inside a string
-    // AND is not the closing quote, escape it.
-    const repaired = repairUnescapedQuotes(jsonBlock);
-    try {
-      parsed = JSON.parse(repaired);
-      console.log(`[router] JSON repaired successfully`);
-    } catch (repairErr) {
-      console.log(`[router] JSON repair failed: ${repairErr.message}`);
-      console.log(`[router] RAW RESPONSE THAT FAILED TO PARSE:\n${jsonBlock}`);
-      return fallbackResult(question);
-    }
+    console.log(`[router] JSON parse failed: ${err.message}`);
+    return fallbackResult(question);
   }
 
   let result = sanitize(parsed, question);
@@ -775,6 +544,5 @@ module.exports = {
   sanitize,
   stripIndustryName,
   normalizeTimeConstraint,
-  repairUnescapedQuotes,
   UNIT_DAYS,
 };
