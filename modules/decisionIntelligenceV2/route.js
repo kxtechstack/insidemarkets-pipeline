@@ -70,7 +70,7 @@ function filterForInferenceOrDecision(clientHits, concepts) {
 // ─────────────────────────────────────────────────────────────────────────
 // Pipeline runner
 // ─────────────────────────────────────────────────────────────────────────
-async function runV2Pipeline({ question, clientId, industry, forcedType }) {
+async function runV2Pipeline({ question, clientId, industry, userId, forcedType }) {
   // ── 1. Route ────────────────────────────────────────────────────────
   let routerResult;
   if (forcedType) {
@@ -87,10 +87,30 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       sector_term: null,
       is_company_set_query: false,
       primary_intent: question,
+      user_message: null,
       _fallback: false,
     };
   } else {
-    routerResult = await route(question, industry);
+    // Look up the user's first name for personalized greetings. One SELECT
+    // per turn — cheap and rare enough not to warrant a cache yet.
+    let userName = null;
+    if (userId) {
+      try {
+        const { createClient } = require('@supabase/supabase-js');
+        const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+        const { data } = await supa
+          .schema('admin')
+          .from('client_users')
+          .select('first_name')
+          .eq('id', userId)
+          .maybeSingle();
+        userName = data?.first_name || null;
+      } catch (err) {
+        console.log(`[V2 route] user first-name lookup failed (non-fatal): ${err.message}`);
+      }
+    }
+
+    routerResult = await route(question, industry, { userName });
   }
 
   // ── 1.5 SEC pre-check ───────────────────────────────────────────────
@@ -296,6 +316,7 @@ function registerDecisionIntelligenceV2Route(app) {
           question,
           clientId,
           industry,
+          userId,
           forcedType: providedType || null,
         });
       } catch (err) {
@@ -427,6 +448,7 @@ function registerDecisionIntelligenceV2Route(app) {
           question: queryForPipeline,
           clientId,
           industry,
+          userId,
           forcedType: providedType || null,
         });
       } catch (err) {
