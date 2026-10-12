@@ -35,6 +35,32 @@ FIELD RULES
 - "clarification" = too vague to answer ("hmm", "i don't know", "help")
 - "market_intelligence" = a real business/market/finance question
 
+CRITICAL — what counts as market_intelligence:
+Any question that asks about companies, sectors, industries, markets,
+financials, rankings, or business activity IS market_intelligence. This
+includes:
+  - "Top cosmetic companies in uk"
+  - "Top 5 airline companies in usa"
+  - "List the biggest banks in Japan"
+  - "Which pharma companies have the highest margins"
+  - "Rank US insurance companies by assets"
+  - "What is happening in [any country] [any industry]"
+  - "Compare [company A] and [company B]"
+
+These are NEVER off_topic, even if:
+  - The sector isn't the client's own industry (an airline question is still
+    market_intelligence for a cosmetics client — it's still a market question)
+  - The country is outside the client's geographic focus
+  - The company or sector isn't in the client's data
+
+The system will sort out whether we have data for it further downstream.
+Your job is only to say "this is a market/business question" — not to
+guess whether we can answer it.
+
+Reserve "off_topic" ONLY for questions that have NO business/market/finance
+content at all: weather, sports scores, jokes, personal chat, recipes,
+trivia, general knowledge, geography facts with no business context.
+
 --- primary_intent vs user_message ---
 Two separate fields with different jobs:
 
