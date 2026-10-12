@@ -232,15 +232,25 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
   // Before spending a writer call, verify the retrieved chunks are actually
   // about the same topic as the question. Stops the writer from reframing
   // "cosmetics" chunks into a "retail" answer.
-  const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
-  if (!coverage.covered) {
-    console.log(`[decisionHandler] Topical coverage FAILED: ${coverage.reason}`);
-    return {
-      report: null,
-      sources: [],
-      _empty: true,
-      _reason: `The available data does not cover this topic. ${coverage.reason}`,
-    };
+  //
+  // Framework questions (SWOT / PESTLE / Five Forces / Risk Analysis)
+  // describe a STRUCTURE, not a topic — the coverage check would fail them
+  // because the retrieved docs don't already contain the framework's
+  // headings. Skip the check for those; the writer builds the framework
+  // from whatever facts are present.
+  const isFrameworkQuestion = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(question);
+
+  if (!isFrameworkQuestion) {
+    const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
+    if (!coverage.covered) {
+      console.log(`[decisionHandler] Topical coverage FAILED: ${coverage.reason}`);
+      return {
+        report: null,
+        sources: [],
+        _empty: true,
+        _reason: `The available data does not cover this topic. ${coverage.reason}`,
+      };
+    }
   }
 
   // ── Call 1: design the section structure ────────────────────────────

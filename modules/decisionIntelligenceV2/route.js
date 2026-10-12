@@ -199,6 +199,32 @@ async function runV2Pipeline({ question, clientId, industry, userId, forcedType 
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
+    // Topical coverage gate — list questions now go through the same
+    // domain check as inference/decision, so a user asking about a
+    // different domain doesn't get a list of unrelated client signals.
+    // Framework questions are skipped (they describe a structure, not a
+    // topic).
+    const isFrameworkQuestionForList = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(question);
+
+    if (!isFrameworkQuestionForList) {
+      try {
+        const { checkTopicalCoverage } = require('./handlers/topicalCoverage');
+        const coverage = await checkTopicalCoverage(question, filtered, []);
+        if (!coverage.covered) {
+          console.log(`[V2 route] list topical coverage FAILED: ${coverage.reason}`);
+          const payload = await buildListResponse({
+            handlerResult: { items: [] },
+            clientId,
+            industry,
+          });
+          return { routerResult, handlerResult: { items: [] }, payload };
+        }
+      } catch (err) {
+        // Fail open — if the check itself errors, proceed with the list.
+        console.log(`[V2 route] list topical coverage check threw (non-fatal): ${err.message}`);
+      }
+    }
+
     const handlerResult = await buildListItems(filtered);
     const payload = await buildListResponse({ handlerResult, clientId, industry });
     return { routerResult, handlerResult, payload };
