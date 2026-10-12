@@ -682,34 +682,8 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const nonUs = detectNonUSGeography(question);
 
     if (nonUs) {
-      // Non-US + explicitly flagged as a company-set / company-ranking query.
-      // We cannot answer these — SEC financial data covers US-listed companies
-      // only. Do NOT fall through to the region-fallback client-signal list:
-      // those are news articles, not company rankings, and showing them under
-      // the user's question is misleading. Refuse cleanly instead.
-      const isCompanySetQuery =
-        routerResult && routerResult.is_company_set_query === true;
-
-      if (isCompanySetQuery) {
-        console.log(`[secHandler] non-US "${nonUs}" + company-set query → clean refusal (US-only data)`);
-        return {
-          mode: 'region_fallback',
-          payload: {
-            type: 'list',
-            items: [],
-            no_data: true,
-            message:
-              `I can't rank companies by revenue for ${nonUs} — my verified ` +
-              `financial data covers US-listed companies only. Try asking ` +
-              `about US-listed companies, or ask a different question about ` +
-              `the ${nonUs} market instead.`,
-            suggestions: [],
-          },
-        };
-      }
-
       if (isSecNumericQuestion(question, routerResult, intent)) {
-        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric (no company-set flag) → region fallback`);
+        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → region fallback`);
         return await buildRegionFallback(question, nonUs, clientId, industry, routerResult);
       }
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
