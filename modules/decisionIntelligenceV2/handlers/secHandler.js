@@ -649,29 +649,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
-        // ── Second-layer company-set detection ──────────────────────────────
-    // The router sometimes misclassifies company-ranking questions
-    // ("top 5 airline companies in usa", "top cosmetic companies in uk")
-    // as plain list/inference, so `routerResult.is_company_set_query` is
-    // unreliable on its own. Run the dedicated company-set classifier as
-    // an INDEPENDENT check, and treat the question as a company-set query
-    // if EITHER signal fires. Purely additive — the original router flag
-    // still works exactly as before.
-    let independentCompanySet = null;
-    try {
-      independentCompanySet = await resolveCompanySet(question);
-    } catch (err) {
-      console.log(`[secHandler] independent resolveCompanySet threw (non-fatal): ${err.message}`);
-    }
-
-    const isCompanySetQuery =
-      (routerResult && routerResult.is_company_set_query === true) ||
-      (independentCompanySet !== null);
-
-    if (independentCompanySet && !(routerResult && routerResult.is_company_set_query === true)) {
-      console.log(`[secHandler] OVERRIDE: router said is_company_set_query=false, but resolveCompanySet() says it IS a company-set query (sector=${independentCompanySet.sector}, subsector=${independentCompanySet.subsectorTerm})`);
-    }
-
     if (
       routerSector &&
       hasTickers &&
@@ -705,33 +682,8 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const nonUs = detectNonUSGeography(question);
 
     if (nonUs) {
-      // Non-US + a genuine company-ranking question: refuse cleanly.
-      // We do NOT fall through to the region-fallback client-signal list:
-      // those are news articles, not company rankings, and showing them
-      // under the user's question is misleading. This branch fires on
-      // EITHER detection layer (router flag OR independent classifier) —
-      // additive to the existing router flag.
-      if (isCompanySetQuery) {
-        console.log(`[secHandler] non-US "${nonUs}" + company-set → clean refusal (US-only data)`);
-        return {
-          mode: 'region_fallback',
-          payload: {
-            type: 'list',
-            items: [],
-            no_data: true,
-            message:
-              `I can't rank companies by revenue for ${nonUs} — my verified ` +
-              `financial data covers US-listed companies only. Try asking ` +
-              `about US-listed companies, or ask a different question about ` +
-              `the ${nonUs} market instead.`,
-            suggestions: [],
-          },
-        };
-      }
-
-      // Existing behavior: non-US numeric (no company-set flag) → region fallback.
       if (isSecNumericQuestion(question, routerResult, intent)) {
-        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric (no company-set flag) → region fallback`);
+        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → region fallback`);
         return await buildRegionFallback(question, nonUs, clientId, industry, routerResult);
       }
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
@@ -740,20 +692,14 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
 
     const tickersStillPresent = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
-    // If the independent classifier flagged a company-set query but the
-    // router did not, force the company_set shape here so the SEC pipeline
-    // runs even when the router's flag was unreliable.
-    const effectiveShape =
-      (shape === null && isCompanySetQuery) ? 'company_set' : shape;
-
-    if (effectiveShape === 'company_set' && tickersStillPresent) {
+    if (shape === 'company_set' && tickersStillPresent) {
       console.log(`[secHandler] company_set with named tickers [${intent.tickers.join(',')}] — using numeric path`);
       return await runNumericPath(question, intent);
     }
 
-    if (effectiveShape === 'company_set') return await runCompanySetPath(question, intent);
-    if (effectiveShape === 'numeric')     return await runNumericPath(question, intent);
-    if (effectiveShape === 'framework')   return await runFrameworkPath(question, intent);
+    if (shape === 'company_set') return await runCompanySetPath(question, intent);
+    if (shape === 'numeric')     return await runNumericPath(question, intent);
+    if (shape === 'framework')   return await runFrameworkPath(question, intent);
 
     return null;
 

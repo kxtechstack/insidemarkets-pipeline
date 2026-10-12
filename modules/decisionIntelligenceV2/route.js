@@ -172,39 +172,6 @@ async function runV2Pipeline({ question, clientId, industry, userId, forcedType 
     return { routerResult, payload: await buildClarificationResponse({ routerResult, clientId, industry }) };
   }
 
-    // ── 2.5 List-path re-delegation guard ───────────────────────────────
-  // Framework questions and company-set questions must NOT go through the
-  // list path — they belong to the decision handler. The router sometimes
-  // misclassifies them as list (especially the small model). This guard
-  // re-delegates them silently, matching the legacy DI module's behavior.
-  // Purely additive — the router's own classification is unchanged; we
-  // just override the routing decision for these two patterns.
-  if (routerResult.type === 'list') {
-    const qLowerForReclassify = String(question || '').toLowerCase();
-
-    const looksLikeFramework =
-      /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i.test(qLowerForReclassify);
-
-    let looksLikeCompanySet = false;
-    if (!looksLikeFramework) {
-      try {
-        const { resolveCompanySet } = require('./sec/resolveCompanySet');
-        const setPeek = await resolveCompanySet(question);
-        if (setPeek) looksLikeCompanySet = true;
-      } catch (err) {
-        console.log(`[V2 route] reclassify check failed (non-fatal): ${err.message}`);
-      }
-    }
-
-    if (looksLikeFramework || looksLikeCompanySet) {
-      console.log(
-        `[V2 route] list → decision re-delegation ` +
-        `(framework=${looksLikeFramework}, companySet=${looksLikeCompanySet})`
-      );
-      routerResult.type = 'decision';
-    }
-  }
-
   // ── 3. LIST — deterministic, client signals only ────────────────────
   if (routerResult.type === 'list') {
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
