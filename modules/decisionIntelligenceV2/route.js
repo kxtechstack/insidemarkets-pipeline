@@ -29,6 +29,7 @@ const {
 } = require('../decisionIntelligence/chatHistory');
 
 const { route } = require('./routing/router');
+const { selectRelevantHitsForList } = require('./handlers/topicalCoverage');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
 const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
@@ -153,6 +154,20 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   }
 
   // ── 3. LIST — deterministic, client signals only ────────────────────
+  //
+  // List questions show a list of the client's own signals. Custom sources
+  // and SEC filings are NEVER used here — this is a straight read of the
+  // client's collected signals.
+  //
+  // Two-stage relevance check:
+  //   (a) Deterministic concept filter (filterListHits) — cheap, drop hits
+  //       that share no vocabulary with the question.
+  //   (b) LLM per-item selection (selectRelevantHitsForList) — for the
+  //       survivors of (a), ask the LLM which ones genuinely answer the
+  //       question. Discard the rest.
+  //
+  // If either stage leaves zero hits, return the no_data shape so the
+  // frontend shows "no relevant data" instead of showing polluted items.
   if (routerResult.type === 'list') {
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: routerResult,
@@ -179,7 +194,36 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    const handlerResult = await buildListItems(filtered);
+    // Per-item LLM relevance selection. If the LLM errors, it fails open
+    // and returns the filtered list unchanged — same behaviour as today.
+    // If the LLM succeeds and selects nothing, we honour that and return
+    // no_data.
+    let selected;
+    try {
+      selected = await selectRelevantHitsForList(question, filtered);
+    } catch (err) {
+      console.log(`[V2 route] list selection threw — falling back to filtered hits: ${err.message}`);
+      selected = filtered;
+    }
+
+    console.log(
+      `[V2 route] list selection: ${selected.length}/${filtered.length} items kept`
+    );
+
+    if (!selected || selected.length === 0) {
+      const payload = await buildListResponse({
+        handlerResult: {
+          items: [],
+          _empty: true,
+          _reason: 'no signals in the current dataset genuinely answer this question',
+        },
+        clientId,
+        industry,
+      });
+      return { routerResult, handlerResult: { items: [] }, payload };
+    }
+
+    const handlerResult = await buildListItems(selected);
     const payload = await buildListResponse({ handlerResult, clientId, industry });
     return { routerResult, handlerResult, payload };
   }

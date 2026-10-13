@@ -410,9 +410,162 @@ async function checkFrameworkSubjectCoverage(question, clientHits, customSourceH
   return { covered, confidence: covered ? 1 : 0, reason };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// List-only per-item relevance filter.
+//
+// Given a question and a set of already-filtered candidate signals, ask the
+// LLM which specific candidates genuinely answer the question. Return only
+// those. Runs ONLY on the list path — inference/decision/framework paths
+// keep using checkTopicalCoverage / checkFrameworkSubjectCoverage unchanged.
+//
+// Failure behaviour:
+//   - LLM error, timeout, or unparseable response → return the full input
+//     (fail open, same as today's behaviour) so a transient issue doesn't
+//     hide valid results.
+//   - LLM succeeded and selected an empty list → return [] (honor the LLM).
+// ─────────────────────────────────────────────────────────────────────────
+const LIST_SELECTION_PROMPT = `You are filtering a list of retrieved signals for a client's question.
+
+You will be given:
+  (1) A user's question. They want a LIST of signals that answer it.
+  (2) A numbered list of candidate signals, each with a title and a short excerpt.
+
+Your job: decide which of these candidates genuinely answer the question.
+
+Return ONLY this JSON:
+
+{
+  "relevant_indices": [<1-based indices of the candidates that answer the question>],
+  "reason": "<one short sentence>"
+}
+
+=========================
+RULES
+=========================
+
+1. Judge each candidate independently. A candidate is either in or out.
+
+2. Judge the TITLE FIRST — the title is the article's actual subject.
+   If the title clearly matches the question, include the candidate
+   regardless of what the excerpt says. The excerpt is a random
+   ~300-character slice of the article body and may not mention the
+   main topic directly, may be from the middle of a paragraph, or may
+   focus on a side detail. Do not reject a candidate just because its
+   excerpt looks off-topic when the title is clearly on-topic.
+
+   Only fall back to judging the excerpt when the title is ambiguous
+   (e.g. generic like "Market Update" or "Industry News").
+
+   Worked examples:
+
+     Q: "List recent funding rounds in the Cosmetics industry."
+     Candidate title: "Amoéba Embarks on Final Funding Round to Fuel Commercial Launch"
+     Candidate excerpt: "...for professionals in the field of biocontrol and industrial greentech..."
+     → INCLUDE. The title explicitly says "Funding Round". The excerpt's drift into "biocontrol" is irrelevant — the article IS a funding round article.
+
+     Q: "List recent funding rounds in the Cosmetics industry."
+     Candidate title: "Korea Enacts Dedicated Law to Boost Cosmetics Sector"
+     Candidate excerpt: "...to ensure a resilient, long-term supply chain..."
+     → DO NOT INCLUDE. The title is about a law, not a funding round. No amount of cosmetics-industry relevance makes it a funding round.
+
+     Q: "What are the current import tariff rates for our core products across key markets?"
+     Candidate title: "Canadian Cosmetics Face Tariff Hurdle in US Market"
+     Candidate excerpt: "...Canadian cosmetics manufacturers are facing a significant challenge..."
+     → INCLUDE. The title explicitly says "Tariff Hurdle". A tariff article about a specific market is still a tariff article.
+
+3. Do NOT include candidates that merely share vocabulary with the question when the TITLE is also off-topic.
+   A title about "retail" is NOT relevant to "retail in Saudi Arabia" unless the title mentions Saudi Arabia.
+   A title about "cosmetics regulations in Vietnam" is NOT relevant to "cosmetics regulations in the UK".
+
+4. Do NOT include candidates whose TITLE is about a different industry, different country, or different subject than the question.
+
+5. If NONE of the candidates answer the question, return "relevant_indices": [].
+
+6. Return ONLY the JSON. No markdown fences, no explanation, no extra text.`;
+
+const LIST_ITEM_MAX_CHARS = 300;
+
+function buildListSelectionContext(clientHits) {
+  const lines = [];
+  clientHits.forEach((h, i) => {
+    const title = h.title || 'Untitled';
+    let snippet = h.chunk_text || '';
+    if (snippet.length > LIST_ITEM_MAX_CHARS) snippet = snippet.slice(0, LIST_ITEM_MAX_CHARS) + '…';
+    lines.push(`[${i + 1}] ${title}\n${snippet}`);
+  });
+  return lines.join('\n\n---\n\n');
+}
+
+async function selectRelevantHitsForList(question, clientHits) {
+  if (!Array.isArray(clientHits) || clientHits.length === 0) return clientHits;
+
+  const context = buildListSelectionContext(clientHits);
+  if (!context || context.trim().length < 20) return clientHits;
+
+  let raw;
+  try {
+    raw = await callLLM(
+      [
+        { role: 'system', content: LIST_SELECTION_PROMPT },
+        { role: 'user', content: `QUESTION:\n${question}\n\nCANDIDATE SIGNALS:\n${context}` },
+      ],
+      { temperature: 0, max_tokens: 250, timeout: 30000 }
+    );
+  } catch (err) {
+    console.log(`[ListSelection] LLM call failed — failing open, returning all ${clientHits.length} hits: ${err.message}`);
+    return clientHits;
+  }
+
+  if (process.env.DI_V2_DEBUG_LLM === '1') {
+    console.log('[ListSelection] RAW LLM OUTPUT:');
+    console.log(raw);
+    console.log('[ListSelection] END RAW');
+  }
+
+  const stripped = stripFences(raw);
+  const jsonBlock = findBalancedJson(stripped);
+  if (!jsonBlock) {
+    console.log(`[ListSelection] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
+    return clientHits;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonBlock);
+  } catch (err) {
+    console.log(`[ListSelection] JSON parse failed — failing open: ${err.message}`);
+    return clientHits;
+  }
+
+  if (!Array.isArray(parsed.relevant_indices)) {
+    console.log(`[ListSelection] no relevant_indices array — failing open`);
+    return clientHits;
+  }
+
+  const seen = new Set();
+  const selected = [];
+  for (const idx of parsed.relevant_indices) {
+    const n = Number(idx);
+    if (!Number.isInteger(n)) continue;
+    if (n < 1 || n > clientHits.length) continue;
+    if (seen.has(n)) continue;
+    seen.add(n);
+    selected.push(clientHits[n - 1]);
+  }
+
+  console.log(
+    `[ListSelection] selected ${selected.length}/${clientHits.length} relevant ` +
+    `(reason="${parsed.reason || ''}")`
+  );
+
+  return selected;
+}
+
 module.exports = {
   checkTopicalCoverage,
   checkFrameworkSubjectCoverage,
+  selectRelevantHitsForList,
   TOPICAL_COVERAGE_PROMPT,
   FRAMEWORK_SUBJECT_PROMPT,
+  LIST_SELECTION_PROMPT,
 };
