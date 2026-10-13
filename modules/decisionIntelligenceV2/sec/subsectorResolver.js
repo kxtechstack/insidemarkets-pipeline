@@ -101,6 +101,19 @@ const NORMALIZE_SECTOR = {
   'automaker': 'auto',
   'automakers': 'auto',
   'cosmetics': 'cosmetic',
+  // "Beauty & Personal Care" (and its variants) is the same sector as
+  // "cosmetics" for our purposes. Normalizing them to 'cosmetic' means
+  // the existing cosmetic allowlist (EL, ULTA, COTY, ELF, BBWI, IPAR)
+  // is used for SEC retrieval, so a "PESTLE for Beauty & Personal Care"
+  // question pulls Estée Lauder / Ulta / Coty filings — the right
+  // companies for that sector.
+  'beauty': 'cosmetic',
+  'beauty & personal care': 'cosmetic',
+  'beauty and personal care': 'cosmetic',
+  'beauty & personal care industry': 'cosmetic',
+  'beauty and personal care industry': 'cosmetic',
+  'personal care': 'cosmetic',
+  'personal care industry': 'cosmetic',
   'airlines': 'airline',
   'pharmaceutical': 'pharma',
   'pharmaceuticals': 'pharma',

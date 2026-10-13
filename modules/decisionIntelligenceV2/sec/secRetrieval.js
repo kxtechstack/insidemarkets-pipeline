@@ -95,6 +95,21 @@ function extractTickers(question, lookup) {
   const found = [];
   const normalizedQuestion = stripDiacritics(question);
 
+  // Strict matching only. A company is detected ONLY IF one of these is true:
+  //   (a) its ticker (e.g. "AAPL", "MSFT") appears as a whole word in the question
+  //   (b) its full company name (e.g. "Apple Inc", "Estée Lauder Companies") appears
+  //   (c) a distinctive single-word alias appears with matching capitalization
+  //       (e.g. "Apple", "Microsoft", "Google")
+  //
+  // We deliberately do NOT fuzzy-match. The old fuzzy layer caused wrong
+  // tickers to be extracted from descriptive words:
+  //   - "Risk analysis for entering the K-beauty market" → ETR (Entergy)
+  //     because "entering" fuzzy-matched the word "Entergy"
+  //   - "PESTLE analysis for Beauty & Personal Care" → EMR (Emerson Electric)
+  //     because "personal care" appeared in Emerson's business description
+  //
+  // Wrong tickers cause the SEC sidecar to fetch unrelated 10-K filings and
+  // inject them into the report as if they were relevant sources.
   const names = [...lookup.keys()].sort((a, b) => b.length - a.length);
   for (const name of names) {
     if (STOPWORD_TICKERS.has(name)) continue;
@@ -103,6 +118,19 @@ function extractTickers(question, lookup) {
 
     const isFullName = normalizedName.includes(' ');
     const isTicker = normalizedName === ticker;
+
+    // Skip ticker-only keys shorter than 4 characters. Never match them as
+    // standalone tokens — 1-3 character tickers collide with common English
+    // words and letters:
+    //   "L"   (Loews)              matches the letter L in "L'Oréal"
+    //   "HAS" (Hasbro)             matches the word "has"
+    //   "ON"  (ON Semiconductor)   matches the word "on"
+    //   "IT"  (Gartner)            matches the word "it"
+    //   "A"   (Agilent)            matches the article "a"
+    // Users can always type the company name (the alias/company-name paths
+    // handle those), so we lose nothing important.
+    if (isTicker && ticker.length < 4) continue;
+
     // Long names (≥5 chars) like "AMAZON", "GOOGLE", "MICROSOFT" are safe
     // to match case-insensitively. Short names still require capitalization
     // to avoid common English words matching by accident.
@@ -113,46 +141,7 @@ function extractTickers(question, lookup) {
     const pattern = new RegExp(`\\b${escapeRegex(normalizedName)}\\b`, 'i');
     if (pattern.test(normalizedQuestion) && !found.includes(ticker)) found.push(ticker);
   }
-  if (found.length) return found;
 
-  const candidateWords = (normalizedQuestion.match(/[A-Za-z][A-Za-z&.]*/g) || [])
-    .filter((w) => w.length >= 4 && !QUESTION_STOPWORDS.has(w.toUpperCase()));
-
-  const allNames = [...lookup.keys()]
-    .map(stripDiacritics)
-    .filter((n) => {
-      if (STOPWORD_TICKERS.has(n)) return false;
-      const t = lookup.get(n);
-      if (t && STOPWORD_TICKERS.has(t)) return false;
-      return true;
-    });
-
-  const strippedToTicker = new Map();
-  for (const [rawName, ticker] of lookup.entries()) {
-    strippedToTicker.set(stripDiacritics(rawName), ticker);
-  }
-
-  for (const word of candidateWords) {
-    const sameLengthNames = allNames.filter(
-      (n) => Math.abs(n.length - word.length) <= 3
-    );
-    if (!sameLengthNames.length) continue;
-    const { bestMatch } = stringSimilarity.findBestMatch(
-      word.toUpperCase(),
-      sameLengthNames.map((n) => n.toUpperCase())
-    );
-
-    const upper = word.toUpperCase();
-    const minRating = upper.length <= 6 ? 0.7 : 0.6;
-
-    if (bestMatch.rating >= minRating) {
-      const matchedName = sameLengthNames[bestMatch.target - 1];
-      const ticker =
-        strippedToTicker.get(matchedName) ||
-        strippedToTicker.get(sameLengthNames.find((n) => n.toUpperCase() === bestMatch.target));
-      if (ticker && !found.includes(ticker)) found.push(ticker);
-    }
-  }
   return found;
 }
 
