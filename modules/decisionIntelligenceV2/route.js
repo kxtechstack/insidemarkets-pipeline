@@ -52,6 +52,7 @@ const {
 const { resolveContext } = require('./chatContext/contextResolver');
 const { updateState } = require('./chatContext/stateUpdater');
 const { loadState } = require('./chatContext/stateStore');
+const { reformatPreviousAnswer } = require('./chatContext/reformatter');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Deterministic filter for inference / decision.
@@ -540,6 +541,76 @@ function registerDecisionIntelligenceV2Route(app) {
         `skipUpdater=${skipStateUpdate} ` +
         `query="${queryForPipeline.slice(0, 120)}"`
       );
+
+      // ── 4.5. REFORMAT — bypass pipeline entirely ──────────────────────
+      if (resolverResult.kind === 'reformat') {
+        console.log(`[chat-with-memory] kind=reformat — bypassing pipeline`);
+
+        let reformatResult;
+        try {
+          reformatResult = await reformatPreviousAnswer({
+            conversationId,
+            instruction: resolverResult.standalone_query,
+          });
+        } catch (err) {
+          console.log(`[chat-with-memory] reformatter threw: ${err.message}`);
+          reformatResult = { payload: null, previousFound: false };
+        }
+
+        if (!reformatResult.payload) {
+          const fallbackPayload = {
+            type: 'list',
+            items: [],
+            no_data: true,
+            message: reformatResult.previousFound
+              ? "I couldn't reformat the previous answer. Try rephrasing or asking the question again."
+              : "There's no previous answer in this conversation to reformat.",
+            suggestions: [],
+          };
+          return res.json({
+            ...fallbackPayload,
+            conversationId,
+            classifierReasoning: 'reformat (fallback)',
+            resolver: {
+              kind: 'reformat',
+              standalone_query: resolverResult.standalone_query,
+              references: resolverResult.references || [],
+              context_used: resolverResult.context_used || [],
+              new_constraints: resolverResult.new_constraints || [],
+            },
+            state: currentState,
+          });
+        }
+
+        const payload = reformatResult.payload;
+        const assistantContent = (payload.report?.title || '').slice(0, 200);
+
+        try {
+          await appendMessage({
+            conversationId,
+            role: 'assistant',
+            content: assistantContent,
+            type: payload.type,
+            payload,
+          });
+        } catch (err) {
+          console.log(`[chat-with-memory] failed to persist reformat: ${err.message}`);
+        }
+
+        return res.json({
+          ...payload,
+          conversationId,
+          classifierReasoning: 'reformat',
+          resolver: {
+            kind: 'reformat',
+            standalone_query: resolverResult.standalone_query,
+            references: resolverResult.references || [],
+            context_used: resolverResult.context_used || [],
+            new_constraints: resolverResult.new_constraints || [],
+          },
+          state: currentState,
+        });
+      }
 
       // ── 5. Run existing V2 pipeline ───────────────────────────────────
       let result;

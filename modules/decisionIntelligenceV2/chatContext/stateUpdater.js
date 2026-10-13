@@ -23,6 +23,58 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
+// ─────────────────────────────────────────────────────────────────────────
+// Deterministic state cleanup — enforces SHAPE rules, not vocabulary.
+// No hardcoded word lists. Structure-only checks.
+// ─────────────────────────────────────────────────────────────────────────
+
+function normalizeForCompare(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function questionsAreEquivalent(a, b) {
+  const na = normalizeForCompare(a);
+  const nb = normalizeForCompare(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 15 && nb.length >= 15 && (na.includes(nb) || nb.includes(na))) return true;
+  return false;
+}
+
+function sanitizeUpdaterOutput(currentState, proposedState, userMessage) {
+  const current = currentState && typeof currentState === 'object' ? currentState : {};
+  const cleaned = { ...(proposedState && typeof proposedState === 'object' ? proposedState : {}) };
+
+  // 1. open_questions must not contain the current question.
+  if (Array.isArray(cleaned.open_questions)) {
+    cleaned.open_questions = cleaned.open_questions
+      .filter((q) => typeof q === 'string' && q.trim().length > 0)
+      .filter((q) => !questionsAreEquivalent(q, userMessage));
+    if (cleaned.open_questions.length === 0) delete cleaned.open_questions;
+  }
+
+  // 2. entities — enforce SHAPE only (max 4 words). No word blacklist.
+  if (Array.isArray(cleaned.entities)) {
+    cleaned.entities = cleaned.entities
+      .filter((e) => typeof e === 'string')
+      .map((e) => e.trim())
+      .filter((e) => e.length > 0)
+      .filter((e) => e.split(/\s+/).length <= 4);
+    if (cleaned.entities.length === 0) delete cleaned.entities;
+  }
+
+  // 3. Preserve untouched keys.
+  for (const key of Object.keys(current)) {
+    if (key === 'open_questions') continue;
+    if (!(key in cleaned)) cleaned[key] = current[key];
+  }
+
+  return cleaned;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Prompt
@@ -60,14 +112,49 @@ RULES
    If the exchange changes a value (e.g. the user says "actually, in UAE"),
    replace the old value with the new one.
 
-4. DELETE stale facts.
+4. DELETE stale facts — BE CONSERVATIVE.
    Set a key to null in the new state object to remove it.
-   Only do this when the exchange explicitly abandons that fact.
+   Only do this when the exchange EXPLICITLY abandons that fact.
 
-5. OPEN_QUESTIONS.
-   Maintain an "open_questions" array — questions raised in the
-   conversation that haven't been resolved yet. Add new ones. Remove
-   any that were answered in this exchange.
+   CRITICAL RULES:
+   - Just because a key isn't mentioned in this exchange doesn't mean
+     it's stale. If the state had {"market":"Korea"} and the current
+     exchange is about something else, KEEP market:"Korea" unless the
+     user actually switched markets.
+   - Only delete a key when the new message clearly contradicts it or
+     switches away from it. Example: state has {"market":"Korea"} and
+     user says "what about Japan?" → change market to "Japan" (not
+     delete it).
+   - NEVER drop a key just because your new state object happens not
+     to include it. If the current state has 4 keys and this exchange
+     only touches 1 of them, the new state must still have all 4 keys
+     (3 unchanged + 1 updated).
+   - The ONLY keys allowed to be dropped are those the previous rules
+     explicitly said to clear on a topic switch (see TOPIC SWITCHING).
+
+5. OPEN_QUESTIONS — READ CAREFULLY.
+   Maintain an "open_questions" array — but ONLY for questions the USER
+   raised that were NOT answered in this exchange.
+
+   HARD RULES:
+   - The CURRENT user message is being answered RIGHT NOW by the
+     assistant. It is NOT an open question. Never add it.
+   - If the user asked a question and the assistant answered it, that
+     question is CLOSED. Remove it from open_questions if present.
+   - Only keep a question in open_questions if the assistant said
+     "I don't have that data", or asked for clarification, or the user
+     explicitly said "I'll come back to that".
+   - If there are no genuinely open questions, use an empty array: [].
+
+   Examples of WRONG behavior (do not do this):
+     User: "give me swot analysis for estee lauder"
+     Assistant: [full SWOT report]
+     ✗ WRONG: open_questions: ["What is the SWOT analysis for Estee Lauder?"]
+
+   Examples of RIGHT behavior:
+     User: "give me swot analysis for estee lauder"
+     Assistant: [full SWOT report]
+     ✓ RIGHT: open_questions: []
 
 6. Keep it COMPACT.
    - Use short, clear keys: "market", "product", "topic", "segment",
@@ -86,10 +173,23 @@ RULES
                   (e.g. "revenue", "pricing strategy", "revenue comparison")
      - "metric":  the financial metric being discussed
                   (e.g. "revenue", "net income", "margin", "total assets")
-     - "entities": companies discussed (as short names or tickers)
-                  (e.g. ["Apple"] or ["EL", "ULTA"])
+     - "entities": companies, brands, or named products ONLY.
+                  (e.g. ["Apple"] or ["EL", "ULTA"] or ["Estee Lauder"])
      - "timeframe": the time period being discussed
                   (e.g. "last year", "last 3 years", "FY2024", "Q3 2025")
+
+   HARD RULES FOR "entities":
+   - Entities are NAMED THINGS. Companies, brands, products, regulators,
+     countries when used as a market.
+   - NEVER put a full question, sentence, or descriptive phrase in
+     entities. If it contains a verb or more than 4 words, it's not an
+     entity.
+   - ✗ WRONG: entities: ["biggest players in the Korean beauty market"]
+   - ✗ WRONG: entities: ["what is Apple's revenue"]
+   - ✓ RIGHT: entities: ["Apple"]
+   - ✓ RIGHT: entities: ["Amazon", "Dell"]
+   - ✓ RIGHT: entities: ["Estee Lauder"]
+   - If you can't identify a clean named entity, use [].
 
    These fields are essential for resolving short follow-up messages
    like "microsoft?" into complete questions on the next turn.
@@ -352,7 +452,7 @@ async function updateState({ conversationId, userMessage, answer, currentState }
     return { updatedState: safeCurrent, changed_keys: [] };
   }
 
-  const newState = parsed.state;
+  const newState = sanitizeUpdaterOutput(safeCurrent, parsed.state, userMessage);
   const computedChanged = diffState(safeCurrent, newState);
   const llmChanged = Array.isArray(parsed.changed_keys)
     ? parsed.changed_keys.filter((k) => typeof k === 'string')
@@ -385,4 +485,5 @@ module.exports = {
   UPDATER_PROMPT,
   diffState,
   buildPatch,
+  sanitizeUpdaterOutput,
 };

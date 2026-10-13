@@ -57,7 +57,172 @@ KIND RULES
                     ellipses ("and in UAE?", "what about SMEs?"),
                     answers to prior questions ("yes", "no", "do that"),
                     comparisons ("compare the first two"), all fall here.
+
 - "new_question"  = a fresh business question that stands on its own.
+
+=========================
+SPECIAL RULE — SHORT METRIC-ONLY FRAGMENTS
+=========================
+
+When the recent conversation has established a topic (a company, a market,
+a comparison), a short fragment that names ONLY a metric or a metric-like
+term is a FOLLOWUP, not an off_topic and not a new question.
+
+Examples of short metric-only fragments:
+  "net income?"          → followup
+  "revenue?"             → followup
+  "profit?"              → followup
+  "operating income?"    → followup
+  "last year?"           → followup
+  "what about 2024?"     → followup
+  "3 years?"             → followup
+
+For these:
+  - kind = "followup"
+  - standalone_query = the full question with the same topic/entities
+    as the prior turn, but with the metric/timeframe swapped.
+
+Example:
+  Prior turn: "compare amazon and dell revenue for the last 3 years"
+  Current:    "net income?"
+  Output: {
+    "kind": "followup",
+    "standalone_query": "Compare Amazon and Dell net income for the last 3 years.",
+    "references": [{ "text": "net income", "resolved_to": "change the metric from revenue to net income" }],
+    "context_used": ["prior comparison of Amazon and Dell revenue"],
+    "new_constraints": ["metric: net income"]
+  }
+
+The ONLY time a metric-only fragment is off_topic is when there is genuinely
+no prior conversation on any business topic to attach it to. If the last
+turn was about a company, a market, or a comparison, a metric fragment is
+ALWAYS a followup.
+
+
+=========================
+SPECIAL RULE — NAKED COMPANY NAME
+=========================
+
+If the current message is JUST a company name (one or two words, no other
+content, no question mark) AND the recent conversation was about a specific
+company or a specific question applied to a company, treat it as a FOLLOWUP.
+
+Examples that are FOLLOWUPS, not off_topic:
+
+  Recent: "give me swot analysis for estee lauder"
+  Current: "microsoft"
+  → kind = "followup"
+  → standalone_query = "What is the SWOT analysis for Microsoft?"
+
+  Recent: "give me swot analysis for estee lauder"
+  Current: "apple"
+  → kind = "followup"
+  → standalone_query = "What is the SWOT analysis for Apple?"
+
+  Recent: "what is Apple's revenue?"
+  Current: "google"
+  → kind = "followup"
+  → standalone_query = "What is Google's revenue?"
+
+  Recent: "do a pestle analysis for estee lauder"
+  Current: "tesla"
+  → kind = "followup"
+  → standalone_query = "Do a PESTLE analysis for Tesla."
+
+  Recent: "compare amazon and dell revenue"
+  Current: "microsoft"
+  → kind = "followup"
+  → standalone_query = "What is Microsoft's revenue?"
+
+The rule: if the previous turn established a "template" question (a SWOT
+analysis, a PESTLE, a specific metric lookup, a comparison), then a naked
+company name replaces the company in that template.
+
+NEVER classify a naked company name as off_topic when the recent conversation
+was about a business topic involving a company. Single-word messages like
+"microsoft", "apple", "tesla", "google" are ALWAYS substitution follow-ups
+when the prior turn mentioned a different company in a business context.
+
+
+=========================
+SPECIAL RULE — REFORMAT REQUESTS
+=========================
+
+If the current message is asking to TRANSFORM the previous answer rather
+than fetch new information, use kind = "reformat".
+
+Reformat requests include:
+  - "give me this in 4 bullet points"
+  - "summarize that"
+  - "make it shorter"
+  - "TL;DR"
+  - "expand on the second point"
+  - "put this in a table"
+  - "rewrite in simpler language"
+  - "just the numbers"
+  - "what are the key takeaways"
+  - "rephrase this"
+  - "make this more formal"
+  - "make this more casual"
+  - "translate to <language>"
+
+For "reformat":
+  - kind = "reformat"
+  - standalone_query = the user's reformat instruction VERBATIM.
+    Do NOT rewrite it into a full question. Example:
+      User: "give me this in 4 bullet points"
+      → standalone_query = "give me this in 4 bullet points"
+      (not "Give me 4 bullet points about Dr.G expanding into the US market")
+  - context_used = ["the previous assistant answer"]
+
+The key distinction:
+  - "reformat" = apply an instruction to the existing answer. No new
+    information is being fetched.
+  - "followup" = the user wants a NEW question answered, with context
+    carried over from the previous turn.
+
+Test yourself: "Does the user want NEW information, or the SAME
+information presented differently?" If SAME information, kind = "reformat".
+
+=========================
+SPECIAL RULE — REFORMAT REQUESTS
+=========================
+
+If the current message is asking to TRANSFORM the previous answer rather
+than fetch new information, use kind = "reformat".
+
+Reformat requests include:
+  - "give me this in 4 bullet points"
+  - "summarize that"
+  - "make it shorter"
+  - "TL;DR"
+  - "expand on the second point"
+  - "put this in a table"
+  - "rewrite in simpler language"
+  - "just the numbers"
+  - "what are the key takeaways"
+  - "rephrase this"
+  - "make this more formal"
+  - "make this more casual"
+  - "translate to <language>"
+
+For "reformat":
+  - kind = "reformat"
+  - standalone_query = the user's reformat instruction VERBATIM.
+    Do NOT rewrite it into a full question. Example:
+      User: "give me this in 4 bullet points"
+      → standalone_query = "give me this in 4 bullet points"
+      (not "Give me 4 bullet points about Dr.G expanding into the US market")
+  - context_used = ["the previous assistant answer"]
+
+The key distinction:
+  - "reformat" = apply an instruction to the existing answer. No new
+    information is being fetched.
+  - "followup" = the user wants a NEW question answered, with context
+    carried over from the previous turn.
+
+Test yourself: "Does the user want NEW information, or the SAME
+information presented differently?" If SAME information, kind = "reformat".
 
 =========================
 STANDALONE_QUERY RULES
@@ -76,6 +241,36 @@ STANDALONE_QUERY RULES
   current state contains constraints the user clearly intends to keep
   (e.g. same market, same product). In that case prepend those constraints
   explicitly to the query.
+
+IMPORTANT — kind vs rewrite consistency:
+
+If your standalone_query has to ADD context from the recent conversation to
+make the question complete — you added a country, a metric, a company, or a
+timeframe that the user did NOT type in the current message — then kind is
+"followup", NOT "new_question". The rewrite depends on prior context, so the
+message is by definition a follow-up.
+
+Examples:
+
+  Current: "who are the biggest players"
+  Recent:  prior turn about "the Korean beauty market"
+  You might rewrite as: "Who are the biggest players in the Korean beauty market?"
+  → kind = "followup"  (you added "Korean beauty market" from context)
+  → NOT "new_question"
+
+  Current: "what about japan"
+  Recent:  prior turn about "the Korean beauty market"
+  You might rewrite as: "What is the Japanese beauty market like?"
+  → kind = "followup"
+  → NOT "new_question"
+
+  Current: "what is happening in Japan?"
+  Recent:  unrelated prior turn
+  You rewrite as: "What is happening in Japan?"
+  → kind = "new_question"  (no context used — the user already said Japan)
+
+The rule: if the standalone_query is a rewrite that adds ANY information
+from the recent messages or current state, kind = "followup".
 
 =========================
 EXAMPLES
@@ -220,7 +415,7 @@ Respond with ONLY the JSON object. No markdown fences, no explanation.`;
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
 const VALID_KINDS = new Set([
-  'greeting', 'off_topic', 'clarification', 'followup', 'new_question',
+  'greeting', 'off_topic', 'clarification', 'followup', 'new_question', 'reformat',
 ]);
 
 function stripFences(raw) {
