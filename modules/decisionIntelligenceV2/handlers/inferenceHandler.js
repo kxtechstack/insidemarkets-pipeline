@@ -18,7 +18,7 @@
  */
 
 const { callLLM } = require('../../llmClient');
-const { checkTopicalCoverage } = require('./topicalCoverage');
+const { checkTopicalCoverage, checkFrameworkSubjectCoverage } = require('./topicalCoverage');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Call 1 — schema designer (same pattern as decisionHandler)
@@ -425,11 +425,24 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       _reason: 'no client signals or uploaded documents matched the question',
     };
   }
-    // ── Topical coverage check ─────────────────────────────────────────
+     // ── Topical coverage check ─────────────────────────────────────────
   // Before spending a writer call, verify the retrieved chunks are actually
   // about the same topic as the question. Stops the writer from reframing
   // "cosmetics" chunks into a "retail" answer.
-  const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
+  //
+  // For framework questions, use the subject-only checker — see
+  // decisionHandler.js for full rationale.
+  const FRAMEWORK_RE = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i;
+  const isFrameworkQuestion = FRAMEWORK_RE.test(question);
+
+  const coverage = isFrameworkQuestion
+    ? await checkFrameworkSubjectCoverage(question, clientHits, customSourceHits)
+    : await checkTopicalCoverage(question, clientHits, customSourceHits);
+
+  if (isFrameworkQuestion) {
+    console.log(`[inferenceHandler] framework question — subject-only coverage: covered=${coverage.covered}`);
+  }
+
   if (!coverage.covered) {
     console.log(`[inferenceHandler] Topical coverage FAILED: ${coverage.reason}`);
     return {

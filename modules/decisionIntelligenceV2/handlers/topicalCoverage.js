@@ -54,6 +54,36 @@ Two documents can share the words "Korea," "market," "growth," "consumer," and s
 If the question is "What is happening in Korean retail?" and every document is about Korean cosmetics — that is NOT coverage, even if the documents mention "retail distribution" or "consumer demand" in passing.
 
 =========================
+FRAMEWORK QUESTIONS — CRITICAL
+=========================
+
+If the question asks you to PRODUCE an analysis using a framework
+(SWOT, PESTLE, PESTEL, Five Forces, Porter's Five Forces, Risk Analysis,
+or an equivalent structured framework), do NOT fail coverage just because
+the documents don't already contain that framework's output.
+
+The framework output will be CONSTRUCTED downstream by an analyst FROM
+these documents. Your job is only to check that the documents are about
+the same SUBJECT as the question — the company, sector, or market the
+framework is being applied to. Completely ignore the framework verb
+("do a SWOT", "run a PESTLE", "analyze risks") when judging coverage.
+
+Examples:
+  Q: "Do a SWOT analysis for Estée Lauder."
+  Documents: Estée Lauder operations, financials, acquisitions.
+  → covered: TRUE. Documents are about Estée Lauder.
+
+  Q: "SWOT for the cosmetics industry."
+  Documents: cosmetics brands, market trends, regulations.
+  → covered: TRUE. Documents are about cosmetics.
+
+  Q: "SWOT for Enveda."
+  Documents: Estée Lauder, M·A·C, DECIEM.
+  → covered: FALSE. Different subject — Enveda not present.
+
+The framework verb never affects coverage. Only the subject noun does.
+
+=========================
 OUTPUT
 =========================
 
@@ -69,6 +99,116 @@ Bias: if the documents clearly share the same main topic as the question, return
 
 No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Framework-only prompt — judges SUBJECT match only.
+//
+// Framework questions (SWOT / PESTLE / Five Forces / Risk Analysis) ask the
+// writer to BUILD the framework from raw signals, so the documents will never
+// "contain a SWOT" already. The normal coverage prompt gets confused by this
+// and wrongly fails good questions. This prompt tells the AI to ignore the
+// framework word entirely and only check whether the documents are about the
+// same subject (company / sector / region) as the question.
+// ─────────────────────────────────────────────────────────────────────────
+const FRAMEWORK_SUBJECT_PROMPT = `You are checking whether retrieved documents are about the same SUBJECT as a user's question.
+
+The user's question may ask for a SWOT, a PESTLE, Five Forces, or a Risk Analysis. IGNORE that request word completely. The framework will be built later, from these documents. You are NOT checking whether the documents contain a SWOT (they won't — that is expected). You are ONLY checking whether the documents are about the same subject as the question.
+
+=========================
+WHAT IS "THE SUBJECT"?
+=========================
+
+The subject is the company, industry, sector, market, or region the question is about.
+
+Examples:
+
+  Q: "Do a SWOT analysis for Estée Lauder."
+     Subject = Estée Lauder (a company)
+     Documents about Estée Lauder's operations, financials, products → subject matches.
+     Documents about cosmetics in general → subject matches too (Estée Lauder is a cosmetics company, and the docs cover that sector).
+     Documents about airlines or auto makers → subject does NOT match.
+
+  Q: "SWOT for Enveda."
+     Subject = Enveda (a company)
+     Documents about Enveda → subject matches.
+     Documents about Estée Lauder or Ulta → subject does NOT match.
+
+  Q: "PESTLE for the cosmetics industry."
+     Subject = cosmetics industry
+     Documents about cosmetics brands, cosmetics regulation, cosmetics market trends → subject matches.
+     Documents about banking or airlines → subject does NOT match.
+
+  Q: "Risk analysis for entering the K-beauty market."
+     Subject = K-beauty market
+     Documents about K-beauty, Korean skincare, Korean beauty trends → subject matches.
+     Documents about German healthcare or Indian auto → subject does NOT match.
+
+  Q: "SWOT for the Saudi Arabia retail industry."
+     Subject = Saudi Arabia retail
+     Documents about Saudi Arabia retail → subject matches.
+     Documents about cosmetics in Korea or beauty in France → subject does NOT match.
+     Documents that mention "Saudi Arabia" but only about oil, or mention "retail" but only about US retail → subject does NOT match.
+
+=========================
+RULES — READ CAREFULLY
+=========================
+
+1. The question will contain a framework word: "SWOT", "PESTLE", "PESTEL", "Five Forces", "Porter's Five Forces", "Risk Analysis", or "Risk Categorization".
+   DELETE that word from the question in your mind. It is not part of the subject. It is only the SHAPE of the answer that will be built LATER.
+   The question "SWOT for Enveda" becomes "Enveda" in your head.
+   The question "Do a PESTLE analysis for the cosmetics industry" becomes "the cosmetics industry".
+   The question "Five forces for the US airline industry" becomes "the US airline industry".
+   Never mention SWOT, PESTLE, Five Forces, or Risk Analysis in your reason. Ever.
+
+2. After removing that framework word, ask yourself ONE question:
+   "Is AT LEAST ONE of the retrieved documents about the same subject as what's left?"
+
+3. "Same subject" means: the same company, the same industry, the same sector, the same market, or the same region.
+
+   IMPORTANT — a company document counts as being about the industry it belongs to:
+     - Estée Lauder is a cosmetics company → Estée Lauder's filings count for "the cosmetics industry".
+     - Delta Air Lines is an airline → Delta's filings count for "the US airline industry".
+     - Nestlé is a food company → Nestlé's filings count for "the food industry".
+     - Entergy is a utility company → Entergy's filings do NOT count for "the K-beauty market" (different industry entirely).
+
+   Also note: a specific industry subsector counts for the broader industry.
+     - "K-beauty" is a subsector of "cosmetics" → a K-beauty document counts for "the cosmetics industry".
+     - "skincare" is a subsector of "beauty" → a skincare document counts for "the beauty industry".
+
+4. The batch will very often contain a MIX of on-topic and off-topic documents.
+   You must ONLY care whether AT LEAST ONE document is on-topic.
+   Do NOT fail the batch just because some documents are off-topic — the writer will use the on-topic ones and ignore the rest.
+
+5. Return subject_matches: true if even ONE document is on-subject.
+   Return subject_matches: false ONLY if EVERY SINGLE document in the batch is off-subject.
+
+   Example of the correct way to reason:
+     Q: "SWOT for the cosmetics industry"
+     Batch: 10 client signals about cosmetics, 22 Estée Lauder 10-K chunks, 10 uploaded docs.
+     → subject_matches: TRUE (Estée Lauder is a cosmetics company, and the client signals are about cosmetics)
+
+     Q: "Risk analysis for K-beauty market"
+     Batch: 15 K-beauty client signals, 12 Entergy 10-K chunks.
+     → subject_matches: TRUE (the K-beauty signals are on-topic; Entergy is off-topic but that doesn't matter — one is enough)
+
+     Q: "SWOT for Saudi Arabia retail industry"
+     Batch: 10 cosmetic industry signals, 10 uploaded beauty docs.
+     → subject_matches: FALSE (nothing in the batch is about Saudi Arabia retail)
+
+6. Do NOT judge whether the documents are detailed, complete, contain the framework output, contain any kind of analysis, or mention strengths / weaknesses / opportunities / threats / political / economic / social / technological / legal / environmental factors. NONE of that matters. You are ONLY judging subject match.
+
+=========================
+OUTPUT
+=========================
+
+Return ONLY this JSON and NOTHING ELSE:
+
+{
+  "subject_matches": true | false,
+  "reason": "<one short sentence>"
+}
+
+No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
+
 const ITEM_MAX_CHARS = 350;
 const MAX_CLIENT_HITS = 6;
 const MAX_CUSTOM_HITS = 4;
@@ -76,10 +216,23 @@ const MAX_CUSTOM_HITS = 4;
 function buildCoverageContext(clientHits, customSourceHits) {
   const parts = [];
 
-  // Prefer matched hits, then unmatched — capped at MAX_CLIENT_HITS total
-  const matched = (clientHits || []).filter((h) => h._matched);
-  const unmatched = (clientHits || []).filter((h) => !h._matched);
-  const clientPool = [...matched, ...unmatched].slice(0, MAX_CLIENT_HITS);
+  // Order matters here. SEC chunks are marked _matched: true by the SEC
+  // sidecar (secHandler.js), which means a naive "matched first" ordering
+  // makes SEC chunks crowd out the actual client signals retrieved by
+  // semantic similarity to the question. That was the root cause of the
+  // FW6 failure: for "Risk analysis for entering the K-beauty market",
+  // the SEC sidecar injected 12 Entergy 10-K chunks (wrong ticker), and
+  // those crowded out the K-beauty client signals — so the coverage LLM
+  // only saw Entergy documents and correctly said "none are about K-beauty".
+  //
+  // Priority order for the coverage check:
+  //   1. non-SEC matched client hits   — retrieved by similarity, boosted
+  //   2. non-SEC unmatched client hits — retrieved by similarity, not boosted
+  //   3. SEC hits last                 — injected by sidecar, may be off-topic
+  const nonSecMatched   = (clientHits || []).filter((h) => h._matched && !h._sec);
+  const nonSecUnmatched = (clientHits || []).filter((h) => !h._matched && !h._sec);
+  const secHits         = (clientHits || []).filter((h) => h._sec);
+  const clientPool = [...nonSecMatched, ...nonSecUnmatched, ...secHits].slice(0, MAX_CLIENT_HITS);
 
   for (const h of clientPool) {
     const title = h.title || 'Untitled';
@@ -190,4 +343,76 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   return { covered, confidence, reason };
 }
 
-module.exports = { checkTopicalCoverage, TOPICAL_COVERAGE_PROMPT };
+// ─────────────────────────────────────────────────────────────────────────
+// Framework-only checker — judges SUBJECT match only.
+//
+// Same return shape as checkTopicalCoverage: { covered, confidence, reason }.
+// Handlers call this instead of checkTopicalCoverage when the question
+// matches the framework regex. All non-framework questions keep using
+// checkTopicalCoverage unchanged.
+//
+// Fails open on error, same as checkTopicalCoverage — if the AI call fails
+// or the JSON is unparseable, we return covered: true so a transient issue
+// never blocks a real answer.
+// ─────────────────────────────────────────────────────────────────────────
+async function checkFrameworkSubjectCoverage(question, clientHits, customSourceHits) {
+  const context = buildCoverageContext(clientHits, customSourceHits);
+
+  if (!context || context.trim().length < 20) {
+    return { covered: true, confidence: 1.0, reason: 'no context to check', _skipped: true };
+  }
+
+  let raw;
+  try {
+    raw = await callLLM(
+      [
+        { role: 'system', content: FRAMEWORK_SUBJECT_PROMPT },
+        {
+          role: 'user',
+          content: `QUESTION:\n${question}\n\nRETRIEVED DOCUMENTS:\n${context}`,
+        },
+      ],
+      { temperature: 0, max_tokens: 200, timeout: 30000 }
+    );
+  } catch (err) {
+    console.log(`[FrameworkCoverage] LLM call failed — failing open: ${err.message}`);
+    return { covered: true, confidence: 0.0, reason: `check failed: ${err.message}`, _fallback: true };
+  }
+
+  if (process.env.DI_V2_DEBUG_LLM === '1') {
+    console.log('[FrameworkCoverage] RAW LLM OUTPUT:');
+    console.log(raw);
+    console.log('[FrameworkCoverage] END RAW');
+  }
+
+  const stripped = stripFences(raw);
+  const jsonBlock = findBalancedJson(stripped);
+  if (!jsonBlock) {
+    console.log(`[FrameworkCoverage] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
+    return { covered: true, confidence: 0.0, reason: 'unparseable response', _fallback: true };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonBlock);
+  } catch (err) {
+    console.log(`[FrameworkCoverage] JSON parse failed — failing open: ${err.message}`);
+    return { covered: true, confidence: 0.0, reason: 'parse failed', _fallback: true };
+  }
+
+  const covered = parsed.subject_matches === true;
+  const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+
+  console.log(
+    `[FrameworkCoverage] subject_matches=${covered} reason="${reason}"`
+  );
+
+  return { covered, confidence: covered ? 1 : 0, reason };
+}
+
+module.exports = {
+  checkTopicalCoverage,
+  checkFrameworkSubjectCoverage,
+  TOPICAL_COVERAGE_PROMPT,
+  FRAMEWORK_SUBJECT_PROMPT,
+};

@@ -15,7 +15,7 @@
  */
 
 const { callLLM } = require('../../llmClient');
-const { checkTopicalCoverage } = require('./topicalCoverage');
+const { checkTopicalCoverage, checkFrameworkSubjectCoverage } = require('./topicalCoverage');
 // ─────────────────────────────────────────────────────────────────────────
 // Call 1 — schema designer
 // ─────────────────────────────────────────────────────────────────────────
@@ -228,11 +228,29 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     };
   }
 
-  // ── Topical coverage check ─────────────────────────────────────────
+    // ── Topical coverage check ─────────────────────────────────────────
   // Before spending a writer call, verify the retrieved chunks are actually
   // about the same topic as the question. Stops the writer from reframing
   // "cosmetics" chunks into a "retail" answer.
-  const coverage = await checkTopicalCoverage(question, clientHits, customSourceHits);
+  //
+  // For framework questions (SWOT / PESTLE / Five Forces / Risk Analysis),
+  // we still check the SUBJECT — but not the task. Those questions ask the
+  // writer to CONSTRUCT the framework from raw signals, so no document ever
+  // "contains" a SWOT and the normal gate wrongly fails them. The subject-
+  // only checker (checkFrameworkSubjectCoverage) asks the AI just one
+  // question: "are these documents about the same company / industry /
+  // region?" — ignoring the framework word entirely.
+  const FRAMEWORK_RE = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i;
+  const isFrameworkQuestion = FRAMEWORK_RE.test(question);
+
+  const coverage = isFrameworkQuestion
+    ? await checkFrameworkSubjectCoverage(question, clientHits, customSourceHits)
+    : await checkTopicalCoverage(question, clientHits, customSourceHits);
+
+  if (isFrameworkQuestion) {
+    console.log(`[decisionHandler] framework question — subject-only coverage: covered=${coverage.covered}`);
+  }
+
   if (!coverage.covered) {
     console.log(`[decisionHandler] Topical coverage FAILED: ${coverage.reason}`);
     return {
