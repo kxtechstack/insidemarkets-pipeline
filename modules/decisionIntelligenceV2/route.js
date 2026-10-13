@@ -29,6 +29,8 @@ const {
 } = require('../decisionIntelligence/chatHistory');
 
 const { route } = require('./routing/router');
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const { selectRelevantHitsForList } = require('./handlers/topicalCoverage');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
@@ -66,6 +68,69 @@ function filterForInferenceOrDecision(clientHits, concepts) {
     const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
     return clean.some((c) => containsPhrase(haystack, c));
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// List candidate cleanup.
+//
+// Before the LLM is asked "which of these candidates are relevant?", we
+// clean the list. This prevents three classes of pollution that were causing
+// list questions to sometimes return no_data even when real signals existed:
+//
+//   1. Same article appearing multiple times (multiple chunks of one article
+//      all retrieved as separate hits). Kept: the first (highest-scoring).
+//   2. Syndicated copies of the same story across different URLs, already
+//      marked is_duplicate = true by the pipeline. Removed.
+//   3. Orphaned chunks — articles present in Qdrant but with no matching
+//      signal row in Supabase. Removed.
+//
+// After cleanup, every remaining candidate is guaranteed to survive
+// buildListItems() and appear in the final list. So if the LLM picks any
+// of them, we always show something. No more "picked only junk" -> no_data.
+//
+// Runs ONLY on the list path. Inference / decision / framework paths are
+// unchanged.
+// ─────────────────────────────────────────────────────────────────────────
+async function prepareListCandidates(hits) {
+  if (!Array.isArray(hits) || hits.length === 0) return [];
+
+  // Stage 1 — dedupe by article_id, keep the first occurrence.
+  const byArticleId = new Map();
+  for (const h of hits) {
+    if (!h || !h.article_id) continue;
+    if (byArticleId.has(h.article_id)) continue;
+    byArticleId.set(h.article_id, h);
+  }
+
+  if (byArticleId.size === 0) return [];
+
+  // Stage 2 — verify each article_id exists in Supabase with is_duplicate=false.
+  const ids = [...byArticleId.keys()];
+  let policyRows = [], mdRows = [], foRows = [];
+  try {
+    [policyRows, mdRows, foRows] = await Promise.all([
+      supabase.from('policy_signals').select('article_id, is_duplicate').in('article_id', ids),
+      supabase.from('market_dynamics_signals').select('article_id, is_duplicate').in('article_id', ids),
+      supabase.from('trend_signals').select('article_id, is_duplicate').in('article_id', ids),
+    ]);
+  } catch (err) {
+    console.log(`[prepareListCandidates] Supabase lookup failed, keeping all ${ids.length} candidates: ${err.message}`);
+    return [...byArticleId.values()];
+  }
+
+  // A candidate is valid if a row exists in any table with is_duplicate=false.
+  const valid = new Set();
+  for (const r of [...(policyRows.data || []), ...(mdRows.data || []), ...(foRows.data || [])]) {
+    if (r.is_duplicate === false) valid.add(r.article_id);
+  }
+
+  const cleaned = [...byArticleId.values()].filter(h => valid.has(h.article_id));
+
+  console.log(
+    `[prepareListCandidates] ${hits.length} raw → ${byArticleId.size} unique → ${cleaned.length} verified`
+  );
+
+  return cleaned;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -153,21 +218,16 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     return { routerResult, payload: await buildClarificationResponse({ routerResult, clientId, industry }) };
   }
 
-  // ── 3. LIST — deterministic, client signals only ────────────────────
+    // ── 3. LIST — deterministic, client signals only ────────────────────
   //
-  // List questions show a list of the client's own signals. Custom sources
-  // and SEC filings are NEVER used here — this is a straight read of the
-  // client's collected signals.
+  // Pipeline:
+  //   1. Retrieve client signals.
+  //   2. Concept filter (deterministic, cheap).
+  //   3. Candidate cleanup (dedupe + Supabase verification).
+  //   4. Per-item LLM selection (only when 2+ candidates survive cleanup).
+  //   5. If zero items → no_data.
   //
-  // Two-stage relevance check:
-  //   (a) Deterministic concept filter (filterListHits) — cheap, drop hits
-  //       that share no vocabulary with the question.
-  //   (b) LLM per-item selection (selectRelevantHitsForList) — for the
-  //       survivors of (a), ask the LLM which ones genuinely answer the
-  //       question. Discard the rest.
-  //
-  // If either stage leaves zero hits, return the no_data shape so the
-  // frontend shows "no relevant data" instead of showing polluted items.
+  // Custom sources and SEC are NEVER used for list questions.
   if (routerResult.type === 'list') {
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: routerResult,
@@ -194,21 +254,38 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    // Per-item LLM relevance selection. If the LLM errors, it fails open
-    // and returns the filtered list unchanged — same behaviour as today.
-    // If the LLM succeeds and selects nothing, we honour that and return
-    // no_data.
-    let selected;
-    try {
-      selected = await selectRelevantHitsForList(question, filtered);
-    } catch (err) {
-      console.log(`[V2 route] list selection threw — falling back to filtered hits: ${err.message}`);
-      selected = filtered;
+    // ── Candidate cleanup ────────────────────────────────────────────
+    // Remove duplicates by article_id, orphaned chunks, and rows already
+    // marked is_duplicate. Whatever survives is guaranteed to show up.
+    const candidates = await prepareListCandidates(filtered);
+
+    if (candidates.length === 0) {
+      console.log(`[V2 route] list candidates: 0 after cleanup — no_data`);
+      const payload = await buildListResponse({
+        handlerResult: { items: [] },
+        clientId,
+        industry,
+      });
+      return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    console.log(
-      `[V2 route] list selection: ${selected.length}/${filtered.length} items kept`
-    );
+    // ── Short-circuit for a single candidate ─────────────────────────
+    // No point asking the LLM to "choose" from a list of one.
+    let selected;
+    if (candidates.length === 1) {
+      console.log(`[V2 route] list candidates: 1 — skipping LLM selection`);
+      selected = candidates;
+    } else {
+      try {
+        selected = await selectRelevantHitsForList(question, candidates);
+      } catch (err) {
+        console.log(`[V2 route] list selection threw — falling back to filtered hits: ${err.message}`);
+        selected = candidates;
+      }
+      console.log(
+        `[V2 route] list selection: ${selected.length}/${candidates.length} items kept`
+      );
+    }
 
     if (!selected || selected.length === 0) {
       const payload = await buildListResponse({
