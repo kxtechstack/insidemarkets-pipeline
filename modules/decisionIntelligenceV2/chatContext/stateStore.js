@@ -113,4 +113,24 @@ async function clearState(conversationId) {
   }
 }
 
-module.exports = { loadState, saveState, clearState };
+// ─────────────────────────────────────────────────────────────────────────
+// Feature flag — when CHAT_CONTEXT_MODE=discrete, delegate every call to
+// the discrete-facts implementation instead of the JSON blob implementation.
+//
+// Default: 'blob' — the current implementation stays the source of truth
+// until we explicitly flip the flag.
+// ─────────────────────────────────────────────────────────────────────────
+const MODE = String(process.env.CHAT_CONTEXT_MODE || 'blob').toLowerCase();
+
+if (MODE === 'discrete') {
+  console.log('[stateStore] CHAT_CONTEXT_MODE=discrete — using discreteStateStore');
+  const discrete = require('./discreteStateStore');
+  module.exports = {
+    loadState: discrete.loadState,
+    saveState: discrete.saveState,
+    clearState: discrete.clearState,
+  };
+} else {
+  console.log('[stateStore] CHAT_CONTEXT_MODE=blob — using default blob store');
+  module.exports = { loadState, saveState, clearState };
+}
