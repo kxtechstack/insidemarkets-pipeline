@@ -74,6 +74,7 @@ async function buildGreetingResponse({ routerResult, clientId, industry }) {
   return {
     type: 'list',
     items: [],
+    no_data: true,
     greeting: true,
     message:
       routerResult.primary_intent ||
