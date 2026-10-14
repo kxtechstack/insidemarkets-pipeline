@@ -269,6 +269,8 @@ const STOP_TERMS = new Set([
 
 function normalizeTerm(t) {
   return String(t || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')   // strip diacritics: é → e, ñ → n, etc.
     .toLowerCase()
     .replace(/[^\w\s&'-]/g, ' ')
     .replace(/\s+/g, ' ')
