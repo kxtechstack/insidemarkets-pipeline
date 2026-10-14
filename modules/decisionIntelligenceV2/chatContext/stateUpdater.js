@@ -166,6 +166,60 @@ RULES
    If the exchange doesn't establish anything new and doesn't change
    anything, return the SAME state and an empty changed_keys array.
 
+   
+7.5. ARRAYS — REPLACE vs APPEND (CRITICAL).
+
+For array fields — "entities" and "competitors" — you MUST decide whether
+this exchange REPLACES the previous array or APPENDS to it. Getting this
+wrong causes stale companies to accumulate forever.
+
+REPLACE means: the new array contains ONLY the items from this exchange.
+  The old array is discarded entirely.
+
+APPEND means: keep the old items AND add the new ones.
+
+DEFAULT BEHAVIOR: REPLACE.
+
+Signals that the user is REPLACING:
+  - "microsoft" after a SWOT on Estée Lauder    → REPLACE with [Microsoft]
+  - "apple" after a SWOT on Microsoft            → REPLACE with [Apple]
+  - "what about apple" after a Microsoft SWOT    → REPLACE with [Apple]
+  - "what about apple and microsoft" after an
+    Amazon/Dell comparison                        → REPLACE with [Apple, Microsoft]
+  - "now tell me about tesla" after a Google
+    question                                      → REPLACE with [Tesla]
+
+Signals that the user is APPENDING (the only case where you append):
+  - "also add amazon"
+  - "and also google"
+  - "in addition to apple, add microsoft"
+  - "compare apple, microsoft, and google"     (all named in the same message)
+
+If the user did not use "also", "and also", "in addition", or "add",
+the answer is REPLACE, not append.
+
+Concrete examples:
+
+  Prior state: {entities: ["Estee Lauder"], topic: "SWOT analysis"}
+  Current: "microsoft"
+  New state: {entities: ["Microsoft"], topic: "SWOT analysis"}    ← REPLACED
+
+  Prior state: {entities: ["Estee Lauder"], topic: "SWOT analysis"}
+  Current: "what about apple"
+  New state: {entities: ["Apple"], topic: "SWOT analysis"}         ← REPLACED
+
+  Prior state: {entities: ["Amazon", "Dell"], topic: "revenue comparison"}
+  Current: "what about apple and microsoft"
+  New state: {entities: ["Apple", "Microsoft"], topic: "revenue comparison"}   ← REPLACED
+
+  Prior state: {entities: ["Apple"], topic: "revenue comparison"}
+  Current: "also add microsoft"
+  New state: {entities: ["Apple", "Microsoft"], topic: "revenue comparison"}   ← APPENDED
+
+If you are unsure, use REPLACE. It is almost always correct. Stale
+entities from a previous topic cause wrong answers on later turns.
+
+
 8. ALWAYS EXTRACT THESE SPECIFIC FIELDS WHEN PRESENT.
    For ANY business exchange — even a simple single-company question —
    capture these fields if the message or answer mentions them:

@@ -273,6 +273,69 @@ The rule: if the standalone_query is a rewrite that adds ANY information
 from the recent messages or current state, kind = "followup".
 
 =========================
+CRITICAL RULE — SELF-CONTAINED QUESTIONS
+=========================
+
+A message is a FOLLOWUP only if it CANNOT be understood without the prior
+context. If the message NAMES ITS OWN SUBJECT (a company, a topic, a market,
+a metric), it is a NEW_QUESTION — even if prior context exists in the
+conversation.
+
+The presence of prior context does NOT make a message a followup. A message
+is a followup only when it is INCOMPLETE on its own.
+
+Test: strip away all prior messages and state. Does the current message
+still make sense as a standalone question?
+
+  "what is the update of glossier"
+    → Complete on its own. NEW_QUESTION.
+    → standalone_query = "What is the update of Glossier?"
+
+  "what is happening in the cosmetics industry"
+    → Complete on its own. NEW_QUESTION.
+
+  "what has L'Oréal been doing recently"
+    → Complete on its own. NEW_QUESTION.
+
+  "what are the major policy changes in the last week"
+    → Complete on its own. NEW_QUESTION.
+
+  "microsoft"
+    → INCOMPLETE. No verb, no question word. FOLLOWUP.
+    → standalone_query = "What is the SWOT analysis for Microsoft?" (uses prior topic)
+
+  "what about apple"
+    → INCOMPLETE. "what about" refers to something prior. FOLLOWUP.
+
+  "net income?"
+    → INCOMPLETE. No subject. FOLLOWUP.
+
+  "and in japan"
+    → INCOMPLETE. "and" continues a prior line of inquiry. FOLLOWUP.
+
+  "tell me more"
+    → INCOMPLETE. "more" refers to prior. FOLLOWUP.
+
+RULE OF THUMB:
+  If the message has BOTH a SUBJECT and a QUESTION WORD
+  (what / where / when / how / why / who / which), it is a NEW_QUESTION.
+  Do NOT rewrite it into a longer query with prior context — that would
+  corrupt the question.
+
+HARD PROHIBITION:
+  Never take a question like "what is the update of glossier" and rewrite
+  it as "what is the update of glossier in the Korean beauty market" or
+  "what is the update of glossier in the South Korea cosmetics industry".
+  The user asked about glossier, period. Do not add topics, markets,
+  companies, or timeframes that the user did NOT type in the current
+  message, unless the current message is genuinely incomplete (a followup).
+
+  If prior context happens to be on the same subject, that is fine — the
+  pipeline will still find the right data. But if prior context is on a
+  DIFFERENT subject (e.g. previous turn was about Korean beauty and the
+  current turn is about glossier), do NOT mix them.
+
+=========================
 EXAMPLES
 =========================
 
