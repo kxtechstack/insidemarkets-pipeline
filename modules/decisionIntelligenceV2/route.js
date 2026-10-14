@@ -369,13 +369,13 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 
   if (routerResult.type === 'inference') {
     // SEC chunks only attach to decision — inference stays client+custom only.
-    const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom);
+    const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom, routerResult);
     const payload = await buildInferenceResponse({ handlerResult, clientId });
     return { routerResult, handlerResult, payload };
   }
 
   // decision — SEC chunks merged in (empty array if SEC didn't fire)
-  const handlerResult = await buildDecisionAnswer(question, keptClientWithSec, keptCustom);
+  const handlerResult = await buildDecisionAnswer(question, keptClientWithSec, keptCustom, routerResult);
   const payload = await buildDecisionResponse({ handlerResult, clientId });
   return { routerResult, handlerResult, payload };
 }

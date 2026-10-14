@@ -3,12 +3,20 @@
  *
  * Pre-writer topical relevance check.
  *
- * Asks the LLM: are the retrieved chunks actually about the same topic as
- * the question? If yes, returns which specific documents are on-topic so
- * the caller can filter out the off-topic ones before writing.
+ * Two checkers:
+ *   - checkTopicalCoverage          — normal (non-framework) questions
+ *   - checkFrameworkSubjectCoverage — SWOT / PESTLE / Five Forces / Risk Analysis
+ *
+ * Both return { covered, onTopicIndices, filteredClientHits, filteredCustomHits }.
+ *
+ * The framework checker accepts an optional routerResult and, when
+ * supplied, runs a strict deterministic term-match guard on top of the
+ * LLM's on_topic_indices. This prevents the LLM from passing documents
+ * that match only one of the question's subject parts (e.g. "UAE banking"
+ * passing a "UAE skincare" document because it matches "UAE").
  *
  * Fails open: any LLM error, timeout, or unparseable response returns
- * { covered: true, onTopicIndices: null } so a transient issue never blocks.
+ * { covered: true } so a transient issue never blocks a real answer.
  */
 
 const { callLLM } = require('../../llmClient');
@@ -126,6 +134,37 @@ RULES
 5. Return the on-topic documents by their numbers.
 
 =========================
+CRITICAL — MULTI-PART SUBJECTS
+=========================
+
+When the question names BOTH a region AND an industry (e.g. "UAE banking
+sector", "Saudi Arabia retail industry", "K-beauty market", "Korean
+cosmetics industry"), a document must match BOTH parts.
+
+  Q: "PESTLE for the UAE banking sector"
+  Subject has TWO parts: UAE + banking
+  - Document about UAE banking → MATCH
+  - Document about UAE skincare → NO MATCH (region only)
+  - Document about US banking → NO MATCH (industry only)
+  - Document about Pakistani trade with UAE → NO MATCH
+  - Document about Regional Banking Consolidation in the Middle East → MATCH (banking + regional fit)
+
+  Q: "SWOT for the Saudi Arabia retail industry"
+  Subject has TWO parts: Saudi Arabia + retail
+  - Document about Saudi retail → MATCH
+  - Document about US retail → NO MATCH
+  - Document about Saudi oil → NO MATCH
+  - Document about Saudi ice cream shops / food safety → NO MATCH (food isn't retail)
+
+RULES:
+- If the question names a region, a document from a DIFFERENT region does
+  NOT match, even if it's the same industry.
+- If the question names an industry, a document from a DIFFERENT industry
+  does NOT match, even if it's the same region.
+- Only documents matching ALL named parts count as on-topic.
+- If NOTHING matches all parts, return subject_matches: false.
+
+=========================
 OUTPUT
 =========================
 
@@ -140,8 +179,7 @@ Return ONLY this JSON and NOTHING ELSE:
 No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 
 // ─────────────────────────────────────────────────────────────────────────
-// Context builder — sends ALL hits, no caps. Index positions map 1:1 to
-// the arrays passed in.
+// Context builder
 // ─────────────────────────────────────────────────────────────────────────
 const ITEM_MAX_CHARS = 350;
 
@@ -149,7 +187,6 @@ function buildCoverageContext(clientHits, customSourceHits) {
   const parts = [];
   const indexMap = [];
 
-  // Order: non-SEC matched first, non-SEC unmatched next, SEC last, then custom.
   const nonSecMatched   = (clientHits || []).filter((h) => h._matched && !h._sec);
   const nonSecUnmatched = (clientHits || []).filter((h) => !h._matched && !h._sec);
   const secHits         = (clientHits || []).filter((h) => h._sec);
@@ -201,10 +238,6 @@ function findBalancedJson(s) {
   return null;
 }
 
-/**
- * Map the LLM's 1-based indices back to the original hits.
- * Returns { filteredClientHits, filteredCustomHits }.
- */
 function applyIndexFilter(indexMap, indices, clientHits, customSourceHits) {
   const wanted = new Set(indices);
   const filteredClient = [];
@@ -223,7 +256,83 @@ function applyIndexFilter(indexMap, indices, clientHits, customSourceHits) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Public: general coverage
+// Strict framework term check
+//
+// Given the router's parsing of the question (sector_term +
+// entity_mentions) and a set of LLM-approved document indices, this
+// drops any document that doesn't contain every single term in its
+// title + text.
+// ─────────────────────────────────────────────────────────────────────────
+const STOP_TERMS = new Set([
+  'sector', 'industry', 'market', 'business', 'the', 'and', 'for', 'of', 'in',
+]);
+
+function normalizeTerm(t) {
+  return String(t || '')
+    .toLowerCase()
+    .replace(/[^\w\s&'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildRequiredTerms(routerResult) {
+  const terms = new Set();
+
+  if (routerResult && typeof routerResult.sector_term === 'string' && routerResult.sector_term.trim()) {
+    const s = normalizeTerm(routerResult.sector_term);
+    if (s && !STOP_TERMS.has(s)) terms.add(s);
+  }
+
+  if (routerResult && Array.isArray(routerResult.entity_mentions)) {
+    for (const e of routerResult.entity_mentions) {
+      const n = normalizeTerm(e);
+      if (!n) continue;
+      if (STOP_TERMS.has(n)) continue;
+      terms.add(n);
+    }
+  }
+
+  return [...terms];
+}
+
+function documentContainsTerm(ref, term) {
+  const parts = [];
+  if (ref.title) parts.push(ref.title);
+  if (ref.chunk_text) parts.push(ref.chunk_text);
+  if (ref.payload?.title) parts.push(ref.payload.title);
+  if (ref.payload?.chunk_text) parts.push(ref.payload.chunk_text);
+  const haystack = normalizeTerm(parts.join(' '));
+  if (!haystack) return false;
+  return haystack.includes(term);
+}
+
+function strictFilterByTerms(indexMap, indices, routerResult) {
+  const terms = buildRequiredTerms(routerResult);
+  if (terms.length === 0) return { keptIndices: indices, terms: [] };
+
+  const kept = [];
+  for (const idx of indices) {
+    const entry = indexMap[idx - 1];
+    if (!entry) continue;
+    const ref = entry.ref;
+
+    const hasAll = terms.every((t) => documentContainsTerm(ref, t));
+    if (hasAll) {
+      kept.push(idx);
+    } else {
+      const missing = terms.filter((t) => !documentContainsTerm(ref, t));
+      const title = ref.title || ref.payload?.title || '(untitled)';
+      console.log(
+        `[FrameworkStrictFilter] DROP "${String(title).slice(0, 80)}" — missing terms [${missing.join(', ')}]`
+      );
+    }
+  }
+
+  return { keptIndices: kept, terms };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public: general coverage (non-framework)
 // ─────────────────────────────────────────────────────────────────────────
 async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   const { text: context, indexMap } = buildCoverageContext(clientHits, customSourceHits);
@@ -274,7 +383,6 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
     ? parsed.on_topic_indices.filter((n) => Number.isInteger(n) && n >= 1 && n <= indexMap.length)
     : [];
 
-  // If covered is true but indices came back empty, keep everything (fail open).
   if (covered && indices.length === 0) {
     indices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
     console.log(`[TopicalCoverage] covered=true but no indices — keeping all ${indices.length}`);
@@ -297,9 +405,9 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Public: framework-only coverage
+// Public: framework coverage + strict term check
 // ─────────────────────────────────────────────────────────────────────────
-async function checkFrameworkSubjectCoverage(question, clientHits, customSourceHits) {
+async function checkFrameworkSubjectCoverage(question, clientHits, customSourceHits, routerResult = null) {
   const { text: context, indexMap } = buildCoverageContext(clientHits, customSourceHits);
 
   if (!context || context.trim().length < 20) {
@@ -333,28 +441,52 @@ async function checkFrameworkSubjectCoverage(question, clientHits, customSourceH
     return { covered: true, confidence: 0.0, reason: 'parse failed', onTopicIndices: null, _fallback: true };
   }
 
-  const covered = parsed.subject_matches === true;
+  const llmCovered = parsed.subject_matches === true;
   const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
 
-  let indices = Array.isArray(parsed.on_topic_indices)
+  let llmIndices = Array.isArray(parsed.on_topic_indices)
     ? parsed.on_topic_indices.filter((n) => Number.isInteger(n) && n >= 1 && n <= indexMap.length)
     : [];
 
-  if (covered && indices.length === 0) {
-    indices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
+  if (llmCovered && llmIndices.length === 0) {
+    llmIndices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
   }
 
-  const filtered = applyIndexFilter(indexMap, indices, clientHits, customSourceHits);
+  // ── Strict deterministic filter using router's sector + entities ──
+  let finalIndices = llmIndices;
+  if (routerResult) {
+    const { keptIndices, terms } = strictFilterByTerms(indexMap, llmIndices, routerResult);
+    if (terms.length > 0) {
+      console.log(
+        `[FrameworkStrictFilter] terms=[${terms.join(', ')}] LLM-kept=${llmIndices.length} strict-kept=${keptIndices.length}`
+      );
+      finalIndices = keptIndices;
+    }
+  }
+
+  const covered = llmCovered && finalIndices.length > 0;
+  const filtered = applyIndexFilter(indexMap, finalIndices, clientHits, customSourceHits);
+
+  // Build a clear reason. If the LLM said "covered" but the strict term
+  // filter emptied the list, the LLM's own reason no longer reflects
+  // reality — replace it with something honest.
+  let finalReason = reason;
+  if (llmCovered && finalIndices.length === 0) {
+    const terms = buildRequiredTerms(routerResult);
+    finalReason = terms.length > 0
+      ? `No documents match all parts of the subject (${terms.join(' + ')}).`
+      : 'No documents match the full subject of the question.';
+  }
 
   console.log(
-    `[FrameworkCoverage] subject_matches=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
+    `[FrameworkCoverage] subject_matches=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${finalReason}"`
   );
 
   return {
     covered,
     confidence: covered ? 1 : 0,
-    reason,
-    onTopicIndices: indices,
+    reason: finalReason,
+    onTopicIndices: finalIndices,
     filteredClientHits: filtered.filteredClientHits,
     filteredCustomHits: filtered.filteredCustomHits,
   };

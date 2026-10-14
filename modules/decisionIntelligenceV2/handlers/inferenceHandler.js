@@ -393,7 +393,7 @@ async function runLegacyFlatAnswer(question, clientHits, customSourceHits, userP
 // ─────────────────────────────────────────────────────────────────────────
 // Main handler
 // ─────────────────────────────────────────────────────────────────────────
-async function buildInferenceAnswer(question, clientHits = [], customSourceHits = []) {
+async function buildInferenceAnswer(question, clientHits = [], customSourceHits = [], routerResult = null) {
   if (!clientHits.length && !customSourceHits.length) {
     return {
       report: null,
@@ -407,7 +407,7 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
   const isFrameworkQuestion = FRAMEWORK_RE.test(question);
 
   const coverage = isFrameworkQuestion
-    ? await checkFrameworkSubjectCoverage(question, clientHits, customSourceHits)
+    ? await checkFrameworkSubjectCoverage(question, clientHits, customSourceHits, routerResult)
     : await checkTopicalCoverage(question, clientHits, customSourceHits);
 
   if (isFrameworkQuestion) {
@@ -488,7 +488,7 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       const sanitized = sanitizeSectionsReport(report, headings, question);
       return {
         report: sanitized,
-        sources: collectSources(filteredClientHits, filteredCustomHits),
+        sources: collectSources(filteredClientHits, filteredCustomHits, isFrameworkQuestion),
       };
     }
 
@@ -508,19 +508,25 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
 
   return {
     report: legacyReport,
-    sources: collectSources(filteredClientHits, filteredCustomHits),
+    sources: collectSources(filteredClientHits, filteredCustomHits, isFrameworkQuestion),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Source collection
 // ─────────────────────────────────────────────────────────────────────────
-function collectSources(clientHits, customSourceHits) {
+function collectSources(clientHits, customSourceHits, isFrameworkQuestion = false) {
   const out = [];
 
   const matched   = clientHits.filter((h) => h._matched);
   const unmatched = clientHits.filter((h) => !h._matched);
-  const ordered   = matched.length > 0 ? matched : unmatched.slice(0, 3);
+
+  // Framework questions: include every client hit the coverage filter kept
+  // (the writer saw them all, so the sources panel should reflect that).
+  // Normal questions: keep the existing matched-first / top-3-unmatched logic.
+  const ordered = isFrameworkQuestion
+    ? [...matched, ...unmatched]
+    : (matched.length > 0 ? matched : unmatched.slice(0, 3));
 
   const seenArticles = new Set();
   for (const h of ordered) {

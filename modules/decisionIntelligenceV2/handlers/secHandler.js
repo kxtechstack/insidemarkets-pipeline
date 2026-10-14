@@ -440,6 +440,16 @@ async function runNumericPath(question, intent) {
 }
 
 async function runSectorFrameworkPath(question, sectorTermFromRouter = null) {
+  // If the question names a non-US geography, skip this path entirely.
+  // Our ticker allowlists are US-listed companies only — injecting them
+  // for a non-US question puts Walmart/Amazon/JPMorgan 10-Ks into a
+  // "Saudi retail" or "UAE banking" report, which is wrong.
+  const nonUS = detectNonUSGeography(question);
+  if (nonUS) {
+    console.log(`[secHandler:sector] non-US geography "${nonUS}" — skipping SEC sector injection`);
+    return null;
+  }
+
   let sectorTerm = sectorTermFromRouter && String(sectorTermFromRouter).trim();
 
   if (!sectorTerm) {
