@@ -9,16 +9,11 @@
  * TWO LLM calls:
  *   1. Schema designer — designs 4-5 tailored headings for this question
  *   2. Writer          — fills those headings with bullets from context
- *
- * No SEC. No frameworks hardcoded. Dynamic structure.
- * Prompts stay in code until Stage 6.
  */
 
 const { callLLM } = require('../../llmClient');
 const { checkTopicalCoverage, checkFrameworkSubjectCoverage } = require('./topicalCoverage');
-// ─────────────────────────────────────────────────────────────────────────
-// Call 1 — schema designer
-// ─────────────────────────────────────────────────────────────────────────
+
 const SCHEMA_DESIGNER_PROMPT = `You design the section structure for a rich market intelligence report.
 
 Given a client's question, return 4-5 headings that would best organise
@@ -64,9 +59,6 @@ Return ONLY this JSON:
 
 Return ONLY the JSON. No markdown fences, no explanation.`;
 
-// ─────────────────────────────────────────────────────────────────────────
-// Call 2 — writer
-// ─────────────────────────────────────────────────────────────────────────
 const WRITER_PROMPT = `You are a senior market intelligence analyst producing a rich report for a client.
 
 You have been given retrieved signals and uploaded documents from the client's own data, plus a required section structure. Fill each section with substantive bullets drawn from the context.
@@ -123,7 +115,7 @@ function buildContext(clientHits, customHits) {
     let text = h.chunk_text || '';
     if (text.length > ITEM_MAX_CHARS) text = text.slice(0, ITEM_MAX_CHARS) + '…';
     const label = h._sec ? '[SEC FILING]' : '[CLIENT SIGNAL]';
-parts.push(`${label} ${title}\n${text}`);
+    parts.push(`${label} ${title}\n${text}`);
   }
 
   const customPool = (customHits || []).slice(0, MAX_CUSTOM_CHUNKS);
@@ -137,9 +129,6 @@ parts.push(`${label} ${title}\n${text}`);
   return parts.join('\n\n---\n\n');
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// JSON parsing helpers (same pattern as inferenceHandler)
-// ─────────────────────────────────────────────────────────────────────────
 function stripFences(raw) {
   return String(raw || '')
     .trim()
@@ -205,9 +194,6 @@ function parseJsonWithTruncation(raw, label) {
   return tryParseJson(jsonBlock, label);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Fallback headings when schema designer fails
-// ─────────────────────────────────────────────────────────────────────────
 const FALLBACK_HEADINGS = [
   'Market Context',
   'Key Developments',
@@ -215,9 +201,6 @@ const FALLBACK_HEADINGS = [
   'Risks and Considerations',
 ];
 
-// ─────────────────────────────────────────────────────────────────────────
-// Main handler
-// ─────────────────────────────────────────────────────────────────────────
 async function buildDecisionAnswer(question, clientHits = [], customSourceHits = []) {
   if (!clientHits.length && !customSourceHits.length) {
     return {
@@ -228,18 +211,6 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     };
   }
 
-    // ── Topical coverage check ─────────────────────────────────────────
-  // Before spending a writer call, verify the retrieved chunks are actually
-  // about the same topic as the question. Stops the writer from reframing
-  // "cosmetics" chunks into a "retail" answer.
-  //
-  // For framework questions (SWOT / PESTLE / Five Forces / Risk Analysis),
-  // we still check the SUBJECT — but not the task. Those questions ask the
-  // writer to CONSTRUCT the framework from raw signals, so no document ever
-  // "contains" a SWOT and the normal gate wrongly fails them. The subject-
-  // only checker (checkFrameworkSubjectCoverage) asks the AI just one
-  // question: "are these documents about the same company / industry /
-  // region?" — ignoring the framework word entirely.
   const FRAMEWORK_RE = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i;
   const isFrameworkQuestion = FRAMEWORK_RE.test(question);
 
@@ -261,7 +232,16 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     };
   }
 
-  // ── Call 1: design the section structure ────────────────────────────
+  // Filter hits to only the on-topic ones.
+  const filteredClientHits = Array.isArray(coverage.filteredClientHits)
+    ? coverage.filteredClientHits
+    : clientHits;
+  const filteredCustomHits = Array.isArray(coverage.filteredCustomHits)
+    ? coverage.filteredCustomHits
+    : customSourceHits;
+
+  console.log(`[decisionHandler] after coverage filter: ${filteredClientHits.length} client + ${filteredCustomHits.length} custom`);
+
   let headings = FALLBACK_HEADINGS;
 
   try {
@@ -291,8 +271,7 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     console.log(`[decisionHandler] schema designer failed: ${err.message}`);
   }
 
-  // ── Call 2: write the sections ──────────────────────────────────────
-  const context = buildContext(clientHits, customSourceHits);
+  const context = buildContext(filteredClientHits, filteredCustomHits);
 
   const headingsBlock = headings
     .map((h, i) => `${i + 1}. ${h}`)
@@ -312,19 +291,11 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
       ],
       { temperature: 0.2, max_tokens: 2500, timeout: 120000 }
     );
-
-    if (process.env.DI_V2_DEBUG_LLM === '1') {
-      console.log('[decisionHandler] RAW WRITER OUTPUT:');
-      console.log(writerRaw);
-      console.log('[decisionHandler] END RAW');
-    }
-
     report = parseJsonWithTruncation(writerRaw, 'writer');
   } catch (err) {
     console.log(`[decisionHandler] writer LLM call failed: ${err.message}`);
   }
 
-  // Retry once if writer failed
   if (!report || !Array.isArray(report.sections)) {
     console.log(`[decisionHandler] writer retry with stricter instruction`);
     try {
@@ -341,20 +312,15 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     }
   }
 
-  // Sanitize sections
   const sanitizedReport = sanitizeReport(report, headings, question);
 
   return {
     report: sanitizedReport,
-    sources: collectSources(clientHits, customSourceHits),
+    sources: collectSources(filteredClientHits, filteredCustomHits),
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Sanitize the writer output — enforce heading list, shape, and types
-// ─────────────────────────────────────────────────────────────────────────
 function sanitizeReport(report, headings, question) {
-  // Build a map from heading → points (case-insensitive)
   const byHeading = new Map();
   if (report && Array.isArray(report.sections)) {
     for (const s of report.sections) {
@@ -367,13 +333,11 @@ function sanitizeReport(report, headings, question) {
     }
   }
 
-  // Force the sections to be exactly the required headings, in order
   const finalSections = headings.map((h) => ({
     heading: h,
     points: byHeading.get(h.toLowerCase()) || ['No relevant data in the current dataset.'],
   }));
 
-  // Fallback if no report at all
   if (!report) {
     return {
       title: question,
@@ -391,9 +355,6 @@ function sanitizeReport(report, headings, question) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Source collection — same rules as inferenceHandler
-// ─────────────────────────────────────────────────────────────────────────
 function collectSources(clientHits, customSourceHits) {
   const out = [];
 

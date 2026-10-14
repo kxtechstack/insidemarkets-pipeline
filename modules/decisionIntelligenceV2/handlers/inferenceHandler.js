@@ -7,21 +7,16 @@
  *         (NO SEC — inference is client + custom only)
  * Output: { report, sources }
  *
- * TWO LLM calls now (matching the decision handler's pattern):
+ * TWO LLM calls (matching the decision handler's pattern):
  *   1. Schema designer — designs 3-5 tailored headings for this question
  *   2. Writer          — fills those headings with bullets from context
- *
- * 
- * If the schema designer fails or the writer returns an unparseable shape,
- * the handler falls back to the legacy flat { title, bodyText } shape.
- * The external function signature and return type are unchanged.
  */
 
 const { callLLM } = require('../../llmClient');
 const { checkTopicalCoverage, checkFrameworkSubjectCoverage } = require('./topicalCoverage');
 
 // ─────────────────────────────────────────────────────────────────────────
-// Call 1 — schema designer (same pattern as decisionHandler)
+// Call 1 — schema designer
 // ─────────────────────────────────────────────────────────────────────────
 const SCHEMA_DESIGNER_PROMPT = `You design the section structure for a concise market intelligence answer.
 
@@ -59,7 +54,7 @@ Return ONLY this JSON:
 Return ONLY the JSON. No markdown fences, no explanation.`;
 
 // ─────────────────────────────────────────────────────────────────────────
-// Call 2 — writer (fills the headings, matching decisionHandler's shape)
+// Call 2 — writer
 // ─────────────────────────────────────────────────────────────────────────
 const WRITER_PROMPT = `You are a market intelligence analyst producing a concise, direct answer to a client's question.
 
@@ -97,7 +92,7 @@ Critical formatting requirements:
 - Return ONLY the JSON object.`;
 
 // ─────────────────────────────────────────────────────────────────────────
-// Legacy flat-text prompt — used ONLY as fallback if schema path fails.
+// Legacy flat-text prompt — fallback only
 // ─────────────────────────────────────────────────────────────────────────
 const INFERENCE_PROMPT = `You are a market intelligence analyst writing a short, direct answer to a client's question.
 
@@ -328,12 +323,6 @@ async function runLegacyFlatAnswer(question, clientHits, customSourceHits, userP
     return null;
   }
 
-  if (process.env.DI_V2_DEBUG_LLM === '1') {
-    console.log('[inferenceHandler] RAW LEGACY LLM OUTPUT:');
-    console.log(raw);
-    console.log('[inferenceHandler] END RAW');
-  }
-
   const parsed = parseJsonWithTruncation(raw, 'legacy');
 
   if (!parsed || typeof parsed.bodyText !== 'string') {
@@ -364,7 +353,6 @@ async function runLegacyFlatAnswer(question, clientHits, customSourceHits, userP
       console.log(`[inferenceHandler] legacy retry LLM call failed: ${err.message}`);
     }
 
-    // Plain-prose fallback
     console.log(`[inferenceHandler] legacy JSON failed twice — falling back to plain-prose answer`);
     try {
       const plainRaw = await callLLM(
@@ -405,17 +393,6 @@ async function runLegacyFlatAnswer(question, clientHits, customSourceHits, userP
 // ─────────────────────────────────────────────────────────────────────────
 // Main handler
 // ─────────────────────────────────────────────────────────────────────────
-/**
- * @param {string} question
- * @param {Array}  clientHits           retrieval hits from client signals
- * @param {Array}  customSourceHits     retrieval hits from custom sources
- * @returns {Promise<{
- *   report: { title, sections, bottom_line } | { title, bodyText } | null,
- *   sources: Array,
- *   _empty?: boolean,
- *   _reason?: string,
- * }>}
- */
 async function buildInferenceAnswer(question, clientHits = [], customSourceHits = []) {
   if (!clientHits.length && !customSourceHits.length) {
     return {
@@ -425,13 +402,7 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       _reason: 'no client signals or uploaded documents matched the question',
     };
   }
-     // ── Topical coverage check ─────────────────────────────────────────
-  // Before spending a writer call, verify the retrieved chunks are actually
-  // about the same topic as the question. Stops the writer from reframing
-  // "cosmetics" chunks into a "retail" answer.
-  //
-  // For framework questions, use the subject-only checker — see
-  // decisionHandler.js for full rationale.
+
   const FRAMEWORK_RE = /\b(swot|pestle|pestel|five\s*forces|5\s*forces|porter|risk\s*analysis|risk\s*categor)/i;
   const isFrameworkQuestion = FRAMEWORK_RE.test(question);
 
@@ -453,14 +424,23 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
     };
   }
 
-  const context = buildContext(clientHits, customSourceHits);
+  // Filter hits to only the on-topic ones. The coverage check returned
+  // filteredClientHits / filteredCustomHits based on the LLM's index list.
+  const filteredClientHits = Array.isArray(coverage.filteredClientHits)
+    ? coverage.filteredClientHits
+    : clientHits;
+  const filteredCustomHits = Array.isArray(coverage.filteredCustomHits)
+    ? coverage.filteredCustomHits
+    : customSourceHits;
+
+  console.log(`[inferenceHandler] after coverage filter: ${filteredClientHits.length} client + ${filteredCustomHits.length} custom`);
+
+  const context = buildContext(filteredClientHits, filteredCustomHits);
   const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
 
-  // ── Call 1: design headings ──────────────────────────────────────────
   const headings = await designInferenceSchema(question);
 
   if (headings) {
-    // ── Call 2 (schema path): writer fills the headings ───────────────
     const headingsBlock = headings
       .map((h, i) => `${i + 1}. ${h}`)
       .join('\n');
@@ -488,7 +468,6 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       report = parseJsonWithTruncation(writerRaw, 'inference-writer');
     }
 
-    // Retry once with stricter instruction
     if (!report || !Array.isArray(report.sections)) {
       console.log(`[inferenceHandler] schema writer retry with stricter instruction`);
       try {
@@ -509,15 +488,14 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       const sanitized = sanitizeSectionsReport(report, headings, question);
       return {
         report: sanitized,
-        sources: collectSources(clientHits, customSourceHits),
+        sources: collectSources(filteredClientHits, filteredCustomHits),
       };
     }
 
     console.log(`[inferenceHandler] schema writer failed twice — falling back to legacy flat shape`);
   }
 
-  // ── Fallback: legacy flat path ───────────────────────────────────────
-  const legacyReport = await runLegacyFlatAnswer(question, clientHits, customSourceHits, userPrompt);
+  const legacyReport = await runLegacyFlatAnswer(question, filteredClientHits, filteredCustomHits, userPrompt);
 
   if (!legacyReport) {
     return {
@@ -530,12 +508,12 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
 
   return {
     report: legacyReport,
-    sources: collectSources(clientHits, customSourceHits),
+    sources: collectSources(filteredClientHits, filteredCustomHits),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Source collection — matched only, fallback to top 3 un-matched
+// Source collection
 // ─────────────────────────────────────────────────────────────────────────
 function collectSources(clientHits, customSourceHits) {
   const out = [];

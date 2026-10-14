@@ -3,17 +3,12 @@
  *
  * Pre-writer topical relevance check.
  *
- * Before the writer runs, this asks an LLM one question: are the retrieved
- * chunks actually about the same topic as the question? If not, the handler
- * short-circuits to a no-data response, avoiding a fabricated report built
- * from off-topic chunks (e.g. "Korea cosmetics" chunks reframed into a
- * "Korea retail" answer).
- *
- * Prompt lives in code for now; moves to public.prompts as
- * 'di_topical_coverage_v1' when DI V2 prompts move to the DB.
+ * Asks the LLM: are the retrieved chunks actually about the same topic as
+ * the question? If yes, returns which specific documents are on-topic so
+ * the caller can filter out the off-topic ones before writing.
  *
  * Fails open: any LLM error, timeout, or unparseable response returns
- * { covered: true } so a transient issue never blocks a real answer.
+ * { covered: true, onTopicIndices: null } so a transient issue never blocks.
  */
 
 const { callLLM } = require('../../llmClient');
@@ -22,66 +17,68 @@ const TOPICAL_COVERAGE_PROMPT = `You are a strict topical relevance checker for 
 
 You will be given:
   (1) a user's question
-  (2) the titles and excerpts of documents the system retrieved from the client's data
+  (2) a numbered list of documents the system retrieved from the client's data
 
-Your job: decide whether the retrieved documents ACTUALLY discuss the same topic as the question. If they do, a downstream analyst will write an answer. If they don't, the system will say "no relevant data" instead of writing a fabricated answer.
-
-=========================
-WHAT COUNTS AS "COVERED"
-=========================
-
-YES — the documents cover the question when:
-  - They discuss the same sector, industry, or domain the question asks about.
-  - A cosmetics document counts for a cosmetics question.
-  - A broader document covers a narrower question (a "Korea beauty market" document covers a "Korea skincare market" question).
-  - A narrower document covers a broader question IF the narrower topic is a clear sub-topic of the broader question (a "Korea cosmetics e-commerce" document covers a "Korea beauty market" question).
-  - A differently-angled document on the same subject (a "Korea cosmetics regulation" document covers a "Korea cosmetics market" question).
-
-NO — the documents do NOT cover the question when:
-  - They discuss a DIFFERENT SECTOR. A "Korea cosmetics" document does NOT cover a "Korea retail" question. Cosmetics is not retail, retail is not cosmetics, even though they overlap commercially.
-  - They discuss a DIFFERENT INDUSTRY. A "banking" document does NOT cover a "fintech" question.
-  - They discuss a DIFFERENT COUNTRY or region than the question is bounded to.
-  - They discuss a DIFFERENT SUBJECT ENTIRELY.
-
-The bar is: could a careful analyst honestly write an answer to THIS question using ONLY these documents, without having to reframe one subject as another? If they'd have to say "well, the data is about cosmetics, but I'll write about retail anyway" — the answer is NO.
+Your job has TWO parts:
+  A. Decide whether AT LEAST ONE document discusses the same topic as the question.
+  B. Identify WHICH specific documents are on-topic (by their numbers).
 
 =========================
-IMPORTANT — do not be fooled by shared vocabulary
+PART A — COVERED OR NOT
 =========================
 
-Two documents can share the words "Korea," "market," "growth," "consumer," and still be about completely different topics. Do not pass a document just because it shares words with the question. Judge the actual subject.
+YES — the batch is covered when AT LEAST ONE document discusses the same
+sector, industry, or domain as the question. The bar for coverage is low:
+one good document is enough.
 
-If the question is "What is happening in Korean retail?" and every document is about Korean cosmetics — that is NOT coverage, even if the documents mention "retail distribution" or "consumer demand" in passing.
+NO — the batch is not covered when EVERY document is about a different
+sector, industry, country, or subject than the question.
 
 =========================
-FRAMEWORK QUESTIONS — CRITICAL
+PART B — WHICH DOCUMENTS ARE ON-TOPIC
 =========================
 
-If the question asks you to PRODUCE an analysis using a framework
-(SWOT, PESTLE, PESTEL, Five Forces, Porter's Five Forces, Risk Analysis,
-or an equivalent structured framework), do NOT fail coverage just because
-the documents don't already contain that framework's output.
+You must return the list of document numbers that ARE about the same
+topic as the question.
 
-The framework output will be CONSTRUCTED downstream by an analyst FROM
-these documents. Your job is only to check that the documents are about
-the same SUBJECT as the question — the company, sector, or market the
-framework is being applied to. Completely ignore the framework verb
-("do a SWOT", "run a PESTLE", "analyze risks") when judging coverage.
+A document is "on-topic" if an analyst could pull a real fact from it
+that answers or directly supports the question.
 
-Examples:
-  Q: "Do a SWOT analysis for Estée Lauder."
-  Documents: Estée Lauder operations, financials, acquisitions.
-  → covered: TRUE. Documents are about Estée Lauder.
+A document is "off-topic" if it only shares general vocabulary
+("beauty", "market", "growth") but its actual subject is different.
 
-  Q: "SWOT for the cosmetics industry."
-  Documents: cosmetics brands, market trends, regulations.
-  → covered: TRUE. Documents are about cosmetics.
+Be strict about Part B. A document about "Middle East beauty market trends"
+is OFF-TOPIC for a question specifically about "Beautyworld Middle East 2026
+exhibition" — same region, same industry, but different subject.
 
-  Q: "SWOT for Enveda."
-  Documents: Estée Lauder, M·A·C, DECIEM.
-  → covered: FALSE. Different subject — Enveda not present.
+=========================
+WORKED EXAMPLES
+=========================
 
-The framework verb never affects coverage. Only the subject noun does.
+Q: "What's the status of AI-powered acne prescribing in Utah?"
+Documents: 5 about Utah acne pilots, 1 PDF about global beauty.
+→ covered: true
+→ on_topic_indices: [1,2,3,4,5]   (the PDF is off-topic)
+→ reason: "Five documents describe the Utah acne pilot program."
+
+Q: "What's happening at Beautyworld Middle East 2026?"
+Documents: 1 about Pakistan pavilion at Beautyworld ME 2026, 12 about
+general Middle East beauty market trends, funding, and unrelated events.
+→ covered: true
+→ on_topic_indices: [1]   (only the Pakistan article is about the event)
+→ reason: "Only one document discusses the specific event."
+
+Q: "What's the EU rule on cosmetic packaging?"
+Documents: 8 about EU packaging regulations, 2 about UK/Italy packaging,
+1 PDF about global beauty.
+→ covered: true
+→ on_topic_indices: [1,2,3,4,5,6,7,8,9,10]  (the PDF is off-topic)
+
+Q: "Which company acquired ATTAIN Cosmetics?"
+Documents: 3 about Macquarie/Hwasung/NowCos, 0 mentioning ATTAIN.
+→ covered: false
+→ on_topic_indices: []
+→ reason: "No document mentions ATTAIN Cosmetics."
 
 =========================
 OUTPUT
@@ -91,27 +88,22 @@ Return ONLY this JSON object and NOTHING ELSE:
 
 {
   "covered": true | false,
-  "confidence": 0.0 - 1.0,
+  "on_topic_indices": [<1-based document numbers that are on-topic>],
   "reason": "<one short sentence>"
 }
 
-Bias: if the documents clearly share the same main topic as the question, return true. Return false only when there is a real domain mismatch.
-
-No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
+Rules:
+- If covered is false, on_topic_indices must be [].
+- If covered is true, on_topic_indices must contain at least one number.
+- Numbers must be integers, 1-based, matching the document numbers given.
+- No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 
 // ─────────────────────────────────────────────────────────────────────────
-// Framework-only prompt — judges SUBJECT match only.
-//
-// Framework questions (SWOT / PESTLE / Five Forces / Risk Analysis) ask the
-// writer to BUILD the framework from raw signals, so the documents will never
-// "contain a SWOT" already. The normal coverage prompt gets confused by this
-// and wrongly fails good questions. This prompt tells the AI to ignore the
-// framework word entirely and only check whether the documents are about the
-// same subject (company / sector / region) as the question.
+// Framework-only prompt
 // ─────────────────────────────────────────────────────────────────────────
 const FRAMEWORK_SUBJECT_PROMPT = `You are checking whether retrieved documents are about the same SUBJECT as a user's question.
 
-The user's question may ask for a SWOT, a PESTLE, Five Forces, or a Risk Analysis. IGNORE that request word completely. The framework will be built later, from these documents. You are NOT checking whether the documents contain a SWOT (they won't — that is expected). You are ONLY checking whether the documents are about the same subject as the question.
+The user's question asks for a SWOT, PESTLE, Five Forces, or Risk Analysis. IGNORE that request word. It is not part of the subject — it's the SHAPE of the answer that will be built later. Only check whether the documents are about the same subject as the question.
 
 =========================
 WHAT IS "THE SUBJECT"?
@@ -119,82 +111,19 @@ WHAT IS "THE SUBJECT"?
 
 The subject is the company, industry, sector, market, or region the question is about.
 
-Examples:
-
-  Q: "Do a SWOT analysis for Estée Lauder."
-     Subject = Estée Lauder (a company)
-     Documents about Estée Lauder's operations, financials, products → subject matches.
-     Documents about cosmetics in general → subject matches too (Estée Lauder is a cosmetics company, and the docs cover that sector).
-     Documents about airlines or auto makers → subject does NOT match.
-
-  Q: "SWOT for Enveda."
-     Subject = Enveda (a company)
-     Documents about Enveda → subject matches.
-     Documents about Estée Lauder or Ulta → subject does NOT match.
-
-  Q: "PESTLE for the cosmetics industry."
-     Subject = cosmetics industry
-     Documents about cosmetics brands, cosmetics regulation, cosmetics market trends → subject matches.
-     Documents about banking or airlines → subject does NOT match.
-
-  Q: "Risk analysis for entering the K-beauty market."
-     Subject = K-beauty market
-     Documents about K-beauty, Korean skincare, Korean beauty trends → subject matches.
-     Documents about German healthcare or Indian auto → subject does NOT match.
-
-  Q: "SWOT for the Saudi Arabia retail industry."
-     Subject = Saudi Arabia retail
-     Documents about Saudi Arabia retail → subject matches.
-     Documents about cosmetics in Korea or beauty in France → subject does NOT match.
-     Documents that mention "Saudi Arabia" but only about oil, or mention "retail" but only about US retail → subject does NOT match.
-
 =========================
-RULES — READ CAREFULLY
+RULES
 =========================
 
-1. The question will contain a framework word: "SWOT", "PESTLE", "PESTEL", "Five Forces", "Porter's Five Forces", "Risk Analysis", or "Risk Categorization".
-   DELETE that word from the question in your mind. It is not part of the subject. It is only the SHAPE of the answer that will be built LATER.
-   The question "SWOT for Enveda" becomes "Enveda" in your head.
-   The question "Do a PESTLE analysis for the cosmetics industry" becomes "the cosmetics industry".
-   The question "Five forces for the US airline industry" becomes "the US airline industry".
-   Never mention SWOT, PESTLE, Five Forces, or Risk Analysis in your reason. Ever.
-
-2. After removing that framework word, ask yourself ONE question:
-   "Is AT LEAST ONE of the retrieved documents about the same subject as what's left?"
-
-3. "Same subject" means: the same company, the same industry, the same sector, the same market, or the same region.
-
-   IMPORTANT — a company document counts as being about the industry it belongs to:
-     - Estée Lauder is a cosmetics company → Estée Lauder's filings count for "the cosmetics industry".
-     - Delta Air Lines is an airline → Delta's filings count for "the US airline industry".
-     - Nestlé is a food company → Nestlé's filings count for "the food industry".
-     - Entergy is a utility company → Entergy's filings do NOT count for "the K-beauty market" (different industry entirely).
-
-   Also note: a specific industry subsector counts for the broader industry.
-     - "K-beauty" is a subsector of "cosmetics" → a K-beauty document counts for "the cosmetics industry".
-     - "skincare" is a subsector of "beauty" → a skincare document counts for "the beauty industry".
-
-4. The batch will very often contain a MIX of on-topic and off-topic documents.
-   You must ONLY care whether AT LEAST ONE document is on-topic.
-   Do NOT fail the batch just because some documents are off-topic — the writer will use the on-topic ones and ignore the rest.
-
-5. Return subject_matches: true if even ONE document is on-subject.
-   Return subject_matches: false ONLY if EVERY SINGLE document in the batch is off-subject.
-
-   Example of the correct way to reason:
-     Q: "SWOT for the cosmetics industry"
-     Batch: 10 client signals about cosmetics, 22 Estée Lauder 10-K chunks, 10 uploaded docs.
-     → subject_matches: TRUE (Estée Lauder is a cosmetics company, and the client signals are about cosmetics)
-
-     Q: "Risk analysis for K-beauty market"
-     Batch: 15 K-beauty client signals, 12 Entergy 10-K chunks.
-     → subject_matches: TRUE (the K-beauty signals are on-topic; Entergy is off-topic but that doesn't matter — one is enough)
-
-     Q: "SWOT for Saudi Arabia retail industry"
-     Batch: 10 cosmetic industry signals, 10 uploaded beauty docs.
-     → subject_matches: FALSE (nothing in the batch is about Saudi Arabia retail)
-
-6. Do NOT judge whether the documents are detailed, complete, contain the framework output, contain any kind of analysis, or mention strengths / weaknesses / opportunities / threats / political / economic / social / technological / legal / environmental factors. NONE of that matters. You are ONLY judging subject match.
+1. Delete the framework word (SWOT / PESTLE / Five Forces / Risk Analysis)
+   from the question in your mind.
+2. Ask: "Is AT LEAST ONE retrieved document about the same subject as
+   what's left?"
+3. A company document counts as about the industry it belongs to. A subsector
+   counts as about the broader industry.
+4. The batch will often mix on-topic and off-topic documents. Only care
+   whether AT LEAST ONE is on-topic. Return true if even one is.
+5. Return the on-topic documents by their numbers.
 
 =========================
 OUTPUT
@@ -204,55 +133,51 @@ Return ONLY this JSON and NOTHING ELSE:
 
 {
   "subject_matches": true | false,
+  "on_topic_indices": [<1-based document numbers that match the subject>],
   "reason": "<one short sentence>"
 }
 
 No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Context builder — sends ALL hits, no caps. Index positions map 1:1 to
+// the arrays passed in.
+// ─────────────────────────────────────────────────────────────────────────
 const ITEM_MAX_CHARS = 350;
-const MAX_CLIENT_HITS = 6;
-const MAX_CUSTOM_HITS = 4;
 
 function buildCoverageContext(clientHits, customSourceHits) {
   const parts = [];
+  const indexMap = [];
 
-  // Order matters here. SEC chunks are marked _matched: true by the SEC
-  // sidecar (secHandler.js), which means a naive "matched first" ordering
-  // makes SEC chunks crowd out the actual client signals retrieved by
-  // semantic similarity to the question. That was the root cause of the
-  // FW6 failure: for "Risk analysis for entering the K-beauty market",
-  // the SEC sidecar injected 12 Entergy 10-K chunks (wrong ticker), and
-  // those crowded out the K-beauty client signals — so the coverage LLM
-  // only saw Entergy documents and correctly said "none are about K-beauty".
-  //
-  // Priority order for the coverage check:
-  //   1. non-SEC matched client hits   — retrieved by similarity, boosted
-  //   2. non-SEC unmatched client hits — retrieved by similarity, not boosted
-  //   3. SEC hits last                 — injected by sidecar, may be off-topic
+  // Order: non-SEC matched first, non-SEC unmatched next, SEC last, then custom.
   const nonSecMatched   = (clientHits || []).filter((h) => h._matched && !h._sec);
   const nonSecUnmatched = (clientHits || []).filter((h) => !h._matched && !h._sec);
   const secHits         = (clientHits || []).filter((h) => h._sec);
-  const clientPool = [...nonSecMatched, ...nonSecUnmatched, ...secHits].slice(0, MAX_CLIENT_HITS);
+  const orderedClient   = [...nonSecMatched, ...nonSecUnmatched, ...secHits];
 
-  for (const h of clientPool) {
+  orderedClient.forEach((h) => {
     const title = h.title || 'Untitled';
     let text = h.chunk_text || '';
     if (text.length > ITEM_MAX_CHARS) text = text.slice(0, ITEM_MAX_CHARS) + '…';
     const label = h._sec ? '[SEC FILING]' : '[CLIENT SIGNAL]';
-    parts.push(`${label} ${title}\n${text}`);
-  }
+    parts.push(`${parts.length + 1}. ${label} ${title}\n${text}`);
+    indexMap.push({ kind: 'client', ref: h });
+  });
 
-  const customPool = (customSourceHits || []).slice(0, MAX_CUSTOM_HITS);
-  for (const c of customPool) {
+  (customSourceHits || []).forEach((c) => {
     const name = c.payload?.source_name || c.payload?.title || 'Uploaded document';
     let text = c.payload?.chunk_text || '';
     if (text.length > ITEM_MAX_CHARS) text = text.slice(0, ITEM_MAX_CHARS) + '…';
-    parts.push(`[UPLOADED] ${name}\n${text}`);
-  }
+    parts.push(`${parts.length + 1}. [UPLOADED] ${name}\n${text}`);
+    indexMap.push({ kind: 'custom', ref: c });
+  });
 
-  return parts.join('\n\n---\n\n');
+  return { text: parts.join('\n\n---\n\n'), indexMap };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────
 function stripFences(raw) {
   return String(raw || '')
     .trim()
@@ -277,19 +202,34 @@ function findBalancedJson(s) {
 }
 
 /**
- * Decides whether the retrieved chunks are actually about the same topic as
- * the question. Returns { covered: boolean, confidence: number, reason: string }.
- *
- * Fails open on any error (returns covered: true) so a transient LLM issue
- * never blocks a real answer.
+ * Map the LLM's 1-based indices back to the original hits.
+ * Returns { filteredClientHits, filteredCustomHits }.
  */
-async function checkTopicalCoverage(question, clientHits, customSourceHits) {
-  const context = buildCoverageContext(clientHits, customSourceHits);
+function applyIndexFilter(indexMap, indices, clientHits, customSourceHits) {
+  const wanted = new Set(indices);
+  const filteredClient = [];
+  const filteredCustom = [];
 
-  // If there's no context at all, there's nothing to check — the caller's
-  // existing empty-check already handles this case, so pass through.
+  indexMap.forEach((entry, i) => {
+    if (!wanted.has(i + 1)) return;
+    if (entry.kind === 'client') filteredClient.push(entry.ref);
+    else filteredCustom.push(entry.ref);
+  });
+
+  return {
+    filteredClientHits: filteredClient,
+    filteredCustomHits: filteredCustom,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public: general coverage
+// ─────────────────────────────────────────────────────────────────────────
+async function checkTopicalCoverage(question, clientHits, customSourceHits) {
+  const { text: context, indexMap } = buildCoverageContext(clientHits, customSourceHits);
+
   if (!context || context.trim().length < 20) {
-    return { covered: true, confidence: 1.0, reason: 'no context to check', _skipped: true };
+    return { covered: true, confidence: 1.0, reason: 'no context to check', onTopicIndices: null, _skipped: true };
   }
 
   let raw;
@@ -297,16 +237,13 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
     raw = await callLLM(
       [
         { role: 'system', content: TOPICAL_COVERAGE_PROMPT },
-        {
-          role: 'user',
-          content: `QUESTION:\n${question}\n\nRETRIEVED DOCUMENTS:\n${context}`,
-        },
+        { role: 'user', content: `QUESTION:\n${question}\n\nRETRIEVED DOCUMENTS:\n${context}` },
       ],
-      { temperature: 0, max_tokens: 200, timeout: 30000 }
+      { temperature: 0, max_tokens: 400, timeout: 45000 }
     );
   } catch (err) {
     console.log(`[TopicalCoverage] LLM call failed — failing open: ${err.message}`);
-    return { covered: true, confidence: 0.0, reason: `check failed: ${err.message}`, _fallback: true };
+    return { covered: true, confidence: 0.0, reason: `check failed: ${err.message}`, onTopicIndices: null, _fallback: true };
   }
 
   if (process.env.DI_V2_DEBUG_LLM === '1') {
@@ -319,7 +256,7 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   const jsonBlock = findBalancedJson(stripped);
   if (!jsonBlock) {
     console.log(`[TopicalCoverage] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
-    return { covered: true, confidence: 0.0, reason: 'unparseable response', _fallback: true };
+    return { covered: true, confidence: 0.0, reason: 'unparseable response', onTopicIndices: null, _fallback: true };
   }
 
   let parsed;
@@ -327,39 +264,46 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
     parsed = JSON.parse(jsonBlock);
   } catch (err) {
     console.log(`[TopicalCoverage] JSON parse failed — failing open: ${err.message}`);
-    return { covered: true, confidence: 0.0, reason: 'parse failed', _fallback: true };
+    return { covered: true, confidence: 0.0, reason: 'parse failed', onTopicIndices: null, _fallback: true };
   }
 
   const covered = parsed.covered === true;
-  const confidence = Number.isFinite(parsed.confidence)
-    ? Math.max(0, Math.min(1, parsed.confidence))
-    : 0.5;
   const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
 
+  let indices = Array.isArray(parsed.on_topic_indices)
+    ? parsed.on_topic_indices.filter((n) => Number.isInteger(n) && n >= 1 && n <= indexMap.length)
+    : [];
+
+  // If covered is true but indices came back empty, keep everything (fail open).
+  if (covered && indices.length === 0) {
+    indices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
+    console.log(`[TopicalCoverage] covered=true but no indices — keeping all ${indices.length}`);
+  }
+
+  const filtered = applyIndexFilter(indexMap, indices, clientHits, customSourceHits);
+
   console.log(
-    `[TopicalCoverage] covered=${covered} confidence=${confidence.toFixed(2)} reason="${reason}"`
+    `[TopicalCoverage] covered=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
   );
 
-  return { covered, confidence, reason };
+  return {
+    covered,
+    confidence: covered ? 1 : 0,
+    reason,
+    onTopicIndices: indices,
+    filteredClientHits: filtered.filteredClientHits,
+    filteredCustomHits: filtered.filteredCustomHits,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Framework-only checker — judges SUBJECT match only.
-//
-// Same return shape as checkTopicalCoverage: { covered, confidence, reason }.
-// Handlers call this instead of checkTopicalCoverage when the question
-// matches the framework regex. All non-framework questions keep using
-// checkTopicalCoverage unchanged.
-//
-// Fails open on error, same as checkTopicalCoverage — if the AI call fails
-// or the JSON is unparseable, we return covered: true so a transient issue
-// never blocks a real answer.
+// Public: framework-only coverage
 // ─────────────────────────────────────────────────────────────────────────
 async function checkFrameworkSubjectCoverage(question, clientHits, customSourceHits) {
-  const context = buildCoverageContext(clientHits, customSourceHits);
+  const { text: context, indexMap } = buildCoverageContext(clientHits, customSourceHits);
 
   if (!context || context.trim().length < 20) {
-    return { covered: true, confidence: 1.0, reason: 'no context to check', _skipped: true };
+    return { covered: true, confidence: 1.0, reason: 'no context to check', onTopicIndices: null, _skipped: true };
   }
 
   let raw;
@@ -367,62 +311,57 @@ async function checkFrameworkSubjectCoverage(question, clientHits, customSourceH
     raw = await callLLM(
       [
         { role: 'system', content: FRAMEWORK_SUBJECT_PROMPT },
-        {
-          role: 'user',
-          content: `QUESTION:\n${question}\n\nRETRIEVED DOCUMENTS:\n${context}`,
-        },
+        { role: 'user', content: `QUESTION:\n${question}\n\nRETRIEVED DOCUMENTS:\n${context}` },
       ],
-      { temperature: 0, max_tokens: 200, timeout: 30000 }
+      { temperature: 0, max_tokens: 400, timeout: 45000 }
     );
   } catch (err) {
     console.log(`[FrameworkCoverage] LLM call failed — failing open: ${err.message}`);
-    return { covered: true, confidence: 0.0, reason: `check failed: ${err.message}`, _fallback: true };
-  }
-
-  if (process.env.DI_V2_DEBUG_LLM === '1') {
-    console.log('[FrameworkCoverage] RAW LLM OUTPUT:');
-    console.log(raw);
-    console.log('[FrameworkCoverage] END RAW');
+    return { covered: true, confidence: 0.0, reason: `check failed: ${err.message}`, onTopicIndices: null, _fallback: true };
   }
 
   const stripped = stripFences(raw);
   const jsonBlock = findBalancedJson(stripped);
   if (!jsonBlock) {
-    console.log(`[FrameworkCoverage] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
-    return { covered: true, confidence: 0.0, reason: 'unparseable response', _fallback: true };
+    return { covered: true, confidence: 0.0, reason: 'unparseable response', onTopicIndices: null, _fallback: true };
   }
 
   let parsed;
   try {
     parsed = JSON.parse(jsonBlock);
   } catch (err) {
-    console.log(`[FrameworkCoverage] JSON parse failed — failing open: ${err.message}`);
-    return { covered: true, confidence: 0.0, reason: 'parse failed', _fallback: true };
+    return { covered: true, confidence: 0.0, reason: 'parse failed', onTopicIndices: null, _fallback: true };
   }
 
   const covered = parsed.subject_matches === true;
   const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
 
+  let indices = Array.isArray(parsed.on_topic_indices)
+    ? parsed.on_topic_indices.filter((n) => Number.isInteger(n) && n >= 1 && n <= indexMap.length)
+    : [];
+
+  if (covered && indices.length === 0) {
+    indices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
+  }
+
+  const filtered = applyIndexFilter(indexMap, indices, clientHits, customSourceHits);
+
   console.log(
-    `[FrameworkCoverage] subject_matches=${covered} reason="${reason}"`
+    `[FrameworkCoverage] subject_matches=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
   );
 
-  return { covered, confidence: covered ? 1 : 0, reason };
+  return {
+    covered,
+    confidence: covered ? 1 : 0,
+    reason,
+    onTopicIndices: indices,
+    filteredClientHits: filtered.filteredClientHits,
+    filteredCustomHits: filtered.filteredCustomHits,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// List-only per-item relevance filter.
-//
-// Given a question and a set of already-filtered candidate signals, ask the
-// LLM which specific candidates genuinely answer the question. Return only
-// those. Runs ONLY on the list path — inference/decision/framework paths
-// keep using checkTopicalCoverage / checkFrameworkSubjectCoverage unchanged.
-//
-// Failure behaviour:
-//   - LLM error, timeout, or unparseable response → return the full input
-//     (fail open, same as today's behaviour) so a transient issue doesn't
-//     hide valid results.
-//   - LLM succeeded and selected an empty list → return [] (honor the LLM).
+// List-only per-item relevance filter — unchanged
 // ─────────────────────────────────────────────────────────────────────────
 const LIST_SELECTION_PROMPT = `You are filtering a list of retrieved signals for a client's question.
 
@@ -447,37 +386,13 @@ RULES
 
 2. Judge the TITLE FIRST — the title is the article's actual subject.
    If the title clearly matches the question, include the candidate
-   regardless of what the excerpt says. The excerpt is a random
-   ~300-character slice of the article body and may not mention the
-   main topic directly, may be from the middle of a paragraph, or may
-   focus on a side detail. Do not reject a candidate just because its
-   excerpt looks off-topic when the title is clearly on-topic.
+   regardless of what the excerpt says.
 
-   Only fall back to judging the excerpt when the title is ambiguous
-   (e.g. generic like "Market Update" or "Industry News").
+3. Do NOT include candidates that merely share vocabulary with the question
+   when the TITLE is also off-topic.
 
-   Worked examples:
-
-     Q: "List recent funding rounds in the Cosmetics industry."
-     Candidate title: "Amoéba Embarks on Final Funding Round to Fuel Commercial Launch"
-     Candidate excerpt: "...for professionals in the field of biocontrol and industrial greentech..."
-     → INCLUDE. The title explicitly says "Funding Round". The excerpt's drift into "biocontrol" is irrelevant — the article IS a funding round article.
-
-     Q: "List recent funding rounds in the Cosmetics industry."
-     Candidate title: "Korea Enacts Dedicated Law to Boost Cosmetics Sector"
-     Candidate excerpt: "...to ensure a resilient, long-term supply chain..."
-     → DO NOT INCLUDE. The title is about a law, not a funding round. No amount of cosmetics-industry relevance makes it a funding round.
-
-     Q: "What are the current import tariff rates for our core products across key markets?"
-     Candidate title: "Canadian Cosmetics Face Tariff Hurdle in US Market"
-     Candidate excerpt: "...Canadian cosmetics manufacturers are facing a significant challenge..."
-     → INCLUDE. The title explicitly says "Tariff Hurdle". A tariff article about a specific market is still a tariff article.
-
-3. Do NOT include candidates that merely share vocabulary with the question when the TITLE is also off-topic.
-   A title about "retail" is NOT relevant to "retail in Saudi Arabia" unless the title mentions Saudi Arabia.
-   A title about "cosmetics regulations in Vietnam" is NOT relevant to "cosmetics regulations in the UK".
-
-4. Do NOT include candidates whose TITLE is about a different industry, different country, or different subject than the question.
+4. Do NOT include candidates whose TITLE is about a different industry,
+   different country, or different subject than the question.
 
 5. If NONE of the candidates answer the question, return "relevant_indices": [].
 
@@ -512,35 +427,22 @@ async function selectRelevantHitsForList(question, clientHits) {
       { temperature: 0, max_tokens: 250, timeout: 30000 }
     );
   } catch (err) {
-    console.log(`[ListSelection] LLM call failed — failing open, returning all ${clientHits.length} hits: ${err.message}`);
+    console.log(`[ListSelection] LLM call failed — failing open: ${err.message}`);
     return clientHits;
-  }
-
-  if (process.env.DI_V2_DEBUG_LLM === '1') {
-    console.log('[ListSelection] RAW LLM OUTPUT:');
-    console.log(raw);
-    console.log('[ListSelection] END RAW');
   }
 
   const stripped = stripFences(raw);
   const jsonBlock = findBalancedJson(stripped);
-  if (!jsonBlock) {
-    console.log(`[ListSelection] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
-    return clientHits;
-  }
+  if (!jsonBlock) return clientHits;
 
   let parsed;
   try {
     parsed = JSON.parse(jsonBlock);
   } catch (err) {
-    console.log(`[ListSelection] JSON parse failed — failing open: ${err.message}`);
     return clientHits;
   }
 
-  if (!Array.isArray(parsed.relevant_indices)) {
-    console.log(`[ListSelection] no relevant_indices array — failing open`);
-    return clientHits;
-  }
+  if (!Array.isArray(parsed.relevant_indices)) return clientHits;
 
   const seen = new Set();
   const selected = [];
@@ -554,8 +456,7 @@ async function selectRelevantHitsForList(question, clientHits) {
   }
 
   console.log(
-    `[ListSelection] selected ${selected.length}/${clientHits.length} relevant ` +
-    `(reason="${parsed.reason || ''}")`
+    `[ListSelection] selected ${selected.length}/${clientHits.length} relevant (reason="${parsed.reason || ''}")`
   );
 
   return selected;
@@ -565,6 +466,7 @@ module.exports = {
   checkTopicalCoverage,
   checkFrameworkSubjectCoverage,
   selectRelevantHitsForList,
+  buildCoverageContext,
   TOPICAL_COVERAGE_PROMPT,
   FRAMEWORK_SUBJECT_PROMPT,
   LIST_SELECTION_PROMPT,

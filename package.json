@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@engram-ai-memory/core": "^0.7.0",
     "@langchain/core": "^1.2.1",
     "@mendable/firecrawl-js": "^4.38.0",
     "@qdrant/js-client-rest": "^1.18.0",

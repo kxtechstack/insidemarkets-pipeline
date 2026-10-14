@@ -18,6 +18,7 @@
 const { getSuggestedQuestions } = require('../decisionIntelligence/chatHistory');
 const { getVerifiedSuggestions } = require('../decisionIntelligence/suggestionEngine');
 const { enrichSourcesWithSignalIds } = require('../decisionIntelligence/enrichSources');
+const { getSmartSuggestions } = require('./suggestions/smartSuggestions');
 
 const DEFAULT_NO_DATA_SUGGESTIONS = [
   'What are the major policy changes affecting my industry?',
@@ -29,30 +30,22 @@ const DEFAULT_NO_DATA_SUGGESTIONS = [
 // ─────────────────────────────────────────────────────────────────────────
 
 async function loadHomeSuggestions(clientId, industry) {
+  // industry kept in the signature for backwards-compat with existing callers.
   try {
-    const homeQs = await getSuggestedQuestions({
-      clientId,
-      surface: 'home',
-      industry,
-      companyName: null,
-    });
-    const list = (homeQs || [])
-      .slice(0, 4)
-      .map((q) => q.question)
-      .filter(Boolean);
-    return list.length ? list : DEFAULT_NO_DATA_SUGGESTIONS;
+    const smart = await getSmartSuggestions(clientId);
+    if (smart && smart.length) return smart;
   } catch (err) {
-    console.log(`[V2 responseBuilder] failed to load home suggestions: ${err.message}`);
-    return DEFAULT_NO_DATA_SUGGESTIONS;
+    console.log(`[V2 responseBuilder] smart suggestions failed (home): ${err.message}`);
   }
+  return DEFAULT_NO_DATA_SUGGESTIONS;
 }
 
 async function loadVerifiedSuggestions(clientId) {
   try {
-    const verified = await getVerifiedSuggestions(clientId, 4);
-    if (verified && verified.length) return verified;
+    const smart = await getSmartSuggestions(clientId);
+    if (smart && smart.length) return smart;
   } catch (err) {
-    console.log(`[V2 responseBuilder] verified suggestions failed: ${err.message}`);
+    console.log(`[V2 responseBuilder] smart suggestions failed (verified): ${err.message}`);
   }
   return DEFAULT_NO_DATA_SUGGESTIONS;
 }
