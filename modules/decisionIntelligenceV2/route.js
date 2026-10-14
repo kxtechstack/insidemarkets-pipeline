@@ -427,10 +427,16 @@ function registerDecisionIntelligenceV2Route(app) {
 
       const { payload, routerResult } = result;
 
-      const assistantContent =
-        payload.type === 'list'
-          ? `List: ${payload.items?.length ?? 0} items`
-          : (payload.report?.title || '').slice(0, 200);
+      let assistantContent;
+      if (payload.greeting && payload.message) {
+        assistantContent = String(payload.message).slice(0, 200);
+      } else if (payload.no_data && payload.message) {
+        assistantContent = String(payload.message).slice(0, 200);
+      } else if (payload.type === 'list') {
+        assistantContent = `List: ${payload.items?.length ?? 0} items`;
+      } else {
+        assistantContent = (payload.report?.title || '').slice(0, 200);
+      }
 
       try {
         await appendMessage({
@@ -628,10 +634,16 @@ function registerDecisionIntelligenceV2Route(app) {
 
       const { payload, routerResult } = result;
 
-      const assistantContent =
-        payload.type === 'list'
-          ? `List: ${payload.items?.length ?? 0} items`
-          : (payload.report?.title || '').slice(0, 200);
+      let assistantContent;
+      if (payload.greeting && payload.message) {
+        assistantContent = String(payload.message).slice(0, 200);
+      } else if (payload.no_data && payload.message) {
+        assistantContent = String(payload.message).slice(0, 200);
+      } else if (payload.type === 'list') {
+        assistantContent = `List: ${payload.items?.length ?? 0} items`;
+      } else {
+        assistantContent = (payload.report?.title || '').slice(0, 200);
+      }
 
       try {
         await appendMessage({
