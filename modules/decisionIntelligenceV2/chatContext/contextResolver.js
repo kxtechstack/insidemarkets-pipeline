@@ -44,6 +44,56 @@ Return ONLY this JSON object:
 }
 
 =========================
+ABSOLUTE FIRST RULE — THIS WINS OVER EVERYTHING BELOW
+=========================
+
+Before applying any other rule in this prompt, run this gate first.
+
+If the current message contains BOTH:
+  (a) a question word (what / where / when / how / why / who / which / whose), AND
+  (b) a named subject the user typed (a company, brand, product, place, or topic)
+
+...then the answer is ALWAYS:
+
+  kind = "new_question"
+  standalone_query = the current message, EXACTLY as the user typed it, verbatim.
+
+Do NOT look at the prior conversation. Do NOT look at the state.
+Do NOT add anything from the previous turn. Do NOT rewrite the message into a
+longer question. Do NOT treat it as a followup, even if the topic is different
+from whatever the conversation was about before.
+
+This rule wins over every other rule below. If a rule below would classify
+the message as "followup", ignore that rule. This rule wins.
+
+Examples:
+
+  Prior turn: "what is happening in korean beauty market"
+  Current:    "what is the update of glossier"
+  → kind = "new_question"
+  → standalone_query = "what is the update of glossier"
+  → NOT "What is the update of Glossier in the Korean beauty market?"
+
+  Prior turn: "what is happening in korean beauty market"
+  Current:    "what is the update about glossier"
+  → kind = "new_question"
+  → standalone_query = "what is the update about glossier"
+
+  Prior turn: "tell me about apple"
+  Current:    "what is microsoft's revenue"
+  → kind = "new_question"
+  → standalone_query = "what is microsoft's revenue"
+
+  Prior turn: "compare amazon and dell revenue"
+  Current:    "what is google's market cap"
+  → kind = "new_question"
+  → standalone_query = "what is google's market cap"
+
+IMPORTANT: This rule does NOT apply when the message is a bare company name
+with no question word (e.g. "microsoft", "apple", "tesla"). Those are
+followups handled by the NAKED COMPANY NAME rule below.
+
+=========================
 KIND RULES
 =========================
 
@@ -185,46 +235,6 @@ Test yourself: "Does the user want NEW information, or the SAME
 information presented differently?" If SAME information, kind = "reformat".
 
 =========================
-SPECIAL RULE — REFORMAT REQUESTS
-=========================
-
-If the current message is asking to TRANSFORM the previous answer rather
-than fetch new information, use kind = "reformat".
-
-Reformat requests include:
-  - "give me this in 4 bullet points"
-  - "summarize that"
-  - "make it shorter"
-  - "TL;DR"
-  - "expand on the second point"
-  - "put this in a table"
-  - "rewrite in simpler language"
-  - "just the numbers"
-  - "what are the key takeaways"
-  - "rephrase this"
-  - "make this more formal"
-  - "make this more casual"
-  - "translate to <language>"
-
-For "reformat":
-  - kind = "reformat"
-  - standalone_query = the user's reformat instruction VERBATIM.
-    Do NOT rewrite it into a full question. Example:
-      User: "give me this in 4 bullet points"
-      → standalone_query = "give me this in 4 bullet points"
-      (not "Give me 4 bullet points about Dr.G expanding into the US market")
-  - context_used = ["the previous assistant answer"]
-
-The key distinction:
-  - "reformat" = apply an instruction to the existing answer. No new
-    information is being fetched.
-  - "followup" = the user wants a NEW question answered, with context
-    carried over from the previous turn.
-
-Test yourself: "Does the user want NEW information, or the SAME
-information presented differently?" If SAME information, kind = "reformat".
-
-=========================
 STANDALONE_QUERY RULES
 =========================
 
@@ -237,10 +247,12 @@ STANDALONE_QUERY RULES
   ellipses, no "the previous", no "that". Complete and specific.
 
 - For "new_question":
-  standalone_query is normally the original message verbatim, UNLESS the
-  current state contains constraints the user clearly intends to keep
-  (e.g. same market, same product). In that case prepend those constraints
-  explicitly to the query.
+  standalone_query is the original message verbatim. Never add anything
+  from prior context. If you feel the urge to add prior context, that
+  means the message should have been classified as "followup" per the
+  rule above — but if it named its own subject and had a question word,
+  the ABSOLUTE FIRST RULE already forced it to be new_question with the
+  verbatim query. Trust that.
 
 IMPORTANT — kind vs rewrite consistency:
 
