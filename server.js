@@ -1057,6 +1057,52 @@ app.get('/daily-snapshot-latest/:clientId', async (req, res) => {
   }
 });
 
+// Credit usage — count every user message this client has ever sent.
+app.get('/credit-usage/:clientId', async (req, res) => {
+  const CREDIT_TOTAL = 10000;
+  const { clientId } = req.params;
+
+  if (!clientId) {
+    return res.status(400).json({ error: 'clientId is required' });
+  }
+
+  try {
+    const { data: convos, error: convoErr } = await supabaseClient
+      .from('di_conversations')
+      .select('id')
+      .eq('client_id', clientId);
+
+    if (convoErr) {
+      console.error('[CreditUsage] conversation query error:', convoErr.message);
+      return res.status(500).json({ error: convoErr.message });
+    }
+
+    const convoIds = (convos || []).map(c => c.id);
+    if (convoIds.length === 0) {
+      return res.json({ used: 0, total: CREDIT_TOTAL, remaining: CREDIT_TOTAL });
+    }
+
+    const { count, error: msgErr } = await supabaseClient
+      .from('di_messages')
+      .select('id', { count: 'exact', head: true })
+      .in('conversation_id', convoIds)
+      .eq('role', 'user');
+
+    if (msgErr) {
+      console.error('[CreditUsage] message count error:', msgErr.message);
+      return res.status(500).json({ error: msgErr.message });
+    }
+
+    const used = count || 0;
+    const remaining = Math.max(0, CREDIT_TOTAL - used);
+
+    return res.json({ used, total: CREDIT_TOTAL, remaining });
+
+  } catch (err) {
+    console.error('[CreditUsage] error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 registerDecisionIntelligenceRoute(app);
