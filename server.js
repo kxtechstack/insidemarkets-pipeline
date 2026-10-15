@@ -1068,10 +1068,18 @@ app.get('/credit-usage/:clientId', async (req, res) => {
 
   try {
     // Step 1: get every conversation ID for this client.
-    const { data: convos, error: convoErr } = await supabaseClient
-      .from('di_conversations')
-      .select('id')
-      .eq('client_id', clientId);
+    const { userId } = req.query;   // read from query string
+
+let query = supabaseClient
+  .from('di_conversations')
+  .select('id')
+  .eq('client_id', clientId);
+
+if (userId) {
+  query = query.eq('user_id', userId);
+}
+
+const { data: convos, error: convoErr } = await query;
 
     if (convoErr) {
       console.error('[CreditUsage] conversation query error:', convoErr.message);
