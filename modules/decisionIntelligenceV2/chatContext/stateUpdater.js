@@ -17,7 +17,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../../llmClient');
-const { saveState, loadState } = require('./stateStore');
+const { saveState, loadState } = require('./mem0Adapter');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,

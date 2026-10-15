@@ -27,6 +27,7 @@
     "dotenv": "^17.4.2",
     "exa-js": "^2.13.0",
     "express": "^5.2.1",
+    "fastembed": "^2.1.1",
     "franc-min": "^6.2.0",
     "fuse.js": "^7.4.2",
     "ioredis": "^6.0.0",

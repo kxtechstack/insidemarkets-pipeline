@@ -51,7 +51,7 @@ const {
 // chatContext layer (new)
 const { resolveContext } = require('./chatContext/contextResolver');
 const { updateState } = require('./chatContext/stateUpdater');
-const { loadState } = require('./chatContext/stateStore');
+const { loadState } = require('./chatContext/mem0Adapter');
 const { reformatPreviousAnswer } = require('./chatContext/reformatter');
 
 // ─────────────────────────────────────────────────────────────────────────
