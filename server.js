@@ -1067,6 +1067,7 @@ app.get('/credit-usage/:clientId', async (req, res) => {
   }
 
   try {
+    // Step 1: get every conversation ID for this client.
     const { data: convos, error: convoErr } = await supabaseClient
       .from('di_conversations')
       .select('id')
@@ -1074,7 +1075,7 @@ app.get('/credit-usage/:clientId', async (req, res) => {
 
     if (convoErr) {
       console.error('[CreditUsage] conversation query error:', convoErr.message);
-      return res.status(500).json({ error: convoErr.message });
+      return res.status(500).json({ error: convoErr.message || 'conversation query failed' });
     }
 
     const convoIds = (convos || []).map(c => c.id);
@@ -1082,25 +1083,34 @@ app.get('/credit-usage/:clientId', async (req, res) => {
       return res.json({ used: 0, total: CREDIT_TOTAL, remaining: CREDIT_TOTAL });
     }
 
-    const { count, error: msgErr } = await supabaseClient
-      .from('di_messages')
-      .select('id', { count: 'exact', head: true })
-      .in('conversation_id', convoIds)
-      .eq('role', 'user');
+    // Step 2: count user messages across those conversations, in batches,
+    // because Supabase .in() with hundreds of IDs can exceed URL length limits.
+    const BATCH_SIZE = 100;
+    let total = 0;
 
-    if (msgErr) {
-      console.error('[CreditUsage] message count error:', msgErr.message);
-      return res.status(500).json({ error: msgErr.message });
+    for (let i = 0; i < convoIds.length; i += BATCH_SIZE) {
+      const batch = convoIds.slice(i, i + BATCH_SIZE);
+      const { count, error: msgErr } = await supabaseClient
+        .from('di_messages')
+        .select('id', { count: 'exact', head: true })
+        .in('conversation_id', batch)
+        .eq('role', 'user');
+
+      if (msgErr) {
+        console.error(`[CreditUsage] batch ${i}-${i + BATCH_SIZE} error:`, msgErr.message);
+        return res.status(500).json({ error: msgErr.message || 'message count failed' });
+      }
+      total += count || 0;
     }
 
-    const used = count || 0;
+    const used = total;
     const remaining = Math.max(0, CREDIT_TOTAL - used);
 
     return res.json({ used, total: CREDIT_TOTAL, remaining });
 
   } catch (err) {
     console.error('[CreditUsage] error:', err.message);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message || 'unknown error' });
   }
 });
 
