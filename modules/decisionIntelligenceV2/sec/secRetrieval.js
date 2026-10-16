@@ -81,17 +81,49 @@ async function loadCompanyLookup(getAllCompaniesFn) {
   if (_companyLookup) return _companyLookup;
   const companies = await getAllCompaniesFn();
   const lookup = new Map();
+
+  // First pass: build first-word → ticker candidates, so we can detect
+  // collisions before actually inserting anything.
+  const firstWordCount = new Map();
+  for (const c of companies) {
+    const raw = c.company_name.split(' ')[0];
+    // Strip trailing punctuation so "F5," -> "F5", "Nike," -> "Nike"
+    const fw = raw.replace(/[^\w&]/g, '').toUpperCase();
+    if (!fw) continue;
+    // Skip 1-character first words ("T. Rowe Price" -> "T", "O'Reilly" -> "O",
+    // "J.B. Hunt" -> "J"). These collide with punctuation-adjacent letters in
+    // other company names. Users type the full name or ticker instead.
+    if (fw.length < 2) continue;
+    if (GENERIC_FIRST_WORDS.has(fw)) continue;
+    firstWordCount.set(fw, (firstWordCount.get(fw) || 0) + 1);
+  }
+
+  // Second pass: populate the lookup. Only add first-word entries that
+  // are UNIQUE across all companies — ambiguous first words ("GE",
+  // "JOHNSON", "UNITED") are skipped so they never cause false matches.
   for (const c of companies) {
     lookup.set(c.ticker.toUpperCase(), c.ticker);
-    const firstWord = c.company_name.split(' ')[0].toUpperCase();
-    if (!GENERIC_FIRST_WORDS.has(firstWord)) lookup.set(firstWord, c.ticker);
+
+    const raw = c.company_name.split(' ')[0];
+    const fw = raw.replace(/[^\w&]/g, '').toUpperCase();
+    if (
+      fw &&
+      fw.length >= 2 &&
+      !GENERIC_FIRST_WORDS.has(fw) &&
+      firstWordCount.get(fw) === 1
+    ) {
+      lookup.set(fw, c.ticker);
+    }
+
     lookup.set(c.company_name.toUpperCase(), c.ticker);
     lookup.set(stripDiacritics(c.company_name).toUpperCase(), c.ticker);
   }
+
   const validTickers = new Set(lookup.values());
   for (const [alias, ticker] of Object.entries(TICKER_ALIASES)) {
     if (validTickers.has(ticker)) lookup.set(alias, ticker);
   }
+
   _companyLookup = lookup;
   return lookup;
 }
@@ -100,36 +132,111 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeForMatch(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function extractTickers(question, lookup) {
   const found = [];
-  const normalizedQuestion = stripDiacritics(question);
+  const normalizedQ = normalizeForMatch(question);
 
-  // ── Short-ticker guard ──────────────────────────────────────────────
-  // Common English words that are ALSO valid tickers. We skip only these
-  // specific ones — everything else (including IBM, AMD, UPS, CVS, KO,
-  // MA, V, T) matches as normal.
-  //
-  // Modeled on the STOPWORD_TICKERS approach from the reference SEC RAG
-  // implementation. Replaces the previous blanket "skip every 1-3 char
-  // ticker" rule, which silently disabled IBM and every other short
-  // real ticker.
-
-
-  // Names sorted longest-first so "INTERNATIONAL BUSINESS MACHINES" is
-  // tried before shorter partial keys like "IBM".
   const names = [...lookup.keys()].sort((a, b) => b.length - a.length);
 
   for (const name of names) {
+    if (name.length < 2) continue;
     if (STOPWORD_TICKERS.has(name)) continue;
-    const ticker = lookup.get(name);
-    const normalizedName = stripDiacritics(name);
 
-    // Word-boundary match, case-insensitive.
+    const ticker = lookup.get(name);
+    const normalizedName = normalizeForMatch(name);
+
+    if (!normalizedName) continue;
+
     const escaped = escapeRegex(normalizedName);
     const pattern = new RegExp(`\\b${escaped}\\b`, 'i');
 
-    if (pattern.test(normalizedQuestion) && !found.includes(ticker)) {
+    if (pattern.test(normalizedQ) && !found.includes(ticker)) {
       found.push(ticker);
+    }
+  }
+
+  if (found.length > 1) {
+    const drop = new Set();
+    const foundSet = new Set(found);
+
+    for (const name of names) {
+      if (!name.includes(' ') && !name.includes('-')) continue;
+      const ticker = lookup.get(name);
+      if (!foundSet.has(ticker)) continue;
+
+      const normalizedName = normalizeForMatch(name);
+      if (!normalizedName) continue;
+
+      const escaped = escapeRegex(normalizedName);
+      const namePattern = new RegExp(`\\b${escaped}\\b`, 'i');
+
+      // Two ways a multi-word key can "match the question":
+      // 1. The full normalized name appears ("brown forman corporation").
+      // 2. A shorter prefix appears — e.g. the question has "brown forman"
+      //    from "Brown-Forman" without the "Corporation" suffix.
+      // Try both so we still apply the substring-drop logic when the user
+      // typed the informal short form.
+      let matchedFull = namePattern.test(normalizedQ);
+      if (!matchedFull) {
+        // Build a prefix list: "brown forman corporation" → ["brown forman", "brown"]
+        // Only consider prefixes of length >= 2 words.
+        const words = normalizedName.split(/\s+/);
+        for (let n = words.length - 1; n >= 2; n--) {
+          const prefix = words.slice(0, n).join(' ');
+          const prefixPattern = new RegExp(`\\b${escapeRegex(prefix)}\\b`, 'i');
+          if (prefixPattern.test(normalizedQ)) {
+            matchedFull = true;
+            break;
+          }
+        }
+      }
+      if (!matchedFull) continue;
+
+      const nameWords = new Set(normalizedName.split(/\s+/));
+
+      for (const otherTicker of found) {
+        if (otherTicker === ticker) continue;
+
+        const singleWordKeysForOther = names.filter((k) => {
+          if (k.length < 2) return false;
+          if (k.includes(' ')) return false;
+          if (lookup.get(k) !== otherTicker) return false;
+          return true;
+        });
+        if (singleWordKeysForOther.length === 0) continue;
+
+        const overlapWords = singleWordKeysForOther.filter((k) => {
+          const normalizedKey = normalizeForMatch(k);
+          return nameWords.has(normalizedKey);
+        });
+        if (overlapWords.length === 0) continue;
+
+        const questionOutsideName = normalizedQ.replace(namePattern, ' ');
+        const appearsOutside = overlapWords.some((k) => {
+          const nk = normalizeForMatch(k);
+          if (!nk) return false;
+          const wPattern = new RegExp(`\\b${escapeRegex(nk)}\\b`, 'i');
+          return wPattern.test(questionOutsideName);
+        });
+
+        if (!appearsOutside) {
+          drop.add(otherTicker);
+        }
+      }
+    }
+
+    if (drop.size > 0) {
+      return found.filter((t) => !drop.has(t));
     }
   }
 
