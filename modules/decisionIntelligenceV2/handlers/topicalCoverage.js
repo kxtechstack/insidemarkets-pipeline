@@ -89,6 +89,48 @@ Documents: 3 about Macquarie/Hwasung/NowCos, 0 mentioning ATTAIN.
 → reason: "No document mentions ATTAIN Cosmetics."
 
 =========================
+CRITICAL — NEVER ADMIT MISSING DATA AND STILL SAY COVERED
+=========================
+
+Before returning covered=true, re-read your own "reason" string.
+
+If your reason says something like:
+  - "X is not mentioned in any document"
+  - "none of the documents mention X"
+  - "the documents do not discuss X"
+  - "the documents discuss Y instead of X"
+  - "IBM's 2025 revenue is not mentioned but one of the documents is about..."
+  - "the specific company/metric/year asked about is not present"
+
+...then you MUST return covered=false. Do NOT return covered=true
+just because the documents share general vocabulary (revenue, growth,
+company) with the question. If the SPECIFIC subject the user asked
+about is absent, the answer is false.
+
+The test: strip away all general vocabulary. Does any document actually
+contain a fact that answers the exact question the user asked? If not,
+covered=false.
+
+Examples of the CORRECT behavior:
+
+  Q: "IBM 2025 revenue"
+  Documents: 2 signals about Cosmos Health's revenue growth.
+  → reason says: "IBM is not mentioned; the documents discuss Cosmos Health."
+  → covered: FALSE
+  → on_topic_indices: []
+
+  Q: "IBM 2025 revenue"
+  Documents: 3 IBM 10-K chunks containing revenue figures.
+  → reason says: "IBM revenue for FY2025 is present in three chunks."
+  → covered: TRUE
+  → on_topic_indices: [1,2,3]
+
+  Q: "Which company acquired ATTAIN Cosmetics?"
+  Documents: 3 articles about Macquarie/Hwasung/NowCos.
+  → reason says: "No document mentions ATTAIN Cosmetics."
+  → covered: FALSE
+
+=========================
 OUTPUT
 =========================
 
@@ -103,6 +145,8 @@ Return ONLY this JSON object and NOTHING ELSE:
 Rules:
 - If covered is false, on_topic_indices must be [].
 - If covered is true, on_topic_indices must contain at least one number.
+- If your reason says the specific entity/metric/year asked about is
+  missing or not mentioned, covered MUST be false.
 - Numbers must be integers, 1-based, matching the document numbers given.
 - No markdown fences, no explanation, no extra text. Return ONLY the JSON.`;
 
@@ -378,12 +422,25 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
     return { covered: true, confidence: 0.0, reason: 'parse failed', onTopicIndices: null, _fallback: true };
   }
 
-  const covered = parsed.covered === true;
   const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+
+  // Safety net: if the LLM's own reason admits the subject is missing,
+  // force covered=false even if it said true. This catches the case where
+  // the LLM says "covered=true, reason: IBM is not mentioned" — a direct
+  // contradiction that would otherwise leak a wrong answer downstream.
+  const admitsMissing = /\b(not mentioned|no document|none of the documents|do(?:es)? not (?:discuss|mention|contain)|not present|absent|not in the (?:current )?dataset)\b/i.test(reason);
+  const covered = parsed.covered === true && !admitsMissing;
+
+  if (parsed.covered === true && admitsMissing) {
+    console.log(`[TopicalCoverage] OVERRIDE: LLM said covered=true but reason admits missing data. Reason: "${reason}"`);
+  }
 
   let indices = Array.isArray(parsed.on_topic_indices)
     ? parsed.on_topic_indices.filter((n) => Number.isInteger(n) && n >= 1 && n <= indexMap.length)
     : [];
+
+  // If we overrode to false, clear the indices too.
+  if (!covered) indices = [];
 
   if (covered && indices.length === 0) {
     indices = Array.from({ length: indexMap.length }, (_, i) => i + 1);
