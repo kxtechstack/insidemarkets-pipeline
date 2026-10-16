@@ -117,6 +117,15 @@ async function loadCompanyLookup(getAllCompaniesFn) {
 
     lookup.set(c.company_name.toUpperCase(), c.ticker);
     lookup.set(stripDiacritics(c.company_name).toUpperCase(), c.ticker);
+
+    // Also register a key for the company name with legal suffixes stripped.
+    // This is what users actually type: "Williams-Sonoma" (not "Williams-Sonoma, Inc."),
+    // "Nike" (not "Nike, Inc."), "J.M. Smucker" (not "J.M. Smucker Company (The)").
+    const stripped = stripLegalSuffixes(c.company_name);
+    if (stripped && stripped.length >= 2 && stripped.length < c.company_name.length) {
+      lookup.set(stripped.toUpperCase(), c.ticker);
+      lookup.set(stripDiacritics(stripped).toUpperCase(), c.ticker);
+    }
   }
 
   const validTickers = new Set(lookup.values());
@@ -126,6 +135,42 @@ async function loadCompanyLookup(getAllCompaniesFn) {
 
   _companyLookup = lookup;
   return lookup;
+}
+
+// Strip common legal suffixes from a company name so the lookup key
+// matches how users actually type it. Example:
+//   "Williams-Sonoma, Inc." → "Williams-Sonoma"
+//   "J.M. Smucker Company (The)" → "J.M. Smucker"
+//   "Nike, Inc." → "Nike"
+const LEGAL_SUFFIX_PATTERNS = [
+  /\s*\(the\)\s*$/i,          // " (The)"
+  /\s*\binc\.?\s*$/i,
+  /\s*\bcorp(?:oration)?\.?\s*$/i,
+  /\s*\bco(?:mpany)?\.?\s*$/i,
+  /\s*\bltd\.?\s*$/i,
+  /\s*\blimited\s*$/i,
+  /\s*\bplc\s*$/i,
+  /\s*\bllc\s*$/i,
+  /\s*\bgroup\s*$/i,          // "X Group"
+  /\s*\bholdings?\s*$/i,
+];
+
+function stripLegalSuffixes(name) {
+  let out = String(name || '').trim();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of LEGAL_SUFFIX_PATTERNS) {
+      const before = out;
+      out = out.replace(re, '').trim();
+      if (out !== before) changed = true;
+    }
+  }
+  // Handle leading "The "
+  out = out.replace(/^the\s+/i, '').trim();
+  // Remove trailing punctuation like commas, hyphens, etc.
+  out = out.replace(/[,;:.\s]+$/, '').trim();
+  return out;
 }
 
 function escapeRegex(s) {

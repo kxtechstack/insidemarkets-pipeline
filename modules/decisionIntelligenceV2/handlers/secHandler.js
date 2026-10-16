@@ -681,6 +681,17 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
       return null;
     }
 
+        // Guard: refuse to run the SEC pipeline for questions that named a
+    // metric but no company. Without this, questions like
+    // "are you sure about revenue" trip the company-set numeric path
+    // (because isNumericQuestion=true) and return a top-N ranking of
+    // every company in the DB — even though the user never asked about
+    // any company at all.
+    if (!Array.isArray(intent.tickers) || intent.tickers.length === 0) {
+      console.log(`[secHandler] no tickers extracted — falling through to V2`);
+      return null;
+    }
+
     const shape = detectSecShape(question, routerResult, intent);
     if (!shape) {
       console.log(`[secHandler] not SEC-shaped — falling through`);
