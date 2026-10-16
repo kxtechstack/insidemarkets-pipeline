@@ -44,7 +44,16 @@ const TICKER_ALIASES = {
   "L'OREAL": 'LRLCY', 'LORÉAL': 'LRLCY',
 };
 
-const STOPWORD_TICKERS = new Set(['ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE', 'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END', 'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE', 'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL', 'EXE', 'SEE', 'ME', 'MY', 'BY', 'DO', 'UP', 'OF', 'PAY', 'LIFE', 'LOVE', 'WORK', 'TIME', 'MOVE', 'NICE', 'FIRST', 'BEST', 'ONLY', 'SURE', 'ABLE', 'HOME', 'HELP', 'BACK', 'HOLD', 'MEET', 'TAKE', 'MAKE', 'GIVE', 'HAVE', 'KNOW', 'FIND', 'LOOK', 'WANT', 'NEED', 'TELL', 'SAY', 'GO', 'TO']);
+const STOPWORD_TICKERS = new Set([
+  'ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE',
+  'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END',
+  'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE',
+  'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL', 'EXE', 'SEE',
+  'ME', 'MY', 'BY', 'DO', 'UP', 'OF', 'PAY', 'LIFE', 'LOVE', 'WORK',
+  'TIME', 'MOVE', 'NICE', 'FIRST', 'BEST', 'ONLY', 'SURE', 'ABLE', 'HOME',
+  'HELP', 'BACK', 'HOLD', 'MEET', 'TAKE', 'MAKE', 'GIVE', 'HAVE', 'KNOW',
+  'FIND', 'LOOK', 'WANT', 'NEED', 'TELL', 'SAY', 'GO', 'TO',
+]);
 
 const GENERIC_FIRST_WORDS = new Set([
   'CAPITAL', 'AMERICAN', 'GENERAL', 'NATIONAL', 'GLOBAL', 'GROUP',
@@ -95,51 +104,33 @@ function extractTickers(question, lookup) {
   const found = [];
   const normalizedQuestion = stripDiacritics(question);
 
-  // Strict matching only. A company is detected ONLY IF one of these is true:
-  //   (a) its ticker (e.g. "AAPL", "MSFT") appears as a whole word in the question
-  //   (b) its full company name (e.g. "Apple Inc", "Estée Lauder Companies") appears
-  //   (c) a distinctive single-word alias appears with matching capitalization
-  //       (e.g. "Apple", "Microsoft", "Google")
+  // ── Short-ticker guard ──────────────────────────────────────────────
+  // Common English words that are ALSO valid tickers. We skip only these
+  // specific ones — everything else (including IBM, AMD, UPS, CVS, KO,
+  // MA, V, T) matches as normal.
   //
-  // We deliberately do NOT fuzzy-match. The old fuzzy layer caused wrong
-  // tickers to be extracted from descriptive words:
-  //   - "Risk analysis for entering the K-beauty market" → ETR (Entergy)
-  //     because "entering" fuzzy-matched the word "Entergy"
-  //   - "PESTLE analysis for Beauty & Personal Care" → EMR (Emerson Electric)
-  //     because "personal care" appeared in Emerson's business description
-  //
-  // Wrong tickers cause the SEC sidecar to fetch unrelated 10-K filings and
-  // inject them into the report as if they were relevant sources.
+  // Modeled on the STOPWORD_TICKERS approach from the reference SEC RAG
+  // implementation. Replaces the previous blanket "skip every 1-3 char
+  // ticker" rule, which silently disabled IBM and every other short
+  // real ticker.
+
+
+  // Names sorted longest-first so "INTERNATIONAL BUSINESS MACHINES" is
+  // tried before shorter partial keys like "IBM".
   const names = [...lookup.keys()].sort((a, b) => b.length - a.length);
+
   for (const name of names) {
     if (STOPWORD_TICKERS.has(name)) continue;
     const ticker = lookup.get(name);
     const normalizedName = stripDiacritics(name);
 
-    const isFullName = normalizedName.includes(' ');
-    const isTicker = normalizedName === ticker;
+    // Word-boundary match, case-insensitive.
+    const escaped = escapeRegex(normalizedName);
+    const pattern = new RegExp(`\\b${escaped}\\b`, 'i');
 
-    // Skip ticker-only keys shorter than 4 characters. Never match them as
-    // standalone tokens — 1-3 character tickers collide with common English
-    // words and letters:
-    //   "L"   (Loews)              matches the letter L in "L'Oréal"
-    //   "HAS" (Hasbro)             matches the word "has"
-    //   "ON"  (ON Semiconductor)   matches the word "on"
-    //   "IT"  (Gartner)            matches the word "it"
-    //   "A"   (Agilent)            matches the article "a"
-    // Users can always type the company name (the alias/company-name paths
-    // handle those), so we lose nothing important.
-    if (isTicker && ticker.length < 4) continue;
-
-    // Long names (≥5 chars) like "AMAZON", "GOOGLE", "MICROSOFT" are safe
-    // to match case-insensitively. Short names still require capitalization
-    // to avoid common English words matching by accident.
-    const isLongName = normalizedName.length >= 5;
-    const capitalizedPattern = new RegExp(`\\b${escapeRegex(normalizedName)}\\b`);
-    if (!isFullName && !isTicker && !isLongName && !capitalizedPattern.test(normalizedQuestion)) continue;
-
-    const pattern = new RegExp(`\\b${escapeRegex(normalizedName)}\\b`, 'i');
-    if (pattern.test(normalizedQuestion) && !found.includes(ticker)) found.push(ticker);
+    if (pattern.test(normalizedQuestion) && !found.includes(ticker)) {
+      found.push(ticker);
+    }
   }
 
   return found;
