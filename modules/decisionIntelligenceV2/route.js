@@ -208,6 +208,16 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     ? secResult.injectChunks
     : [];
 
+  // If SEC produced framework chunks, force the type to `decision` so the
+  // pipeline routes to the decision handler — that's the only handler that
+  // consumes secInjectChunks. Without this, a question like "Tell me about
+  // IBM" gets classified as list by the router, list never touches SEC
+  // chunks, and the answer is empty.
+  if (secInjectChunks.length > 0) {
+    console.log(`[V2 route] SEC framework chunks present — forcing type=decision (was ${routerResult.type})`);
+    routerResult.type = 'decision';
+  }
+
   // ── 2. Non market-intelligence short-circuits ───────────────────────
   if (routerResult.intent === 'greeting') {
     return { routerResult, payload: await buildGreetingResponse({ routerResult, clientId, industry }) };
