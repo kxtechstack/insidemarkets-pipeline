@@ -102,7 +102,13 @@ function detectSecShape(question, routerResult, intent) {
 
   if (intent.questionCategory === 'qualitative') return 'framework';
 
-  return null;
+  // Fallback: the question names a company we have SEC 10-K chunks for,
+  // but isn't numeric and isn't one of the standard framework/qualitative
+  // shapes ("Tell me about IBM", "What are IBM's strengths?"). Route to
+  // the framework path so we pull from sec10k_chunks instead of falling
+  // through to the client-signal pipeline, which would return no_data.
+  console.log(`[secHandler] named company + non-numeric question → framework path`);
+  return 'framework';
 }
 
 function isSecNumericQuestion(question, routerResult, intent) {
@@ -682,13 +688,22 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     }
 
         // Guard: refuse to run the SEC pipeline for questions that named a
-    // metric but no company. Without this, questions like
+    // metric but no company AND no sector. Without this, questions like
     // "are you sure about revenue" trip the company-set numeric path
     // (because isNumericQuestion=true) and return a top-N ranking of
     // every company in the DB — even though the user never asked about
     // any company at all.
-    if (!Array.isArray(intent.tickers) || intent.tickers.length === 0) {
-      console.log(`[secHandler] no tickers extracted — falling through to V2`);
+    //
+    // IMPORTANT: do NOT block questions where the router identified a
+    // company-set query (top N by metric) or a sector term (top 5 cosmetic
+    // companies by revenue). Those legitimately have no explicit ticker in
+    // the question text but should still go through the company-set path.
+    const routerIsCompanySet = routerResult && routerResult.is_company_set_query === true;
+    const routerHasSectorTerm = routerResult && typeof routerResult.sector_term === 'string' && routerResult.sector_term.trim().length > 0;
+    // Note: `hasTickers` is already declared above — do not redeclare.
+
+    if (!hasTickers && !routerIsCompanySet && !routerHasSectorTerm) {
+      console.log(`[secHandler] no tickers, no company-set, no sector — falling through to V2`);
       return null;
     }
 

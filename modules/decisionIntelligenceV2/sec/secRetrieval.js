@@ -460,7 +460,9 @@ async function extractIntent(question, getAllCompaniesFn) {
   const unresolvedMentions = extractUnresolvedMentions(question, tickers, lookup);
   const qLower = question.toLowerCase();
 
-  let allYears = [...new Set((question.match(/\b(20\d{2})\b/g) || []).map(Number))].sort();
+  let allYears = [...new Set(
+  (question.match(/(?:FY\s*|\b)(20\d{2})\b/gi) || []).map(s => Number(String(s).replace(/\D/g, '')))
+)].sort();
 
   const rangeMatch = question.match(/\b(20\d{2})\s*(?:to|-|through|thru|until)\s*(20\d{2})\b/i);
   const betweenMatch = question.match(/\bbetween\s+(20\d{2})\s+and\s+(20\d{2})\b/i);
