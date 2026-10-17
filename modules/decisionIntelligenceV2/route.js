@@ -95,12 +95,19 @@ function filterForInferenceOrDecision(clientHits, concepts) {
 async function prepareListCandidates(hits) {
   if (!Array.isArray(hits) || hits.length === 0) return [];
 
-  // Stage 1 — dedupe by article_id, keep the first occurrence.
+  // Stage 1 — dedupe by article_id OR title
   const byArticleId = new Map();
+  const seenTitles = new Set();
+
   for (const h of hits) {
-    if (!h || !h.article_id) continue;
-    if (byArticleId.has(h.article_id)) continue;
-    byArticleId.set(h.article_id, h);
+    if (!h) continue;
+    if (h.article_id && byArticleId.has(h.article_id)) continue;
+    
+    const titleKey = (h.title || '').trim().toLowerCase();
+    if (titleKey && seenTitles.has(titleKey)) continue;
+
+    if (h.article_id) byArticleId.set(h.article_id, h);
+    if (titleKey) seenTitles.add(titleKey);
   }
 
   if (byArticleId.size === 0) return [];
@@ -119,13 +126,18 @@ async function prepareListCandidates(hits) {
     return [...byArticleId.values()];
   }
 
-  // A candidate is valid if a row exists in any table with is_duplicate=false.
   const valid = new Set();
   for (const r of [...(policyRows.data || []), ...(mdRows.data || []), ...(foRows.data || [])]) {
     if (r.is_duplicate === false) valid.add(r.article_id);
   }
 
   const cleaned = [...byArticleId.values()].filter(h => valid.has(h.article_id));
+
+  // SAFETY NET: If the DB check killed all candidates, fall back to raw hits.
+  if (cleaned.length === 0 && byArticleId.size > 0) {
+    console.log(`[prepareListCandidates] DB check dropped all candidates. Falling back to raw Qdrant hits.`);
+    return [...byArticleId.values()];
+  }
 
   console.log(
     `[prepareListCandidates] ${hits.length} raw → ${byArticleId.size} unique → ${cleaned.length} verified`
