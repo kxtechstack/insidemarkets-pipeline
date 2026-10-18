@@ -43,9 +43,6 @@ If intent is NOT "market_intelligence", put a short friendly reply in
 "primary_intent" that the assistant can say back to the user.
 
 --- type --- (only matters when intent = market_intelligence)
-
-CRITICAL RULE: If the user's message starts with or contains the word "List" (e.g., "List recent funding", "List news about X"), you MUST set "type": "list". Do not classify it as inference or decision, even if a specific company is named.
-
 - "list"      = user wants a LIST of items. Examples:
                 "list recent funding rounds", "what are the new regulations",
                 "any VC investments", "what's happening in my market"
