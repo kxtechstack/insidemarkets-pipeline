@@ -35,6 +35,7 @@ const { selectRelevantHitsForList } = require('./handlers/topicalCoverage');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
 const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
+const stringSimilarity = require('string-similarity');
 const { buildListItems } = require('./handlers/listHandler');
 const { buildInferenceAnswer } = require('./handlers/inferenceHandler');
 const { buildDecisionAnswer } = require('./handlers/decisionHandler');
@@ -67,7 +68,22 @@ function filterForInferenceOrDecision(clientHits, concepts) {
 
   return clientHits.filter((h) => {
     const haystack = `${h.title || ''} ${h.chunk_text || ''}`;
-    return clean.some((c) => containsPhrase(haystack, c));
+    
+    // 1. Try exact phrase match
+    if (clean.some((c) => containsPhrase(haystack, c))) return true;
+    
+    // 2. Try fuzzy match (handles "kbeauty" vs "K-Beauty")
+    const haystackWords = haystack.toLowerCase().split(/[\s\-_]+/); 
+    for (const c of clean) {
+      const conceptJoined = c.replace(/[\s\-_]+/g, '');
+      for (const hw of haystackWords) {
+        if (stringSimilarity.compareTwoStrings(hw, conceptJoined) > 0.8) {
+          return true; 
+        }
+      }
+    }
+    
+    return false;
   });
 }
 
