@@ -160,6 +160,18 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     routerResult = await route(question, industry);
   }
 
+    // ── 1.2 FORCE LIST IF USER SAID "LIST" ──────────────────────────────
+  // If the question starts with "list", it is a list. No exceptions.
+  // This prevents the SEC handler from hijacking "list" questions.
+  const isListRequest = /^\s*list\b/i.test(question);
+  if (isListRequest && routerResult.intent === 'market_intelligence') {
+    if (routerResult.type !== 'list') {
+      console.log(`[V2 route] FORCED type=list because question starts with "list" (was ${routerResult.type})`);
+    }
+    routerResult.type = 'list';
+  }
+  // ────────────────────────────────────────────────────────────────────
+
   // ── 1.5 SEC pre-check ───────────────────────────────────────────────
   // Only runs for market_intelligence questions. Wrapped so any failure
   // in the SEC layer silently falls through to normal V2.
@@ -208,14 +220,15 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     ? secResult.injectChunks
     : [];
 
-  // If SEC produced framework chunks, force the type to `decision` so the
+    // If SEC produced framework chunks, force the type to `decision` so the
   // pipeline routes to the decision handler — that's the only handler that
-  // consumes secInjectChunks. Without this, a question like "Tell me about
-  // IBM" gets classified as list by the router, list never touches SEC
-  // chunks, and the answer is empty.
-  if (secInjectChunks.length > 0) {
+  // consumes secInjectChunks.
+  // EXCEPTION: If the user explicitly said "list", NEVER hijack it.
+  if (secInjectChunks.length > 0 && !isListRequest) {
     console.log(`[V2 route] SEC framework chunks present — forcing type=decision (was ${routerResult.type})`);
     routerResult.type = 'decision';
+  } else if (secInjectChunks.length > 0 && isListRequest) {
+    console.log(`[V2 route] SEC chunks present but user said "list" — ignoring SEC hijack.`);
   }
 
   // ── 2. Non market-intelligence short-circuits ───────────────────────
@@ -239,74 +252,98 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   //   5. If zero items → no_data.
   //
   // Custom sources and SEC are NEVER used for list questions.
-  if (routerResult.type === 'list') {
-    const clientRetr = await retrieveClientSignals(question, clientId, industry, {
-      precomputedUnderstanding: routerResult,
-    });
-
-    const conceptsForFilter = [
+      if (routerResult.type === 'list') {
+    // ── 1. FORCE CONCEPTS (Fixes the empty concepts=[] bug) ───────────
+    let conceptsForFilter = [
       ...(routerResult.concept_keywords || []),
       ...(routerResult.entity_mentions || []),
     ];
+    
+    if (conceptsForFilter.length === 0) {
+      const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
+      conceptsForFilter = question.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !stopWords.has(w));
+    }
 
-    const filtered = filterListHits(clientRetr.hits, conceptsForFilter);
+    const clientRetr = await retrieveClientSignals(question, clientId, industry, {
+      precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter },
+    });
 
-    console.log(
-      `[V2 route] list filter: kept ${filtered.length}/${clientRetr.hits.length} ` +
-      `(concepts=[${conceptsForFilter.join(', ')}])`
-    );
+    let filtered = filterListHits(clientRetr.hits, conceptsForFilter);
+
+    // ── 2. STRICT CATEGORY PRE-CHECK (But flexible on categories) ──
+    const qLower = question.toLowerCase();
+    let allowedCategories = null;
+
+    if (/\b(funding|investment|raise|series\s+[a-z]|vc|capital)\b/i.test(qLower)) {
+      allowedCategories = ['funding', 'investment', 'industry structure'];
+    } else if (/\b(acquisition|merger|m&a|takeover)\b/i.test(qLower)) {
+      allowedCategories = ['acquisition', 'merger', 'industry structure'];
+    } else if (/\b(new entrants|new players|startups|new brands|emerging brands)\b/i.test(qLower)) {
+      allowedCategories = ['industry structure', 'product', 'innovation'];
+    } else if (/\b(regulation|policy|law|compliance|regulatory)\b/i.test(qLower)) {
+      allowedCategories = ['regulatory', 'compliance', 'policy', 'legal'];
+    } else if (/\b(leadership|executive|ceo|hiring|talent)\b/i.test(qLower)) {
+      allowedCategories = ['talent movement', 'industry structure']; // Added industry structure
+    } else if (/\b(technology|ai|innovation|tech)\b/i.test(qLower)) {
+      allowedCategories = ['technology', 'product', 'innovation'];
+    } else if (/\b(expansion|expands|new market)\b/i.test(qLower)) {
+      allowedCategories = ['industry structure', 'expansion', 'product'];
+    } else if (/\b(partnership|joint venture|collaboration)\b/i.test(qLower)) {
+      allowedCategories = ['industry structure', 'partnership', 'product', 'licensing'];
+    } else if (/\b(launch|product launch|new product)\b/i.test(qLower)) {
+      allowedCategories = ['product', 'innovation'];
+    }
+
+    let catFiltered = filtered;
+    let categoryMatched = false;
+
+    if (allowedCategories) {
+      catFiltered = filtered.filter(h => {
+        const cat = (h.category || h.insight_category || '').toLowerCase();
+        return allowedCategories.some(allowed => cat.includes(allowed));
+      });
+
+      if (catFiltered.length > 0) {
+        categoryMatched = true;
+        filtered = catFiltered;
+        console.log(`[V2 route] list category filter: kept ${filtered.length}/${clientRetr.hits.length} (allowed=[${allowedCategories.join(', ')}])`);
+      } else {
+        // If 0 matches, DO NOT throw away the signals. Keep all 15 and let the LLM decide.
+        console.log(`[V2 route] list category filter: 0 matches, falling back to all ${filtered.length} signals`);
+      }
+    }
+    // ────────────────────────────────────────────────────────────────
 
     if (filtered.length === 0) {
-      const payload = await buildListResponse({
-        handlerResult: { items: [] },
-        clientId,
-        industry,
-      });
+      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    // ── Candidate cleanup ────────────────────────────────────────────
-    // Remove duplicates by article_id, orphaned chunks, and rows already
-    // marked is_duplicate. Whatever survives is guaranteed to show up.
     const candidates = await prepareListCandidates(filtered);
 
     if (candidates.length === 0) {
-      console.log(`[V2 route] list candidates: 0 after cleanup — no_data`);
-      const payload = await buildListResponse({
-        handlerResult: { items: [] },
-        clientId,
-        industry,
-      });
+      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    // ── Short-circuit for a single candidate ─────────────────────────
-    // No point asking the LLM to "choose" from a list of one.
     let selected;
     if (candidates.length === 1) {
-      console.log(`[V2 route] list candidates: 1 — skipping LLM selection`);
       selected = candidates;
     } else {
       try {
         selected = await selectRelevantHitsForList(question, candidates);
       } catch (err) {
-        console.log(`[V2 route] list selection threw — falling back to filtered hits: ${err.message}`);
         selected = candidates;
       }
-      console.log(
-        `[V2 route] list selection: ${selected.length}/${candidates.length} items kept`
-      );
     }
 
     if (!selected || selected.length === 0) {
       const payload = await buildListResponse({
-        handlerResult: {
-          items: [],
-          _empty: true,
-          _reason: 'no signals in the current dataset genuinely answer this question',
-        },
-        clientId,
-        industry,
+        handlerResult: { items: [], _empty: true, _reason: 'no signals genuinely answer this question' },
+        clientId, industry,
       });
       return { routerResult, handlerResult: { items: [] }, payload };
     }

@@ -557,8 +557,8 @@ async function checkFrameworkSubjectCoverage(question, clientHits, customSourceH
 const LIST_SELECTION_PROMPT = `You are filtering a list of retrieved signals for a client's question.
 
 You will be given:
-  (1) A user's question. They want a LIST of signals that answer it.
-  (2) A numbered list of candidate signals, each with a title and a short excerpt.
+  (1) A user's question.
+  (2) A numbered list of candidate signals, each with a title, category, and short excerpt.
 
 Your job: decide which of these candidates genuinely answer the question.
 
@@ -575,15 +575,9 @@ RULES
 
 1. Judge each candidate independently. A candidate is either in or out.
 
-2. Judge the TITLE FIRST — the title is the article's actual subject.
-   If the title clearly matches the question, include the candidate
-   regardless of what the excerpt says.
-
-3. Do NOT include candidates that merely share vocabulary with the question
-   when the TITLE is also off-topic.
-
-4. Do NOT include candidates whose TITLE is about a different industry,
-   different country, or different subject than the question.
+2. If the user asks for "funding", you MUST reject articles that are not about capital being raised or invested. Reject "strategic moves", "incubators", or "trends".
+3. If the user asks for "acquisitions", you MUST reject anything that is not a direct purchase, merger, or buyout.
+4. If the user asks for "new entrants", "new players", or "startups", you MUST reject articles about regulations, policies, or product launches. Only accept articles about a brand new company or brand entering the market.
 
 5. If NONE of the candidates answer the question, return "relevant_indices": [].
 
@@ -595,9 +589,10 @@ function buildListSelectionContext(clientHits) {
   const lines = [];
   clientHits.forEach((h, i) => {
     const title = h.title || 'Untitled';
+    const cat = h.category || h.insight_category || 'General';
     let snippet = h.chunk_text || '';
     if (snippet.length > LIST_ITEM_MAX_CHARS) snippet = snippet.slice(0, LIST_ITEM_MAX_CHARS) + '…';
-    lines.push(`[${i + 1}] ${title}\n${snippet}`);
+    lines.push(`[${i + 1}] ${title} (Category: ${cat})\n${snippet}`);
   });
   return lines.join('\n\n---\n\n');
 }
