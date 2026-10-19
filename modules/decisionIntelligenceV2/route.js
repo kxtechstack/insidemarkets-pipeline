@@ -589,6 +589,64 @@ function registerDecisionIntelligenceV2Route(app) {
         ? question
         : resolverResult.standalone_query;
 
+      // ── 4.5. REFORMAT — bypass pipeline entirely ──────────────────────
+      if (resolverResult.kind === 'reformat') {
+        console.log(`[chat-with-memory] kind=reformat — bypassing pipeline`);
+
+        let reformatResult;
+        try {
+          reformatResult = await reformatPreviousAnswer({
+            conversationId,
+            instruction: resolverResult.standalone_query,
+          });
+        } catch (err) {
+          console.log(`[chat-with-memory] reformatter threw: ${err.message}`);
+          reformatResult = { payload: null, previousFound: false };
+        }
+
+        if (!reformatResult.payload) {
+          const fallbackPayload = {
+            type: 'list',
+            items: [],
+            no_data: true,
+            message: reformatResult.previousFound
+              ? "I couldn't reformat the previous answer. Try rephrasing or asking the question again."
+              : "There's no previous answer in this conversation to reformat.",
+            suggestions: [],
+          };
+          return res.json({
+            ...fallbackPayload,
+            conversationId,
+            classifierReasoning: 'reformat (fallback)',
+            resolver: resolverResult,
+            state: currentState,
+          });
+        }
+
+        const payload = reformatResult.payload;
+        const assistantContent = (payload.report?.title || '').slice(0, 200);
+
+        try {
+          await appendMessage({
+            conversationId,
+            role: 'assistant',
+            content: assistantContent,
+            type: payload.type,
+            payload,
+          });
+        } catch (err) {
+          console.log(`[chat-with-memory] failed to persist reformat: ${err.message}`);
+        }
+
+        return res.json({
+          ...payload,
+          conversationId,
+          classifierReasoning: 'reformat',
+          resolver: resolverResult,
+          state: currentState,
+        });
+      }
+
       console.log(
         `[chat-with-memory] kind=${resolverResult.kind} ` +
         `skipUpdater=${skipStateUpdate} ` +

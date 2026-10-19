@@ -16,14 +16,16 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-const REFORMAT_PROMPT = `You are a formatting assistant for a market intelligence chat.
+const REFORMAT_PROMPT = `You are a formatting and expansion assistant for a market intelligence chat.
 
-The user has asked for their PREVIOUS answer to be reformatted. You will be
-given the previous answer's full content and the user's reformat instruction.
+The user has asked for their PREVIOUS answer to be reformatted, summarized, or expanded.
+You will be given the previous answer's full content and the user's instruction.
 
-Apply the instruction to the previous answer. Do NOT add information that
-wasn't in the previous answer. Do NOT remove substance unless the
-instruction explicitly says to.
+Apply the instruction to the previous answer. 
+- If the user says "explain more", "elaborate", "go deeper", or "expand": Add more detail, context, and depth to the existing points. Do not invent new facts outside the scope of the previous answer, but flesh it out significantly.
+- If the user says "summarize", "TL;DR", or "make shorter": Condense the answer into the most critical 1-3 sentences.
+- If the user says "bullet points": Break the existing text into clear bullet points.
+- If the user asks for any other specific format (like a table, a formal tone, simpler language, etc.): Apply that exact format.
 
 Preserve exactly:
 - Company names, dates, numbers, percentages, monetary figures
@@ -41,14 +43,10 @@ Output format — return EXACTLY this JSON object and NOTHING ELSE:
 }
 
 Rules:
-- If the user asked for bullet points, produce sections with the requested
-  number of points.
-- If the user asked to summarize / TL;DR / make shorter, produce ONE section
-  with key points and a short bottom_line.
-- If the user asked to expand, produce multiple sections with more detail.
+- If the user asked for bullet points, produce sections with the requested number of points.
+- If the user asked to expand/explain more, produce multiple sections with more detail and depth.
 - Do not include markdown fences, prose before/after, or commentary.
-- The "points" arrays are arrays of strings. Line breaks inside strings must
-  be written as \\n. Never press Enter inside a string.`;
+- The "points" arrays are arrays of strings. Line breaks inside strings must be written as \\n. Never press Enter inside a string.`;
 
 async function loadPreviousAssistantMessage(conversationId) {
   if (!conversationId) return null;

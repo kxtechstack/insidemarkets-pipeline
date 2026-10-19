@@ -193,7 +193,6 @@ was about a business topic involving a company. Single-word messages like
 "microsoft", "apple", "tesla", "google" are ALWAYS substitution follow-ups
 when the prior turn mentioned a different company in a business context.
 
-
 =========================
 SPECIAL RULE — REFORMAT REQUESTS
 =========================
@@ -201,12 +200,16 @@ SPECIAL RULE — REFORMAT REQUESTS
 If the current message is asking to TRANSFORM the previous answer rather
 than fetch new information, use kind = "reformat".
 
-Reformat requests include:
+Reformat requests include (but are NOT limited to):
   - "give me this in 4 bullet points"
   - "summarize that"
   - "make it shorter"
   - "TL;DR"
   - "expand on the second point"
+  - "explain more"
+  - "elaborate"
+  - "go deeper"
+  - "tell me more about this"
   - "put this in a table"
   - "rewrite in simpler language"
   - "just the numbers"
@@ -215,14 +218,15 @@ Reformat requests include:
   - "make this more formal"
   - "make this more casual"
   - "translate to <language>"
+  - Any instruction that asks to change the format, tone, length, or presentation of the previous answer without asking for a new topic.
 
 For "reformat":
   - kind = "reformat"
   - standalone_query = the user's reformat instruction VERBATIM.
     Do NOT rewrite it into a full question. Example:
-      User: "give me this in 4 bullet points"
-      → standalone_query = "give me this in 4 bullet points"
-      (not "Give me 4 bullet points about Dr.G expanding into the US market")
+      User: "explain more"
+      → standalone_query = "explain more"
+      (not "Explain more about the SWOT analysis for Estee Lauder")
   - context_used = ["the previous assistant answer"]
 
 The key distinction:
