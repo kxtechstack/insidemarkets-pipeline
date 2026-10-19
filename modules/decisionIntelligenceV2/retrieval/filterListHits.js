@@ -86,16 +86,15 @@ function filterListHits(hits, concepts) {
     // 1. Exact match
     if (clean.some((c) => containsPhrase(haystack, c))) return true;
     
-    // 2. Fuzzy match (ignores spaces/hyphens)
-    const haystackWords = haystack.split(/[\s\-_]+/);
+    // 2. Squished string match (ignores spaces/hyphens)
+    const haystackJoined = haystack.replace(/[\s\-_]+/g, '');
     for (const c of clean) {
       const conceptJoined = c.replace(/[\s\-_]+/g, '');
-      for (const hw of haystackWords) {
-        if (stringSimilarity.compareTwoStrings(hw, conceptJoined) > 0.8) {
-          return true;
-        }
+      if (haystackJoined.includes(conceptJoined)) {
+        return true;
       }
     }
+    
     return false;
   });
 }
