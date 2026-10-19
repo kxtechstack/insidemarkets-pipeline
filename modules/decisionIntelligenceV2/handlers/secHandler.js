@@ -15,7 +15,6 @@ const { extractIntent, retrieveForIntent, getAllCompanies } = require('../sec/se
 const { buildNumericAnswer } = require('../sec/buildNumericAnswer');
 const { getRegionAliases } = require('../sec/regionAliases');
 const { containsPhrase, normalizeConcepts } = require('../retrieval/filterListHits');
-const { callLLM } = require('../../llmClient');
 
 const FRAMEWORK_CATEGORIES = new Set(['swot', 'pestle', 'five_forces', 'risk_analysis']);
 
@@ -54,41 +53,6 @@ const COMPANY_NAME_STOP = new Set([
   'inc', 'corp', 'co', 'company', 'group', 'holdings', 'ltd', 'plc',
   'sa', 'ag', 'nv', 'se', 'llc', 'lp',
 ]);
-
-async function generateCleanTitle(question, facts) {
-  try {
-    const sampleData = facts
-      .slice(0, 5)
-      .map(f => `${f.company_name} (${f.ticker}): ${f.metric_name} $${(f.metric_value / 1e9).toFixed(2)}B`)
-      .join(', ');
-
-    const prompt = `You are writing a short, accurate title for a financial report.
-
-Context:
-- The user asked: "${question}"
-- The actual data retrieved: ${sampleData}
-- Total number of companies in the data: ${facts.length}
-
-STRICT RULES:
-1. The title MUST be maximum 8 words.
-2. Do NOT include any country names (e.g., US, USA, Korean, Japan). The SEC data is ALWAYS US-listed companies, so never mention a country.
-3. Do NOT include a number higher than the actual companies retrieved. If the user asked for "top 5" but the data only has 2, the title must say "Top 2" (or just list the companies).
-4. If the data is a comparison, the title should reflect that (e.g., "Apple vs Amazon Revenue Comparison").
-5. If the data is a ranking, the title should say "Top X [Sector] Companies by [Metric]" using the ACTUAL number of companies retrieved (X).
-6. Return ONLY the text of the title, nothing else. No quotes.
-
-Write the title now:`;
-
-    const raw = await callLLM(
-      [{ role: 'user', content: prompt }],
-      { temperature: 0, max_tokens: 30, timeout: 15000 }
-    );
-    return raw.trim().replace(/^"|"$/g, ''); 
-  } catch (err) {
-    console.log(`[secHandler] Title generation failed: ${err.message}`);
-    return question; 
-  }
-}
 
 async function questionNamesCompany(question, tickers) {
   if (!Array.isArray(tickers) || tickers.length === 0) return false;
@@ -416,24 +380,22 @@ async function runCompanySetPath(question, intent) {
   };
   const { chart, chartMeta } = await tryBuildChart(chartIntent, enrichedFacts);
 
-  const dynamicTitle = await generateCleanTitle(question, enrichedFacts);
-
   console.log(
     `[secHandler] company-set numeric answer: ${facts.length} fact(s), ` +
-    `${sources.length} source(s), chart=${!!chart}, title="${dynamicTitle}"`
+    `${sources.length} source(s), chart=${!!chart}`
   );
 
   return {
     mode: 'numeric',
     payload: {
       type: 'decision',
-      report: { title: dynamicTitle, bodyText },
+      report: { title: question, bodyText },
       sources,
       chart,
       chartMeta,
     },
     handlerResult: {
-      report: { title: dynamicTitle, bodyText },
+      report: { title: question, bodyText },
       sources,
       chart,
       chartMeta,
@@ -460,24 +422,22 @@ async function runNumericPath(question, intent) {
   const sources = await buildNumericSources(enrichedFacts);
   const { chart, chartMeta } = await tryBuildChart(intent, enrichedFacts);
 
-  const dynamicTitle = await generateCleanTitle(question, enrichedFacts);
-
   console.log(
     `[secHandler] numeric answer: ${facts.length} fact(s) for [${intent.tickers.join(',')}], ` +
-    `${sources.length} source(s), chart=${!!chart}, title="${dynamicTitle}"`
+    `${sources.length} source(s), chart=${!!chart}`
   );
 
   return {
     mode: 'numeric',
     payload: {
       type: 'decision',
-      report: { title: dynamicTitle, bodyText },
+      report: { title: question, bodyText },
       sources,
       chart,
       chartMeta,
     },
     handlerResult: {
-      report: { title: dynamicTitle, bodyText },
+      report: { title: question, bodyText },
       sources,
       chart,
       chartMeta,
