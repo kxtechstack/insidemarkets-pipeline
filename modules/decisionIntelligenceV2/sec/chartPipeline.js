@@ -2,7 +2,7 @@
  * modules/decisionIntelligenceV2/sec/chartPipeline.js
  *
  * COPIED VERBATIM from modules/decisionIntelligence/chartPipeline.js.
- * No logic changed.
+ * Only change: chart text is now pure black (#000000) and gridlines are darker.
  */
 
 const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
@@ -121,13 +121,18 @@ const WIDTH = 700;
 const HEIGHT = 450;
 const PALETTE = ['#0088CC', '#E63946', '#F4A300', '#2A9D8F', '#7B2CBF', '#F77F00', '#06A77D'];
 
+// Pure black text everywhere, darker gridlines so they stay visible
+const TEXT = '#000000';
+const GRID = 'rgba(0,0,0,0.15)';
+
 const chartJSNodeCanvas = new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
   backgroundColour: 'white', // Render on white, then strip it with sharp
   chartCallback: (ChartJS) => {
-    ChartJS.defaults.color = '#888888';
-    ChartJS.defaults.borderColor = 'rgba(128,128,128,0.15)';
+    ChartJS.defaults.color = TEXT;
+    ChartJS.defaults.borderColor = GRID;
+    ChartJS.defaults.font.weight = '500';
   },
 });
 
@@ -143,7 +148,6 @@ function formatUsd(value) {
 
 function buildChartConfig(chartData) {
   const { type, metricLabel = 'Value' } = chartData;
-  const TEXT = '#888888';
 
   if (type === 'scatter') {
     return {
@@ -162,8 +166,8 @@ function buildChartConfig(chartData) {
           legend: { display: false, labels: { color: TEXT } },
         },
         scales: {
-          x: { title: { display: true, text: chartData.xLabel, color: TEXT }, ticks: { callback: v => formatUsd(v), color: TEXT } },
-          y: { title: { display: true, text: chartData.yLabel, color: TEXT }, ticks: { callback: v => formatUsd(v), color: TEXT } },
+          x: { title: { display: true, text: chartData.xLabel, color: TEXT }, ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: GRID } },
+          y: { title: { display: true, text: chartData.yLabel, color: TEXT }, ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: GRID } },
         },
       },
     };
@@ -207,8 +211,8 @@ function buildChartConfig(chartData) {
           legend: { display: false, labels: { color: TEXT } },
         },
         scales: {
-          x: { ticks: { color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
-          y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
+          x: { ticks: { color: TEXT }, grid: { color: GRID } },
+          y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: GRID } },
         },
       },
     };
@@ -227,8 +231,8 @@ function buildChartConfig(chartData) {
           legend: { display: false, labels: { color: TEXT } },
         },
         scales: {
-          x: { ticks: { color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
-          y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
+          x: { ticks: { color: TEXT }, grid: { color: GRID } },
+          y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: GRID } },
         },
       },
     };
@@ -253,8 +257,8 @@ function buildChartConfig(chartData) {
         legend: { display: series.length > 1, labels: { color: TEXT } },
       },
       scales: {
-        x: { ticks: { color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
-        y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: 'rgba(128,128,128,0.15)' } },
+        x: { ticks: { color: TEXT }, grid: { color: GRID } },
+        y: { ticks: { callback: v => formatUsd(v), color: TEXT }, grid: { color: GRID } },
       },
     },
   };
