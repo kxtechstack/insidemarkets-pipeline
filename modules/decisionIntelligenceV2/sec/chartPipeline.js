@@ -1,8 +1,9 @@
 /**
  * modules/decisionIntelligenceV2/sec/chartPipeline.js
  *
- * COPIED VERBATIM from modules/decisionIntelligence/chartPipeline.js.
- * Only change: chart text is now pure black (#000000) and gridlines are darker.
+ * COPIED from modules/decisionIntelligence/chartPipeline.js.
+ * Changes: pure black chart text, darker gridlines, and true transparency
+ * (render on white + black, derive real alpha) so no halo around text.
  */
 
 const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
@@ -125,16 +126,21 @@ const PALETTE = ['#0088CC', '#E63946', '#F4A300', '#2A9D8F', '#7B2CBF', '#F77F00
 const TEXT = '#000000';
 const GRID = 'rgba(0,0,0,0.15)';
 
-const chartJSNodeCanvas = new ChartJSNodeCanvas({
+const makeCanvas = (bg) => new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
-  backgroundColour: 'white', // Render on white, then strip it with sharp
+  backgroundColour: bg,
   chartCallback: (ChartJS) => {
     ChartJS.defaults.color = TEXT;
     ChartJS.defaults.borderColor = GRID;
     ChartJS.defaults.font.weight = '500';
   },
 });
+
+// Same chart is rendered on white AND black, then true alpha is derived
+// from the difference. This gives clean transparent edges (no halo).
+const canvasOnWhite = makeCanvas('white');
+const canvasOnBlack = makeCanvas('black');
 
 function formatUsd(value) {
   if (value === null || value === undefined) return 'N/A';
@@ -265,45 +271,39 @@ function buildChartConfig(chartData) {
 }
 
 async function renderChart(chartData) {
-  const config = buildChartConfig(chartData);
-  const buffer = await chartJSNodeCanvas.renderToBuffer(config, 'image/png');
+  // Render the same chart on white and on black, then derive true alpha
+  const [whiteBuf, blackBuf] = await Promise.all([
+    canvasOnWhite.renderToBuffer(buildChartConfig(chartData), 'image/png'),
+    canvasOnBlack.renderToBuffer(buildChartConfig(chartData), 'image/png'),
+  ]);
 
-  // Use sharp to remove the white background and replace with transparent
-  // This fixes the chartjs-node-canvas bug where transparent renders as black
-  const transparentBuffer = await sharp(buffer)
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const w = await sharp(whiteBuf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const b = await sharp(blackBuf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  const { data, info } = transparentBuffer;
-  const { width, height, channels } = info;
+  const { width, height, channels } = w.info; // 3 (alpha removed)
+  const out = Buffer.alloc(width * height * 4);
 
-  // Create a new buffer where we set alpha=0 on pixels that are pure white
-  const newData = Buffer.alloc(data.length);
+  for (let i = 0, o = 0; i < w.data.length; i += channels, o += 4) {
+    const diff =
+      (w.data[i] - b.data[i]) +
+      (w.data[i + 1] - b.data[i + 1]) +
+      (w.data[i + 2] - b.data[i + 2]);
 
-  for (let i = 0; i < data.length; i += channels) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
+    // white render - black render = 255 * (1 - alpha)
+    const alpha = Math.max(0, Math.min(255, 255 - diff / 3));
 
-    // If pixel is white (or nearly white), make it transparent
-    if (r > 240 && g > 240 && b > 240) {
-      newData[i] = r;
-      newData[i + 1] = g;
-      newData[i + 2] = b;
-      newData[i + 3] = 0; // alpha = 0 (transparent)
+    if (alpha < 1) {
+      out[o] = out[o + 1] = out[o + 2] = out[o + 3] = 0;
     } else {
-      newData[i] = r;
-      newData[i + 1] = g;
-      newData[i + 2] = b;
-      newData[i + 3] = channels === 4 ? data[i + 3] : 255;
+      // un-premultiply the black render to recover the true color
+      out[o]     = Math.min(255, Math.round((b.data[i]     * 255) / alpha));
+      out[o + 1] = Math.min(255, Math.round((b.data[i + 1] * 255) / alpha));
+      out[o + 2] = Math.min(255, Math.round((b.data[i + 2] * 255) / alpha));
+      out[o + 3] = Math.round(alpha);
     }
   }
 
-  // Convert back to PNG with transparency
-  const finalBuffer = await sharp(newData, {
-    raw: { width, height, channels: 4 },
-  })
+  const finalBuffer = await sharp(out, { raw: { width, height, channels: 4 } })
     .png()
     .toBuffer();
 
