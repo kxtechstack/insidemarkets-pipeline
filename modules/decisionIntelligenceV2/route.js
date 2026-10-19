@@ -479,7 +479,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 function registerDecisionIntelligenceV2Route(app) {
   app.post('/decision-intelligence-v2/chat', async (req, res) => {
     try {
-      const {
+      let {
         question,
         clientId,
         industry,
@@ -571,7 +571,7 @@ function registerDecisionIntelligenceV2Route(app) {
   // ───────────────────────────────────────────────────────────────────────
   app.post('/decision-intelligence-v2/chat-with-memory', async (req, res) => {
     try {
-      const {
+      let {
         question,
         clientId,
         industry,
