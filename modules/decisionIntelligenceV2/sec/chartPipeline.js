@@ -6,7 +6,6 @@
  */
 
 const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
-const sharp = require('sharp');
 
 // =============================================================================
 // SECTION 1: formatChartData.js
@@ -124,7 +123,7 @@ const PALETTE = ['#0088CC', '#E63946', '#F4A300', '#2A9D8F', '#7B2CBF', '#F77F00
 const chartJSNodeCanvas = new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
-  backgroundColour: 'white', // Render on white, then strip it with sharp
+  backgroundColour: 'rgba(0,0,0,0)',
   chartCallback: (ChartJS) => {
     ChartJS.defaults.color = '#888888';
     ChartJS.defaults.borderColor = 'rgba(128,128,128,0.15)';
@@ -262,48 +261,8 @@ function buildChartConfig(chartData) {
 
 async function renderChart(chartData) {
   const config = buildChartConfig(chartData);
-  const buffer = await chartJSNodeCanvas.renderToBuffer(config, 'image/png');
-
-  // Use sharp to remove the white background and replace with transparent
-  // This fixes the chartjs-node-canvas bug where transparent renders as black
-  const transparentBuffer = await sharp(buffer)
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const { data, info } = transparentBuffer;
-  const { width, height, channels } = info;
-
-  // Create a new buffer where we set alpha=0 on pixels that are pure white
-  const newData = Buffer.alloc(data.length);
-
-  for (let i = 0; i < data.length; i += channels) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-
-    // If pixel is white (or nearly white), make it transparent
-    if (r > 240 && g > 240 && b > 240) {
-      newData[i] = r;
-      newData[i + 1] = g;
-      newData[i + 2] = b;
-      newData[i + 3] = 0; // alpha = 0 (transparent)
-    } else {
-      newData[i] = r;
-      newData[i + 1] = g;
-      newData[i + 2] = b;
-      newData[i + 3] = channels === 4 ? data[i + 3] : 255;
-    }
-  }
-
-  // Convert back to PNG with transparency
-  const finalBuffer = await sharp(newData, {
-    raw: { width, height, channels: 4 },
-  })
-    .png()
-    .toBuffer();
-
-  return finalBuffer.toString('base64');
+  const buffer = await chartJSNodeCanvas.renderToBuffer(config);
+  return buffer.toString('base64');
 }
 
 module.exports = {
