@@ -14,6 +14,8 @@
  *   - dedupe
  */
 
+const stringSimilarity = require('string-similarity');
+
 const FILLER_CONCEPTS = new Set([
   'industry', 'sector', 'business', 'company', 'companies',
   'update', 'updates', 'news', 'information', 'data',
@@ -80,7 +82,21 @@ function filterListHits(hits, concepts) {
 
   return hits.filter((h) => {
     const haystack = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
-    return clean.some((c) => containsPhrase(haystack, c));
+    
+    // 1. Exact match
+    if (clean.some((c) => containsPhrase(haystack, c))) return true;
+    
+    // 2. Fuzzy match (ignores spaces/hyphens)
+    const haystackWords = haystack.split(/[\s\-_]+/);
+    for (const c of clean) {
+      const conceptJoined = c.replace(/[\s\-_]+/g, '');
+      for (const hw of haystackWords) {
+        if (stringSimilarity.compareTwoStrings(hw, conceptJoined) > 0.8) {
+          return true;
+        }
+      }
+    }
+    return false;
   });
 }
 
