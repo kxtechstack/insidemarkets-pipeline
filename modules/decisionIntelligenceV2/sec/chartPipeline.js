@@ -123,7 +123,7 @@ const PALETTE = ['#0088CC', '#E63946', '#F4A300', '#2A9D8F', '#7B2CBF', '#F77F00
 const chartJSNodeCanvas = new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
-  backgroundColour: 'white',
+  backgroundColour: 'transparent',
 });
 
 function formatUsd(value) {
@@ -138,6 +138,7 @@ function formatUsd(value) {
 
 function buildChartConfig(chartData) {
   const { type, metricLabel = 'Value' } = chartData;
+  const DARK = '#111111';
 
   if (type === 'scatter') {
     return {
@@ -152,12 +153,12 @@ function buildChartConfig(chartData) {
       },
       options: {
         plugins: {
-          title: { display: true, text: `${chartData.xLabel} vs ${chartData.yLabel}`, font: { size: 16 } },
-          legend: { display: false },
+          title: { display: true, text: `${chartData.xLabel} vs ${chartData.yLabel}`, font: { size: 16, weight: 'bold' }, color: DARK },
+          legend: { display: false, labels: { color: DARK } },
         },
         scales: {
-          x: { title: { display: true, text: chartData.xLabel }, ticks: { callback: v => formatUsd(v) } },
-          y: { title: { display: true, text: chartData.yLabel }, ticks: { callback: v => formatUsd(v) } },
+          x: { title: { display: true, text: chartData.xLabel, color: DARK }, ticks: { callback: v => formatUsd(v), color: DARK } },
+          y: { title: { display: true, text: chartData.yLabel, color: DARK }, ticks: { callback: v => formatUsd(v), color: DARK } },
         },
       },
     };
@@ -181,7 +182,8 @@ function buildChartConfig(chartData) {
           },
           options: {
             plugins: {
-              title: { display: true, text: `${metricLabel} Composition`, font: { size: 16 } },
+              title: { display: true, text: `${metricLabel} Composition`, font: { size: 16, weight: 'bold' }, color: DARK },
+              legend: { labels: { color: DARK } },
             },
           },
         };
@@ -196,10 +198,13 @@ function buildChartConfig(chartData) {
       },
       options: {
         plugins: {
-          title: { display: true, text: `${metricLabel} Comparison`, font: { size: 16 } },
-          legend: { display: false },
+          title: { display: true, text: `${metricLabel} Comparison`, font: { size: 16, weight: 'bold' }, color: DARK },
+          legend: { display: false, labels: { color: DARK } },
         },
-        scales: { y: { ticks: { callback: v => formatUsd(v) } } },
+        scales: {
+          x: { ticks: { color: DARK } },
+          y: { ticks: { callback: v => formatUsd(v), color: DARK } },
+        },
       },
     };
   }
@@ -213,10 +218,13 @@ function buildChartConfig(chartData) {
       },
       options: {
         plugins: {
-          title: { display: true, text: `${metricLabel} by Company`, font: { size: 16 } },
-          legend: { display: false },
+          title: { display: true, text: `${metricLabel} by Company`, font: { size: 16, weight: 'bold' }, color: DARK },
+          legend: { display: false, labels: { color: DARK } },
         },
-        scales: { y: { ticks: { callback: v => formatUsd(v) } } },
+        scales: {
+          x: { ticks: { color: DARK } },
+          y: { ticks: { callback: v => formatUsd(v), color: DARK } },
+        },
       },
     };
   }
@@ -236,10 +244,13 @@ function buildChartConfig(chartData) {
     data: { labels: years, datasets },
     options: {
       plugins: {
-        title: { display: true, text: metricLabel, font: { size: 16 } },
-        legend: { display: series.length > 1 },
+        title: { display: true, text: metricLabel, font: { size: 16, weight: 'bold' }, color: DARK },
+        legend: { display: series.length > 1, labels: { color: DARK } },
       },
-      scales: { y: { ticks: { callback: v => formatUsd(v) } } },
+      scales: {
+        x: { ticks: { color: DARK } },
+        y: { ticks: { callback: v => formatUsd(v), color: DARK } },
+      },
     },
   };
 }
