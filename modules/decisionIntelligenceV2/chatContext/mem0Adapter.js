@@ -113,8 +113,29 @@ async function saveState(conversationId, partialState) {
   }
 
   try {
+    // ── NEW: Handle explicit deletions ──────────────────────────────
+    // If any key is null, it means we are doing a topic switch and want
+    // to clear the old context. Mem0's `add` function will hallucinate
+    // if we send it "entities: null", so we must use `deleteAll` instead.
+    const hasDeletions = Object.values(partialState || {}).some(v => v === null);
+    
+    if (hasDeletions) {
+      // Wipe the memory for this conversation
+      await memoryClient.deleteAll({ userId: conversationId });
+      
+      // Remove nulls from the partialState so we don't send them to the LLM
+      partialState = Object.fromEntries(
+        Object.entries(partialState).filter(([_, v]) => v !== null)
+      );
+      
+      if (Object.keys(partialState).length === 0) {
+        return {}; // Nothing else to save
+      }
+    }
+    // ────────────────────────────────────────────────────────────────
+
     const lines = Object.entries(partialState || {})
-      .filter(([_, v]) => v !== null && v !== undefined)
+      .filter(([_, v]) => v !== undefined) // We already filtered nulls above
       .map(([k, v]) => {
         const value = Array.isArray(v) ? v.join(', ') : String(v);
         return `${k}: ${value}`;
@@ -126,7 +147,10 @@ async function saveState(conversationId, partialState) {
 
     await memoryClient.add(
       [{ role: 'user', content: text }],
-      { userId: conversationId }
+      { 
+        userId: conversationId,
+        infer: false // We don't want Mem0 to hallucinate new facts; we only want it to store what we give it.
+      }
     );
 
     return await loadState(conversationId);
