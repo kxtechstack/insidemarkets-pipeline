@@ -56,6 +56,34 @@ const { loadState } = require('./chatContext/mem0Adapter');
 const { reformatPreviousAnswer } = require('./chatContext/reformatter');
 
 // ─────────────────────────────────────────────────────────────────────────
+// Normalizes squished brand names (e.g. "Kbeauty", "KBeauty", "Loreal")
+// into their proper spaced/hyphenated form.
+// ─────────────────────────────────────────────────────────────────────────
+function normalizeSquishedBrands(text) {
+  if (!text) return text;
+  let q = String(text);
+  
+  // 1. Handle camelCase: "KBeauty" -> "K Beauty"
+  q = q.replace(/([a-z])([A-Z])/g, '$1 $2');
+
+  // 2. Known proper nouns in our domain
+  const knownBrands = [
+    { pattern: /\bkbeaut(y|ies|i)\b/gi, replace: 'K-Beauty' },
+    { pattern: /\bkbeauty\b/gi, replace: 'K-Beauty' },
+    { pattern: /\bloreal\b/gi, replace: "L'Oréal" },
+    { pattern: /\bcoca ?cola\b/gi, replace: 'Coca-Cola' },
+    { pattern: /\bestee ?lauder\b/gi, replace: 'Estée Lauder' },
+    { pattern: /\bulta ?beauty\b/gi, replace: 'Ulta Beauty' },
+  ];
+  
+  for (const fix of knownBrands) {
+    q = q.replace(fix.pattern, fix.replace);
+  }
+
+  return q;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Deterministic filter for inference / decision.
 //
 // Same concept normalization as list. Keeps any hit where at least one
@@ -152,6 +180,10 @@ async function prepareListCandidates(hits) {
 // Pipeline runner
 // ─────────────────────────────────────────────────────────────────────────
 async function runV2Pipeline({ question, clientId, industry, forcedType }) {
+  // ── 0. Normalize squished brand names ──────────────────────────────
+  question = normalizeSquishedBrands(question);
+  // ────────────────────────────────────────────────────────────────────
+
   // ── 1. Route ────────────────────────────────────────────────────────
   let routerResult;
   if (forcedType) {
@@ -471,6 +503,7 @@ function registerDecisionIntelligenceV2Route(app) {
         });
       }
 
+      question = normalizeSquishedBrands(question);
       await appendMessage({ conversationId, role: 'user', content: question });
 
       let result;
@@ -570,7 +603,8 @@ function registerDecisionIntelligenceV2Route(app) {
         console.log(`[chat-with-memory] loadState failed: ${err.message}`);
       }
 
-      // ── 2. Persist user message BEFORE resolver reads recent messages ─
+      // ── 2. Normalize + Persist user message BEFORE resolver ──────────
+      question = normalizeSquishedBrands(question);
       await appendMessage({ conversationId, role: 'user', content: question });
 
       // ── 3. Run context resolver ───────────────────────────────────────
