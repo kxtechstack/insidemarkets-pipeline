@@ -57,26 +57,25 @@ const COMPANY_NAME_STOP = new Set([
 
 async function generateCleanTitle(question, facts) {
   try {
-    // Get the exact, unique companies actually retrieved
-    const uniqueCompanies = [...new Set(facts.map(f => f.company_name))];
-    const companyCount = uniqueCompanies.length;
-    const companyNames = uniqueCompanies.join(', ');
-    const metric = facts[0]?.metric_name || 'Revenue';
+    const sampleData = facts
+      .slice(0, 5)
+      .map(f => `${f.company_name} (${f.ticker}): ${f.metric_name} $${(f.metric_value / 1e9).toFixed(2)}B`)
+      .join(', ');
 
     const prompt = `You are writing a short, accurate title for a financial report.
 
 Context:
 - The user asked: "${question}"
-- The metric is: ${metric}
-- The actual companies in the data: ${companyNames}
-- The exact number of companies in the data: ${companyCount}
+- The actual data retrieved: ${sampleData}
+- Total number of companies in the data: ${facts.length}
 
 STRICT RULES:
-1. Format the title using the user's question, but clean it up into a professional title (e.g. Capitalize letters, remove "?", keep it under 10 words).
-2. The SEC data is ONLY for US-listed companies. NEVER mention any country (e.g., US, USA, Korea, Japan) in the title. If the user's question mentions a country, IGNORE the country completely.
-3. You MUST use the exact number of companies (${companyCount}) if the user asked for "Top X". If they asked for Top 5 but only ${companyCount} are available, the title must say "Top ${companyCount}".
-4. If the question is a comparison (e.g., Apple vs Amazon), the title must be a comparison of those specific companies.
-5. Return ONLY the text of the title. No quotes, no markdown.
+1. The title MUST be maximum 8 words.
+2. Do NOT include any country names (e.g., US, USA, Korean, Japan). The SEC data is ALWAYS US-listed companies, so never mention a country.
+3. Do NOT include a number higher than the actual companies retrieved. If the user asked for "top 5" but the data only has 2, the title must say "Top 2" (or just list the companies).
+4. If the data is a comparison, the title should reflect that (e.g., "Apple vs Amazon Revenue Comparison").
+5. If the data is a ranking, the title should say "Top X [Sector] Companies by [Metric]" using the ACTUAL number of companies retrieved (X).
+6. Return ONLY the text of the title, nothing else. No quotes.
 
 Write the title now:`;
 
