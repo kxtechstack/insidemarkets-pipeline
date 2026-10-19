@@ -719,8 +719,22 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
 
     if (nonUs) {
       if (isSecNumericQuestion(question, routerResult, intent)) {
-        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → region fallback`);
-        return await buildRegionFallback(question, nonUs, clientId, industry, routerResult);
+        console.log(`[secHandler] non-US "${nonUs}" + SEC-numeric → returning no_data`);
+        
+        // Return the explicit US-only message
+        return {
+          mode: 'region_fallback',
+          payload: {
+            type: 'list',
+            items: [],
+            no_data: true,
+            message: `I can't provide financial metrics for ${nonUs} — our SEC financial data covers US-listed companies only.`,
+            suggestions: [
+              'Revenue of top US cosmetic companies',
+              'Compare Apple and Amazon revenue',
+            ],
+          }
+        };
       }
       console.log(`[secHandler] non-US "${nonUs}" but not SEC-numeric — falling through to V2`);
       return null;
