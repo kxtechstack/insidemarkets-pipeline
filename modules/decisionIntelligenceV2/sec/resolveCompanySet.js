@@ -68,10 +68,16 @@ const NON_US_COUNTRIES = [
 ];
 
 const NON_US_ALIASES = [
-  'uk','britain','great britain','england','scotland','wales',
-  'northern ireland','holland','deutschland','espana','italia',
-  'uae','ksa','saudi','emirates','korea','s. korea','n. korea',
-  'prc','roc','russian federation','czech','burma','ivory coast',
+  'uk','britain','british','great britain','england','english','scotland','scottish','wales','welsh',
+  'northern ireland','holland','dutch','deutschland','german','germany','espana','spanish','italia','italian',
+  'french','france', 'europe', 'european',
+  'uae','ksa','saudi','emirates','israeli','israel','turkish','turkey', 'middle east',
+  'korea','s. korea','n. korea','korean','japan','japanese','china','chinese','indian','india',
+  'indonesian','indonesia','vietnamese','vietnam','thai','thailand','singaporean','singapore',
+  'malaysian','malaysia','filipino','philippines','taiwanese','taiwan', 'asia', 'asian',
+  'canadian','canada','mexican','mexico','brazilian','brazil','argentinian','argentina','chilean','chile',
+  'south african','south africa','nigerian','nigeria','kenyan','kenya','egyptian','egypt', 'africa', 'african',
+  'prc','roc','russian federation','russian','russia','czech','burma','ivory coast',
   'swaziland','vatican city','holy see',
 ];
 
@@ -125,18 +131,23 @@ function detectNonUSGeography(question) {
   if (!question) return null;
   const q = String(question).toLowerCase();
 
+  // 1. WHITELIST CHECK: If it explicitly says US/USA, it's allowed.
   for (const term of US_TERMS) {
     const pattern = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
-    if (pattern.test(q)) return null;
-  }
-
-  for (const term of NON_US_TERMS) {
-    const pattern = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
     if (pattern.test(q)) {
-      return titleCase(term);
+      return null; // ALLOW
     }
   }
 
+  // 2. BLACKLIST CHECK: If it mentions a non-US country, reject it.
+  for (const term of NON_US_TERMS) {
+    const pattern = new RegExp(`\\b${escapeRegex(term)}\\b`, 'i');
+    if (pattern.test(q)) {
+      return titleCase(term); // REJECT
+    }
+  }
+
+  // 3. No country mentioned: Return null (Allowed, assumes US).
   return null;
 }
 // ── end geographic scope guard ─────────────────────────────────────────
