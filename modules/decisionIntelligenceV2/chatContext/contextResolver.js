@@ -352,6 +352,25 @@ HARD PROHIBITION:
   current turn is about glossier), do NOT mix them.
 
 =========================
+CRITICAL RULE — BROAD MARKET QUERIES
+=========================
+
+If the user asks a broad question about companies, revenue, or rankings 
+(e.g., "Revenue of top cosmetic companies", "top 5 airlines", "compare 
+apple and amazon"), it is a NEW_QUESTION.
+
+Do NOT attach a specific country or region from the previous conversation 
+to this question. The SEC data is always US-based, so adding "Korean" or 
+"Japan" will break the query.
+
+For example:
+  Recent: "What is happening in the Korean beauty market?"
+  Current: "Revenue of top cosmetic companies"
+  → kind = "new_question"
+  → standalone_query = "Revenue of top cosmetic companies"
+  → NOT "Revenue of top cosmetic companies in the Korean beauty market."
+
+=========================
 EXAMPLES
 =========================
 
