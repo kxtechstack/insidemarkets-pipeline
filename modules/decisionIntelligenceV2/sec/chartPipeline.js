@@ -123,7 +123,7 @@ const PALETTE = ['#0088CC', '#E63946', '#F4A300', '#2A9D8F', '#7B2CBF', '#F77F00
 const chartJSNodeCanvas = new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
-  backgroundColour: 'transparent',
+  backgroundColour: 'white',
 });
 
 function formatUsd(value) {
