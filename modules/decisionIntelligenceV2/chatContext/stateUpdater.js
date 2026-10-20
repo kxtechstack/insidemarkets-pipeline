@@ -47,7 +47,10 @@ function questionsAreEquivalent(a, b) {
 
 function sanitizeUpdaterOutput(currentState, proposedState, userMessage) {
   const current = currentState && typeof currentState === 'object' ? currentState : {};
-  const cleaned = { ...(proposedState && typeof proposedState === 'object' ? proposedState : {}) };
+  
+  // proposedState might be the whole parsed object or just the state
+  const proposed = proposedState?.state || proposedState;
+  const cleaned = { ...(proposed && typeof proposed === 'object' ? proposed : {}) };
 
   // 1. open_questions must not contain the current question.
   if (Array.isArray(cleaned.open_questions)) {
@@ -67,10 +70,19 @@ function sanitizeUpdaterOutput(currentState, proposedState, userMessage) {
     if (cleaned.entities.length === 0) delete cleaned.entities;
   }
 
-  // 3. Preserve untouched keys.
+  // 3. Preserve untouched keys — BUT respect explicit deletions during topic switches.
+  const llmChangedArr = Array.isArray(proposedState?.changed_keys) ? proposedState.changed_keys : [];
+  const llmChanged = new Set(llmChangedArr);
+  const topicChanged = llmChanged.has('topic') || (cleaned.topic && cleaned.topic !== current.topic);
+
   for (const key of Object.keys(current)) {
     if (key === 'open_questions') continue;
-    if (!(key in cleaned)) cleaned[key] = current[key];
+    if (key in cleaned) continue;        // already provided
+    if (topicChanged && !llmChanged.has(key)) {
+      // Topic switched: DO NOT resurrect dropped keys.
+      continue;
+    }
+    cleaned[key] = current[key];
   }
 
   return cleaned;
@@ -506,7 +518,7 @@ async function updateState({ conversationId, userMessage, answer, currentState }
     return { updatedState: safeCurrent, changed_keys: [] };
   }
 
-  const newState = sanitizeUpdaterOutput(safeCurrent, parsed.state, userMessage);
+  const newState = sanitizeUpdaterOutput(safeCurrent, parsed, userMessage);
   const computedChanged = diffState(safeCurrent, newState);
   const llmChanged = Array.isArray(parsed.changed_keys)
     ? parsed.changed_keys.filter((k) => typeof k === 'string')
