@@ -223,8 +223,6 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
   let understanding;
   if (opts.precomputedUnderstanding) {
     understanding = { ...opts.precomputedUnderstanding };
-    // Router output uses `type`; retrieval internals expect `question_type`.
-    // Alias so downstream code (and logging) works consistently.
     if (understanding.question_type === undefined && understanding.type !== undefined) {
       understanding.question_type = understanding.type;
     }
@@ -240,6 +238,156 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
   );
 
   const vector = await embedText(question);
+
+  // ═══════════════════════════════════════════════════════════════
+  // DYNAMIC KEYWORD BOOST
+  // ═══════════════════════════════════════════════════════════════
+  const rawKeywords = [
+    ...(understanding.concept_keywords || []),
+    ...(understanding.entity_mentions || []),
+  ]
+    .map(k => k.toLowerCase().trim())
+    .filter(k => k.length > 2);
+
+  const uniqueKeywords = [...new Set(rawKeywords)];
+  const exactMatchHits = new Map();
+
+  if (uniqueKeywords.length > 0) {
+    for (const kw of uniqueKeywords) {
+      try {
+        const textHits = await qdrant.scroll(POLICY_COLLECTION, {
+          filter: {
+            must: [
+              { key: 'client_id', match: { value: clientId } },
+              { key: 'chunk_text', match: { text: kw } }
+            ]
+          },
+          limit: 15,
+          with_payload: true,
+        });
+
+        const count = textHits.points?.length || 0;
+
+        if (count > 0 && count < 15) {
+          console.log(`  [Dynamic Boost] "${kw}" is rare (${count} hits). Boosting to 1.0.`);
+          for (const h of textHits.points) {
+            exactMatchHits.set(h.id, h);
+          }
+        } else if (count >= 15) {
+          console.log(`  [Dynamic Boost] "${kw}" is generic (${count}+ hits). Ignoring.`);
+        }
+      } catch (err) {
+        console.log(`  [Dynamic Boost] Failed for "${kw}": ${err.message}`);
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // SUPABASE INTERSECTION BACKUP
+  // ═══════════════════════════════════════════════════════════════
+  if (uniqueKeywords.length > 0) {
+    const { createClient } = require('@supabase/supabase-js');
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+    const articlesPerKeyword = new Map();
+    const distinctiveKeywords = [];
+
+    for (const kw of uniqueKeywords) {
+      const kwHits = [...exactMatchHits.values()].filter(h =>
+        (h.payload?.chunk_text || '').toLowerCase().includes(kw)
+      );
+      if (kwHits.length >= 15) continue;
+
+      const idsForKeyword = new Set();
+
+      const { data: pData } = await supabase
+        .from('policy_signals')
+        .select('article_id')
+        .eq('client_id', clientId)
+        .or(`signal_title.ilike.%${kw}%,summary.ilike.%${kw}%`)
+        .limit(50);
+
+      (pData || []).forEach(r => idsForKeyword.add(r.article_id));
+
+      const { data: mData } = await supabase
+        .from('market_dynamics_signals')
+        .select('article_id')
+        .eq('client_id', clientId)
+        .or(`signal_title.ilike.%${kw}%,summary.ilike.%${kw}%`)
+        .limit(50);
+
+      (mData || []).forEach(r => idsForKeyword.add(r.article_id));
+
+      if (idsForKeyword.size > 0) {
+        articlesPerKeyword.set(kw, idsForKeyword);
+        distinctiveKeywords.push(kw);
+        console.log(`  [Supabase] "${kw}" → ${idsForKeyword.size} articles`);
+      }
+    }
+
+    if (distinctiveKeywords.length >= 2) {
+      const sets = distinctiveKeywords.map(kw => articlesPerKeyword.get(kw));
+      const intersect = new Set([...sets[0]].filter(id => sets.every(s => s.has(id))));
+
+      const finalIds = [...intersect].filter(Boolean);
+      console.log(`  [Supabase Intersection] ${finalIds.length} articles match ALL ${distinctiveKeywords.length} distinctive keywords`);
+
+      // HONESTY GUARD: If multi-keyword intersection is empty, clear all boosts
+      if (finalIds.length === 0) {
+        console.log(`  [Honesty Guard] No article matches ALL keywords — clearing boosts.`);
+        exactMatchHits.clear();
+      } else if (finalIds.length <= 10) {
+        try {
+          const fallbackHits = await qdrant.scroll(POLICY_COLLECTION, {
+            filter: {
+              must: [
+                { key: 'client_id', match: { value: clientId } },
+                { key: 'article_id', match: { any: finalIds } }
+              ]
+            },
+            limit: 50,
+            with_payload: true,
+          });
+
+          console.log(`  [Qdrant ID Fetch] ${fallbackHits.points?.length || 0} chunks`);
+
+          for (const h of fallbackHits.points || []) {
+            if (!exactMatchHits.has(h.id)) {
+              exactMatchHits.set(h.id, h);
+            }
+          }
+        } catch (err) {
+          console.log(`  [Qdrant] article_id fetch failed: ${err.message}`);
+        }
+      }
+    } else if (distinctiveKeywords.length === 1) {
+      const kw = distinctiveKeywords[0];
+      const finalIds = [...articlesPerKeyword.get(kw)].filter(Boolean);
+      console.log(`  [Supabase Single Keyword] "${kw}" → ${finalIds.length} articles`);
+
+      if (finalIds.length > 0 && finalIds.length <= 10) {
+        try {
+          const fallbackHits = await qdrant.scroll(POLICY_COLLECTION, {
+            filter: {
+              must: [
+                { key: 'client_id', match: { value: clientId } },
+                { key: 'article_id', match: { any: finalIds } }
+              ]
+            },
+            limit: 50,
+            with_payload: true,
+          });
+          for (const h of fallbackHits.points || []) {
+            if (!exactMatchHits.has(h.id)) {
+              exactMatchHits.set(h.id, h);
+            }
+          }
+        } catch (err) {
+          console.log(`  [Qdrant] article_id fetch failed: ${err.message}`);
+        }
+      }
+    }
+  }
 
   const perModuleResults = await Promise.all(
     modules.map(async (moduleId) => {
@@ -267,12 +415,16 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
   );
 
   const merged = [];
+  const processedIds = new Set();
+
   for (const { moduleId, hits } of perModuleResults) {
     for (const h of hits) {
       if (!h || typeof h.score !== 'number') continue;
       if (h.score < vectorFloor) continue;
 
       const p = h.payload || {};
+      const isExactMatch = exactMatchHits.has(h.id);
+
       const baseHit = {
         id: h.id,
         score: h.score,
@@ -290,12 +442,39 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
       baseHit._boost_mult    = boost.multiplier;
       baseHit._boost_penalty = boost.penalty;
       baseHit._boost_matched = boost.matched;
-      baseHit._matched       = (boost.matched.conceptsInTitle.length > 0)
-                             || (boost.matched.entitiesInTitle.length > 0);
-      baseHit.score          = Math.min(baseHit.score * boost.multiplier, 1.0);
+      baseHit._matched       = isExactMatch
+                            || (boost.matched.conceptsInTitle.length > 0)
+                            || (boost.matched.entitiesInTitle.length > 0);
+      baseHit.score          = isExactMatch ? 1.0 : Math.min(baseHit.score * boost.multiplier, 1.0);
 
       merged.push(baseHit);
+      processedIds.add(h.id);
     }
+  }
+
+  for (const h of exactMatchHits.values()) {
+    if (processedIds.has(h.id)) continue;
+
+    const p = h.payload || {};
+    const baseHit = {
+      id: h.id,
+      score: 1.0,
+      module_id: p.module_id,
+      module_name: MODULE_NAMES[p.module_id] || 'Unknown',
+      title: p.title || 'Untitled',
+      chunk_text: p.chunk_text || '',
+      article_id: p.article_id || null,
+      published_date: p.published_date || null,
+      submodule_id: p.submodule_id || null,
+      _matched: true,
+      _vector_score: 1.0,
+      _boost_mult: 1.0,
+      _boost_penalty: 1.0,
+      _boost_matched: { conceptsInTitle: [], entitiesInTitle: [] },
+    };
+
+    merged.push(baseHit);
+    processedIds.add(h.id);
   }
 
   merged.sort((a, b) => b.score - a.score);
@@ -333,12 +512,9 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
     }
   }
 
-  // Split into matched / un-matched. Both are already sorted desc by score
-  // because timeFiltered preserves the earlier sort.
   const matchedHits   = timeFiltered.filter((h) => h._matched);
   const unmatchedHits = timeFiltered.filter((h) => !h._matched);
 
-  // Order: matched first, then top un-matched appended until we hit minResults
   let finalList = [...matchedHits];
   if (finalList.length < minResults) {
     const needed = minResults - finalList.length;
@@ -352,7 +528,6 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
 
   const hits = finalList.slice(0, topK);
 
-  // Recompute counts on the FINAL capped list — ensures they sum to hits.length
   const finalMatchedCount = hits.filter((h) => h._matched).length;
   const finalUnmatchedCount = hits.length - finalMatchedCount;
 
