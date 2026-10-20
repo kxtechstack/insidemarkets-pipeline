@@ -22,11 +22,15 @@ The user has asked for their PREVIOUS answer to be reformatted, summarized, or e
 You will be given the previous answer's full content and the user's instruction.
 
 Apply the instruction to the previous answer. 
-- If the user says "explain more", "elaborate", or "expand": Add more depth to the existing points. You MUST strictly use ONLY facts, companies, and events mentioned in the previous answer. If the user asks about something that is NOT in the previous answer, explicitly say "The previous answer does not contain details about [X]."
-- If the user says "summarize": Condense it.
-- If the user says "bullet points": Break the text into bullets.
+- If the user says "explain more", "elaborate", "go deeper", or "expand": Add more detail, context, and depth to the existing points. Do not invent new facts outside the scope of the previous answer, but flesh it out significantly.
+- If the user says "summarize", "TL;DR", or "make shorter": Condense the answer into the most critical 1-3 sentences.
+- If the user says "bullet points": Break the existing text into clear bullet points.
+- If the user asks for any other specific format (like a table, a formal tone, simpler language, etc.): Apply that exact format.
 
-CRITICAL: Do NOT invent new facts or hallucinate. 
+Preserve exactly:
+- Company names, dates, numbers, percentages, monetary figures
+- The names of regulations, products, and organizations
+- All factual claims
 
 Output format — return EXACTLY this JSON object and NOTHING ELSE:
 
@@ -39,8 +43,10 @@ Output format — return EXACTLY this JSON object and NOTHING ELSE:
 }
 
 Rules:
+- If the user asked for bullet points, produce sections with the requested number of points.
+- If the user asked to expand/explain more, produce multiple sections with more detail and depth.
 - Do not include markdown fences, prose before/after, or commentary.
-- Inside strings, any line break MUST be written as \\n. NEVER press Enter inside a string.`;
+- The "points" arrays are arrays of strings. Line breaks inside strings must be written as \\n. Never press Enter inside a string.`;
 
 async function loadPreviousAssistantMessage(conversationId) {
   if (!conversationId) return null;
@@ -126,31 +132,15 @@ function parseReformatterJson(raw) {
         .filter(s => s && typeof s.heading === 'string')
         .map(s => ({
           heading: s.heading,
-          points: Array.isArray(s.points) ? s.points.filter(p => typeof p === 'string' && p.trim()) : [],
+          points: Array.isArray(s.points)
+            ? s.points.filter(p => typeof p === 'string' && p.trim())
+            : [],
         }))
         .filter(s => s.points.length > 0),
       bottom_line: typeof parsed.bottom_line === 'string' ? parsed.bottom_line : '',
     };
   } catch (err) {
-    // Auto-repair raw line breaks inside quotes
-    try {
-      const repaired = cleaned.slice(first, end + 1).replace(/(?<=:\s*".*?)\n(?=.*?")/g, '\\n');
-      const parsed = JSON.parse(repaired);
-      if (!Array.isArray(parsed.sections)) return null;
-      return {
-        title: typeof parsed.title === 'string' ? parsed.title.slice(0, 200) : '',
-        sections: parsed.sections
-          .filter(s => s && typeof s.heading === 'string')
-          .map(s => ({
-            heading: s.heading,
-            points: Array.isArray(s.points) ? s.points.filter(p => typeof p === 'string' && p.trim()) : [],
-          }))
-          .filter(s => s.points.length > 0),
-        bottom_line: typeof parsed.bottom_line === 'string' ? parsed.bottom_line : '',
-      };
-    } catch (e2) {
-      return null;
-    }
+    return null;
   }
 }
 
