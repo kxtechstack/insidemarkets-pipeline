@@ -34,7 +34,6 @@ async function handleQuery(question) {
   let currentState = {};
   try {
     currentState = await loadState(CONV_ID);
-    console.log(`[Memory] State loaded:`, JSON.stringify(currentState));
   } catch (err) {}
 
   let resolverResult;
@@ -54,7 +53,7 @@ async function handleQuery(question) {
     resolverResult = { standalone_query: question, kind: 'new_question' };
   }
 
-    // ── HANDLE REFORMAT ──────────────────────────────────────────────
+  // ── HANDLE REFORMAT ──────────────────────────────────────────────
   if (resolverResult.kind === 'reformat') {
     console.log(`[Memory] Handling as REFORMAT instruction.`);
     
@@ -65,36 +64,33 @@ async function handleQuery(question) {
       return;
     }
 
-    try {
-      // Use the production reformatter logic
-      const { reformatPreviousAnswer } = require('../modules/decisionIntelligenceV2/chatContext/reformatter');
-      
-      // We temporarily mock the database save since we aren't hitting the real API in this local test
-      // (This mimics what route.js does)
-      const reformatResult = await reformatPreviousAnswer({
-        conversationId: CONV_ID,
-        instruction: resolverResult.standalone_query,
-        // We pass the previous answer directly to avoid DB lookups failing locally
-        mockPreviousPayload: LAST_ANSWER 
-      });
+    const userPrompt = 
+      `PREVIOUS ANSWER:\n${JSON.stringify(LAST_ANSWER.report || LAST_ANSWER.items)}\n\n` +
+      `USER'S REFORMAT INSTRUCTION:\n${resolverResult.standalone_query}`;
 
-      if (reformatResult.payload) {
-        console.log(`\n--- AI ANSWER ---`);
-        console.log(`REPORT: ${reformatResult.payload.report?.title}`);
-        (reformatResult.payload.report?.sections || []).forEach(s => {
-          console.log(`    - ${s.heading}:`);
-          (s.points || []).slice(0, 2).forEach(p => console.log(`        * ${p}`));
-        });
-        console.log(`-----------------\n`);
-        LAST_ANSWER = reformatResult.payload;
-      } else {
-        console.log(`\n--- AI ANSWER ---`);
-        console.log(`Reformat failed: No payload returned.`);
-        console.log(`-----------------\n`);
-      }
+    let raw;
+    try {
+      raw = await callLLM(
+        [{ role: 'system', content: REFORMAT_PROMPT }, { role: 'user', content: userPrompt }],
+        { temperature: 0.2, max_tokens: 1800, timeout: 90000 }
+      );
+      
+      const parsed = JSON.parse(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      
+      console.log(`\n--- AI ANSWER ---`);
+      console.log(`REPORT: ${parsed.title}`);
+      (parsed.sections || []).forEach(s => {
+        console.log(`    - ${s.heading}:`);
+        (s.points || []).slice(0, 2).forEach(p => console.log(`        * ${p}`));
+      });
+      console.log(`-----------------\n`);
+
+      // Update LAST_ANSWER so we can reformat it again
+      LAST_ANSWER = { report: parsed };
+      
     } catch (err) {
       console.log(`\n--- AI ANSWER ---`);
-      console.log(`Reformat error: ${err.message}`);
+      console.log(`Reformat failed: ${err.message}`);
       console.log(`-----------------\n`);
     }
     
@@ -141,16 +137,13 @@ async function handleQuery(question) {
   if (resolverResult.kind !== 'greeting' && resolverResult.kind !== 'off_topic') {
     try {
       const answerText = payload.type === 'list' ? 'List of items' : (payload.report?.title || 'Report');
-      const updaterResult = await updateState({
+      await updateState({
         conversationId: CONV_ID,
         userMessage: queryForPipeline,
         answer: answerText,
         currentState,
       });
-      console.log(`[Memory] State updated to:`, JSON.stringify(updaterResult.updatedState));
-    } catch (err) {
-      console.log(`[Memory] Update failed: ${err.message}`);
-    }
+    } catch (err) {}
   }
 }
 

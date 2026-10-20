@@ -238,23 +238,6 @@ The key distinction:
 Test yourself: "Does the user want NEW information, or the SAME
 information presented differently?" If SAME information, kind = "reformat".
 
-SPECIAL RULE — EXPANDING ON AN ENTITY
-
-If the user asks to "explain more", "tell me more", or "elaborate" about a specific 
-entity or topic that was JUST mentioned in the previous assistant answer, this is 
-NOT off_topic and NOT a new_question. It is a "reformat" (or "followup") request.
-
-Examples:
-  Recent Assistant: "...driven by consumer demand for natural products, and companies 
-                     like Red Pantz and Nahala Active Organics are well-positioned..."
-  Current: "Explain more about Red Pantz"
-  → kind = "reformat"
-  → standalone_query = "Explain more about Red Pantz"
-
-  Current: "Tell me more about the Estee Lauder acquisition"
-  → kind = "followup"
-  → standalone_query = "Provide more details on the Estee Lauder acquisition."
-
 =========================
 STANDALONE_QUERY RULES
 =========================
