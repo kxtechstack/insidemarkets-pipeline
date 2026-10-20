@@ -364,14 +364,14 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     // ────────────────────────────────────────────────────────────────
 
     if (filtered.length === 0) {
-      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry });
+      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry, question });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
     const candidates = await prepareListCandidates(filtered);
 
     if (candidates.length === 0) {
-      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry });
+      const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry, question });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
@@ -389,7 +389,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     if (!selected || selected.length === 0) {
       const payload = await buildListResponse({
         handlerResult: { items: [], _empty: true, _reason: 'no signals genuinely answer this question' },
-        clientId, industry,
+        clientId, industry, question,
       });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
@@ -450,12 +450,14 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       const payload = await buildInferenceResponse({
         handlerResult: { _empty: true, _reason: 'no relevant content matched this question' },
         clientId,
+        question,
       });
       return { routerResult, payload };
     }
     const payload = await buildDecisionResponse({
       handlerResult: { _empty: true, _reason: 'no relevant content matched this question' },
       clientId,
+      question,
     });
     return { routerResult, payload };
   }
@@ -463,13 +465,13 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   if (routerResult.type === 'inference') {
     // SEC chunks only attach to decision — inference stays client+custom only.
     const handlerResult = await buildInferenceAnswer(question, keptClient, keptCustom, routerResult);
-    const payload = await buildInferenceResponse({ handlerResult, clientId });
+    const payload = await buildInferenceResponse({ handlerResult, clientId, question });
     return { routerResult, handlerResult, payload };
   }
 
   // decision — SEC chunks merged in (empty array if SEC didn't fire)
   const handlerResult = await buildDecisionAnswer(question, keptClientWithSec, keptCustom, routerResult);
-  const payload = await buildDecisionResponse({ handlerResult, clientId });
+  const payload = await buildDecisionResponse({ handlerResult, clientId, question });
   return { routerResult, handlerResult, payload };
 }
 

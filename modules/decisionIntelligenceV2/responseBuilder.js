@@ -40,9 +40,9 @@ async function loadHomeSuggestions(clientId, industry) {
   return DEFAULT_NO_DATA_SUGGESTIONS;
 }
 
-async function loadVerifiedSuggestions(clientId) {
+async function loadVerifiedSuggestions(clientId, question = null) {
   try {
-    const smart = await getSmartSuggestions(clientId);
+    const smart = await getSmartSuggestions(clientId, question);
     if (smart && smart.length) return smart;
   } catch (err) {
     console.log(`[V2 responseBuilder] smart suggestions failed (verified): ${err.message}`);
@@ -109,9 +109,9 @@ async function buildClarificationResponse({ routerResult, clientId, industry }) 
   };
 }
 
-async function buildListResponse({ handlerResult, clientId, industry }) {
+async function buildListResponse({ handlerResult, clientId, industry, question }) {
   if (!handlerResult || !handlerResult.items || handlerResult.items.length === 0) {
-    const suggestions = await loadVerifiedSuggestions(clientId);
+    const suggestions = await loadVerifiedSuggestions(clientId, question);
     return {
       type: 'list',
       items: [],
@@ -127,9 +127,9 @@ async function buildListResponse({ handlerResult, clientId, industry }) {
   };
 }
 
-async function buildInferenceResponse({ handlerResult, clientId }) {
+async function buildInferenceResponse({ handlerResult, clientId, question }) {
   if (!handlerResult || handlerResult._empty || !handlerResult.report) {
-    const suggestions = await loadVerifiedSuggestions(clientId);
+    const suggestions = await loadVerifiedSuggestions(clientId, question);
     return {
       type: 'list',
       items: [],
@@ -149,9 +149,9 @@ async function buildInferenceResponse({ handlerResult, clientId }) {
   };
 }
 
-async function buildDecisionResponse({ handlerResult, clientId }) {
+async function buildDecisionResponse({ handlerResult, clientId, question }) {
   if (!handlerResult || handlerResult._empty || !handlerResult.report) {
-    const suggestions = await loadVerifiedSuggestions(clientId);
+    const suggestions = await loadVerifiedSuggestions(clientId, question);
     return {
       type: 'list',
       items: [],
@@ -177,7 +177,7 @@ async function buildDecisionResponse({ handlerResult, clientId }) {
     );
 
   if (allEmpty) {
-    const suggestions = await loadVerifiedSuggestions(clientId);
+    const suggestions = await loadVerifiedSuggestions(clientId, question);
     return {
       type: 'list',
       items: [],

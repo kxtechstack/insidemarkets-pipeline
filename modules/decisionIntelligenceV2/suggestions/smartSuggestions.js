@@ -12,9 +12,16 @@
  *
  * Falls back to generic suggestions if 0 survive.
  */
-
 const { createClient } = require('@supabase/supabase-js');
+const { QdrantClient } = require('@qdrant/js-client-rest');
 const { callLLM } = require('../../llmClient');
+
+const qdrant = new QdrantClient({
+  url: process.env.QDRANT_URL,
+  apiKey: process.env.QDRANT_API_KEY,
+  checkCompatibility: false,
+});
+const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articles';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -87,6 +94,47 @@ async function getRecentItems(clientId) {
 
   items = await fetchItemsForWindow(clientId, 90);
   return items;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Fetch related signals from Qdrant based on the question keywords
+// ────────────────────────────────────────────────────────────────────────
+async function fetchQdrantRelatedItems(clientId, keywords) {
+  if (!keywords || keywords.length === 0) return [];
+
+  try {
+    const allChunks = await qdrant.scroll(POLICY_COLLECTION, {
+      filter: {
+        must: [{ key: 'client_id', match: { value: clientId } }]
+      },
+      limit: 10000,
+      with_payload: true,
+    });
+
+    const matches = new Map();
+    for (const p of allChunks.points || []) {
+      const text = (p.payload?.chunk_text || '').toLowerCase();
+      const title = (p.payload?.title || '').toLowerCase();
+      const combined = `${title} ${text}`;
+
+      // Match if any keyword appears in the chunk
+      const hasMatch = keywords.some(kw => combined.includes(kw));
+      if (hasMatch) {
+        // Dedupe by title so we don't flood with multiple chunks of the same article
+        const key = p.payload?.title || p.id;
+        if (!matches.has(key)) {
+          matches.set(key, {
+            title: p.payload?.title || 'Untitled',
+            summary: p.payload?.chunk_text || '',
+          });
+        }
+      }
+    }
+    return [...matches.values()];
+  } catch (err) {
+    console.log(`[smartSuggestions] Qdrant fetch failed: ${err.message}`);
+    return [];
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -232,7 +280,7 @@ async function generateSuggestionsWithLLM(items) {
 // ────────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────────
-async function getSmartSuggestions(clientId) {
+async function getSmartSuggestions(clientId, currentQuestion = null) {
   if (!clientId) return FALLBACK_SUGGESTIONS;
 
   let items = [];
@@ -247,6 +295,46 @@ async function getSmartSuggestions(clientId) {
     console.log(`[smartSuggestions] only ${items.length} items in 90d — fallback`);
     return FALLBACK_SUGGESTIONS;
   }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // NEW: Filter signals to be relevant to the current question
+  // ────────────────────────────────────────────────────────────────────────
+  if (currentQuestion && currentQuestion.trim().length > 0) {
+    // Clean the question to get core keywords
+    const stopWords = new Set(['what', 'how', 'why', 'when', 'where', 'who', 'which', 'the', 'and', 'for', 'with', 'from', 'this', 'that', 'these', 'those', 'about', 'into', 'over', 'under', 'than', 'then', 'so', 'if', 'it', 'its', 'their', 'his', 'her', 'our', 'your', 'my', 'we', 'you', 'they', 'he', 'she', 'i', 'me', 'us', 'them', 'him', 'any', 'all', 'some', 'no', 'not', 'more', 'most', 'many', 'much', 'very', 'just', 'also', 'only', 'even', 'still', 'yet', 'well', 'up', 'down', 'out', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can']);
+    
+    const questionWords = currentQuestion.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !stopWords.has(w));
+
+    if (questionWords.length > 0) {
+      // STEP 1: Try to filter the client's recent signals first
+      const relevantItems = items.filter(it => {
+        const haystack = `${it.title} ${it.summary}`.toLowerCase();
+        return questionWords.some(qw => haystack.includes(qw));
+      });
+
+      if (relevantItems.length >= 1) {
+        console.log(`[smartSuggestions] Filtered recent items to ${relevantItems.length} relevant to: "${currentQuestion}"`);
+        items = relevantItems;
+      } else {
+        // STEP 2: Nothing in recent signals matched — scan Qdrant for related chunks
+        console.log(`[smartSuggestions] No recent items match "${currentQuestion}" — checking Qdrant for related chunks...`);
+        const qdrantItems = await fetchQdrantRelatedItems(clientId, questionWords);
+
+        if (qdrantItems.length >= 1) {
+          console.log(`[smartSuggestions] Found ${qdrantItems.length} related Qdrant chunks for "${currentQuestion}"`);
+          items = qdrantItems;
+        } else {
+          // STEP 3: Nothing at all — return generic fallback (no random suggestions)
+          console.log(`[smartSuggestions] Nothing matched in Qdrant either — using generic fallback.`);
+          return FALLBACK_SUGGESTIONS;
+        }
+      }
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
 
   let raw;
   try {

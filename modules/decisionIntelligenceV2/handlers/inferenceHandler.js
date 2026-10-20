@@ -20,23 +20,20 @@ const { checkTopicalCoverage, checkFrameworkSubjectCoverage } = require('./topic
 // ─────────────────────────────────────────────────────────────────────────
 const SCHEMA_DESIGNER_PROMPT = `You design the section structure for a concise market intelligence answer.
 
-Given a client's question, return 3-5 headings that would best organise
-a focused answer. Each heading must be a short noun phrase (2-6 words).
+Given a user's question AND a sample of the actual retrieved text, your job is to:
+1. Figure out WHAT the subject is (Is it a company? A product? A regulation? A market?)
+2. Look at what facts the retrieved text actually contains.
+3. Generate 3-5 headings that organize THOSE SPECIFIC FACTS.
 
-Examples of good headings:
-- "Current Situation"
-- "Key Developments"
-- "Market Impact"
-- "What to Watch"
-- "Strategic Implications"
-- "Supporting Evidence"
-- "Drivers"
-- "Outlook"
+CRITICAL RULE: Never generate a heading for something that is NOT in the text.
+- If the text has no revenue numbers, do NOT generate "Financial Performance".
+- If the text has no company history, do NOT generate "Company Background".
+- If the text is about a product ingredient, generate headings about the ingredient (e.g., "Mechanism of Action", "Applications", "Regulatory Status"), not about a company.
 
 Rules:
 - 3-5 headings only.
 - Each heading must be 2-6 words.
-- Headings must be SPECIFIC to the question — not generic templates.
+- Headings must be SPECIFIC to the facts in the provided text.
 - Do NOT number them.
 - Do NOT include "Introduction", "Conclusion", "Overview", or "Executive Summary".
 - Do NOT include "Recommendations" or "Next Steps" as headings.
@@ -52,7 +49,6 @@ Return ONLY this JSON:
 }
 
 Return ONLY the JSON. No markdown fences, no explanation.`;
-
 // ─────────────────────────────────────────────────────────────────────────
 // Call 2 — writer
 // ─────────────────────────────────────────────────────────────────────────
@@ -238,12 +234,17 @@ function parseJsonWithTruncation(raw, label) {
 // ─────────────────────────────────────────────────────────────────────────
 // Call 1 — design the section structure
 // ─────────────────────────────────────────────────────────────────────────
-async function designInferenceSchema(question) {
+async function designInferenceSchema(question, context = '') {
   try {
+    // Give the LLM the question AND a sample of the actual text
+    const userMessage = context 
+      ? `Question: ${question}\n\nRetrieved data (use this to decide the subject and what headings are possible):\n${context.slice(0, 2000)}`
+      : question;
+
     const schemaRaw = await callLLM(
       [
         { role: 'system', content: SCHEMA_DESIGNER_PROMPT },
-        { role: 'user', content: question },
+        { role: 'user', content: userMessage },
       ],
       { temperature: 0.3, max_tokens: 500, timeout: 45000 }
     );
@@ -438,7 +439,8 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
   const context = buildContext(filteredClientHits, filteredCustomHits);
   const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
 
-  const headings = await designInferenceSchema(question);
+  // Pass the context so the LLM knows what data exists
+  const headings = await designInferenceSchema(question, context);
 
   if (headings) {
     const headingsBlock = headings
