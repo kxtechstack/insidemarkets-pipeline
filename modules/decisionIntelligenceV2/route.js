@@ -438,12 +438,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
 
     let selected;
-    
-    // If the question is about specific companies (e.g. "news about L'Oreal"), 
-    // skip the LLM filter so we don't drop valid news articles.
-    const hasSpecificEntities = (routerResult.entity_mentions && routerResult.entity_mentions.length > 0);
-    
-    if (candidates.length === 1 || hasSpecificEntities) {
+    if (candidates.length === 1) {
       selected = candidates;
     } else {
       try {
