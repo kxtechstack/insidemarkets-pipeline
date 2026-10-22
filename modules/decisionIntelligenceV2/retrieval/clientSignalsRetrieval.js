@@ -397,19 +397,49 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
   const perModuleResults = await Promise.all(
     modules.map(async (moduleId) => {
       try {
-        const hits = await searchModuleWithRetry(moduleId, {
-          vector,
-          limit: perModuleLimit,
-          filter: {
-            must: [
-              { key: 'client_id', match: { value: clientId } },
-              { key: 'industry',  match: { value: industry } },
-              { key: 'module_id', match: { value: moduleId } },
-            ],
-          },
-          with_payload: true,
-        });
-        return { moduleId, hits };
+        let allHits = [];
+        const entities = understanding.entity_mentions || [];
+
+        // If we have specific companies, search for them individually
+        if (entities.length > 0) {
+          const entityPromises = entities.map(async (entity) => {
+            return await searchModuleWithRetry(moduleId, {
+              vector,
+              limit: perModuleLimit,
+              filter: {
+                must: [
+                  { key: 'client_id', match: { value: clientId } },
+                  { key: 'industry',  match: { value: industry } },
+                  { key: 'module_id', match: { value: moduleId } },
+                ],
+                // Only search for this specific entity
+                should: [
+                  { key: 'title', match: { text: entity } },
+                  { key: 'chunk_text', match: { text: entity } }
+                ]
+              },
+              with_payload: true,
+            });
+          });
+          const results = await Promise.all(entityPromises);
+          allHits = results.flat();
+        } else {
+          // Normal search if no specific companies mentioned
+          allHits = await searchModuleWithRetry(moduleId, {
+            vector,
+            limit: perModuleLimit,
+            filter: {
+              must: [
+                { key: 'client_id', match: { value: clientId } },
+                { key: 'industry',  match: { value: industry } },
+                { key: 'module_id', match: { value: moduleId } },
+              ],
+            },
+            with_payload: true,
+          });
+        }
+        
+        return { moduleId, hits: allHits };
       } catch (err) {
         console.log(
           `[retrieveClientSignals] search failed for module ${moduleId} after retry: ${err.message}`
