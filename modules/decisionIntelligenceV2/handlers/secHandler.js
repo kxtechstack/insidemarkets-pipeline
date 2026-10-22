@@ -665,6 +665,43 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
+        // ── NEW: COMPARISON PARTIAL DATA GUARD ─────────────────────────────
+    // If the user asks "A vs B", but we only found tickers for A (because B
+    // is not a US public company), we must return A's data so the decision
+    // handler can merge it with client signals for B.
+    const qLowerForComp = String(question).toLowerCase();
+    const isComparison = /\b(vs\.?|versus|against|compare)\b/i.test(qLowerForComp);
+    
+    if (isComparison && hasTickers) {
+      const entities = routerResult?.entity_mentions || [];
+      // If the router found multiple entities but we only found one ticker
+      if (entities.length > 1 && intent.tickers.length < entities.length) {
+        console.log(`[secHandler] Comparison detected, but only found tickers for ${intent.tickers.join(',')}. Returning partial SEC data.`);
+
+        // ── NEW: Force numeric path if the question mentions a metric.
+        // This ensures we return the actual $14.33B revenue figure from
+        // financial_facts, not just Item 7 segment commentary.
+        const qLowerForNumeric = String(question).toLowerCase();
+        const hasNumericMetric = NUMERIC_KEYWORDS.some(k => qLowerForNumeric.includes(k));
+
+        if (hasNumericMetric) {
+          console.log(`[secHandler] Comparison + numeric metric "${NUMERIC_KEYWORDS.find(k => qLowerForNumeric.includes(k))}" detected — using numeric path.`);
+          const numericResult = await runNumericPath(question, intent);
+          if (numericResult) return numericResult;
+        }
+
+        const shape = detectSecShape(question, routerResult, intent);
+        if (shape === 'numeric') {
+          const partial = await runNumericPath(question, intent);
+          if (partial) return partial;
+        } else {
+          const partial = await runFrameworkPath(question, intent);
+          if (partial) return partial;
+        }
+      }
+    }
+    // ───────────────────────────────────────────────────────────────────
+
     if (
       routerSector &&
       hasTickers &&

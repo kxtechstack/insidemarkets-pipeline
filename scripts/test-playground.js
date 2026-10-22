@@ -1,166 +1,186 @@
 /**
  * scripts/test-playground.js
- * Clean terminal playground.
+ * Clean terminal playground with Stage-by-Stage Diagnostics & Chunk Viewer.
  * Run: node scripts/test-playground.js
  */
 
 require('dotenv').config();
 const readline = require('readline');
-const crypto = require('crypto');
+const routeModule = require('../modules/decisionIntelligenceV2/route');
+const { runV2Pipeline } = routeModule;
 
-const { runV2Pipeline } = require('../modules/decisionIntelligenceV2/route');
-const { resolveContext } = require('../modules/decisionIntelligenceV2/chatContext/contextResolver');
-const { updateState } = require('../modules/decisionIntelligenceV2/chatContext/stateUpdater');
-const { loadState } = require('../modules/decisionIntelligenceV2/chatContext/mem0Adapter');
-const { callLLM } = require('../modules/llmClient');
-const { REFORMAT_PROMPT } = require('../modules/decisionIntelligenceV2/chatContext/reformatter');
+// Hook into internal functions
+const { retrieveClientSignals } = require('../modules/decisionIntelligenceV2/retrieval/clientSignalsRetrieval');
+const { retrieveCustomSourceHits } = require('../modules/decisionIntelligenceV2/retrieval/customSourceRetrieval');
+const { filterListHits } = require('../modules/decisionIntelligenceV2/retrieval/filterListHits');
+const { checkTopicalCoverage } = require('../modules/decisionIntelligenceV2/handlers/topicalCoverage');
+const { route } = require('../modules/decisionIntelligenceV2/routing/router');
 
 const TEST_CLIENT_ID = 'b61b4d3b-caeb-457b-9971-636c83688ee4'; // YOUR CLIENT ID
 const TEST_INDUSTRY = 'Cosmetics';
-const CONV_ID = crypto.randomUUID();
 
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
 });
 
-let LAST_ANSWER = null; // Global variable to hold the previous answer
+// Helper to print a chunk cleanly
+function printChunk(hit, index) {
+  const title = hit.title || 'Untitled';
+  const score = hit.score ? hit.score.toFixed(3) : 'N/A';
+  const text = hit.chunk_text || '';
+  const preview = text.replace(/\n/g, ' ').slice(0, 150);
+  console.log(`   [${index}] Score: ${score} | Title: "${title}"`);
+  console.log(`       Preview: "${preview}..."\n`);
+}
 
-async function handleQuery(question) {
+async function runDeepDiagnostic(question) {
   console.log(`\n======================================================`);
-  console.log(`USER: ${question}`);
-  console.log(`======================================================`);
+  console.log(`🚀 DIAGNOSTIC FOR: "${question}"`);
+  console.log(`======================================================\n`);
 
-  let currentState = {};
+  // ---------------------------------------------------------
+  // STAGE 1: ROUTER
+  // ---------------------------------------------------------
+  console.log(`--- STAGE 1: ROUTER ---`);
+  let routerResult;
   try {
-    currentState = await loadState(CONV_ID);
-  } catch (err) {}
+    routerResult = await route(question, TEST_INDUSTRY);
+    console.log(`Concepts Extracted : [${routerResult.concept_keywords?.join(', ') || 'NONE'}]`);
+    console.log(`Entities Extracted : [${routerResult.entity_mentions?.join(', ') || 'NONE'}]`);
+    console.log(`Type Classified    : ${routerResult.type}`);
+  } catch (e) {
+    console.log(`Router Error: ${e.message}`);
+  }
+  console.log(`\n`);
 
-  let resolverResult;
+  // ---------------------------------------------------------
+  // STAGE 2: RAW VECTOR RETRIEVAL
+  // ---------------------------------------------------------
+  console.log(`--- STAGE 2: RAW VECTOR RETRIEVAL (Qdrant) ---`);
+  let clientRetr;
+  let rawHits = [];
   try {
-    resolverResult = await resolveContext({
-      conversationId: CONV_ID,
-      userMessage: question,
-      currentState,
+    // We pass the router result to force it to use the exact same understanding
+    const testEntities = routerResult.entity_mentions?.length > 0 
+        ? routerResult.entity_mentions 
+        : [question];
+
+    clientRetr = await retrieveClientSignals(question, TEST_CLIENT_ID, TEST_INDUSTRY, {
+      precomputedUnderstanding: { 
+        ...routerResult, 
+        concept_keywords: routerResult.concept_keywords || [], 
+        entity_mentions: testEntities 
+      }
     });
+    rawHits = clientRetr.hits;
     
-    console.log(`[Memory] Classified as: ${resolverResult.kind}`);
-    if (resolverResult.standalone_query !== question) {
-      console.log(`[Memory] Rewrote query to: "${resolverResult.standalone_query}"`);
-    }
-  } catch (err) {
-    console.log(`[Memory] Resolver failed, using raw question.`);
-    resolverResult = { standalone_query: question, kind: 'new_question' };
+    console.log(`Returned ${rawHits.length} raw hits.\n`);
+    rawHits.slice(0, 5).forEach((h, i) => printChunk(h, i + 1));
+    if (rawHits.length > 5) console.log(`   ... and ${rawHits.length - 5} more.\n`);
+
+  } catch (e) {
+    console.log(`Retrieval Error: ${e.message}`);
+    return;
   }
 
-  // ── HANDLE REFORMAT ──────────────────────────────────────────────
-  if (resolverResult.kind === 'reformat') {
-    console.log(`[Memory] Handling as REFORMAT instruction.`);
-    
-    if (!LAST_ANSWER) {
-      console.log(`\n--- AI ANSWER ---`);
-      console.log(`There is no previous answer to reformat.`);
-      console.log(`-----------------\n`);
-      return;
-    }
-
-    const userPrompt = 
-      `PREVIOUS ANSWER:\n${JSON.stringify(LAST_ANSWER.report || LAST_ANSWER.items)}\n\n` +
-      `USER'S REFORMAT INSTRUCTION:\n${resolverResult.standalone_query}`;
-
-    let raw;
-    try {
-      raw = await callLLM(
-        [{ role: 'system', content: REFORMAT_PROMPT }, { role: 'user', content: userPrompt }],
-        { temperature: 0.2, max_tokens: 1800, timeout: 90000 }
-      );
-      
-      const parsed = JSON.parse(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
-      
-      console.log(`\n--- AI ANSWER ---`);
-      console.log(`REPORT: ${parsed.title}`);
-      (parsed.sections || []).forEach(s => {
-        console.log(`    - ${s.heading}:`);
-        (s.points || []).slice(0, 2).forEach(p => console.log(`        * ${p}`));
-      });
-      console.log(`-----------------\n`);
-
-      // Update LAST_ANSWER so we can reformat it again
-      LAST_ANSWER = { report: parsed };
-      
-    } catch (err) {
-      console.log(`\n--- AI ANSWER ---`);
-      console.log(`Reformat failed: ${err.message}`);
-      console.log(`-----------------\n`);
-    }
-    
-    return; 
-  }
-  // ──────────────────────────────────────────────────────────────────
-
-  const queryForPipeline = resolverResult.standalone_query;
-
-  let result;
+  // ---------------------------------------------------------
+  // STAGE 3: DETERMINISTIC FILTER
+  // ---------------------------------------------------------
+  console.log(`--- STAGE 3: DETERMINISTIC FILTER ---`);
+  const conceptsForFilter = [
+    ...(routerResult.concept_keywords || []),
+    ...(routerResult.entity_mentions || []),
+  ];
+  
+  let filteredHits = [];
   try {
-    result = await runV2Pipeline({
-      question: queryForPipeline,
+    filteredHits = filterListHits(rawHits, conceptsForFilter);
+    console.log(`Concepts used to filter: [${conceptsForFilter.join(', ')}]`);
+    console.log(`Kept ${filteredHits.length} out of ${rawHits.length} hits.\n`);
+    
+    if (filteredHits.length > 0) {
+      filteredHits.slice(0, 5).forEach((h, i) => printChunk(h, i + 1));
+    }
+  } catch (e) {
+    console.log(`Filter Error: ${e.message}`);
+  }
+
+  // ---------------------------------------------------------
+  // STAGE 4: TOPICAL COVERAGE (THE GATEKEEPER)
+  // ---------------------------------------------------------
+  if (filteredHits.length > 0) {
+    console.log(`--- STAGE 4: TOPICAL COVERAGE CHECK ---`);
+    try {
+      const coverage = await checkTopicalCoverage(question, filteredHits, []);
+      console.log(`Coverage Decision : ${coverage.covered ? '✅ PASS' : '❌ FAIL'}`);
+      console.log(`Reason from LLM   : "${coverage.reason}"`);
+      if (!coverage.covered) {
+        console.log(`   (This is why you see "No Data" in the UI)`);
+      }
+    } catch (e) {
+      console.log(`Coverage Error: ${e.message}`);
+    }
+  } else {
+    console.log(`--- STAGE 4: TOPICAL COVERAGE CHECK ---`);
+    console.log(`Skipped: Filter dropped all hits.`);
+  }
+  
+  // ---------------------------------------------------------
+  // STAGE 5: ACTUAL PIPELINE RESULT
+  // ---------------------------------------------------------
+  console.log(`\n--- STAGE 5: FINAL PIPELINE OUTPUT ---`);
+  try {
+    const result = await runV2Pipeline({
+      question,
       clientId: TEST_CLIENT_ID,
       industry: TEST_INDUSTRY,
       forcedType: null,
     });
-  } catch (err) {
-    console.log(`[Pipeline] Error: ${err.message}`);
-    return;
-  }
+    
+    if (result.payload.no_data) {
+      console.log(`RESULT: NO DATA ❌`);
+    } else {
+      console.log(`RESULT: SUCCESS ✅ (${result.payload.type})`);
+    }
 
-  const { payload } = result;
-  LAST_ANSWER = payload; // Save this for the next reformat
-
-  console.log(`\n--- AI ANSWER ---`);
-  if (payload.no_data) {
-    console.log(`NO DATA (${payload.message})`);
-  } else if (payload.type === 'list') {
-    console.log(`LIST (${payload.items.length} items)`);
-    payload.items.forEach((item, i) => {
-      console.log(`  [${i + 1}] ${item.title} (${item.category})`);
-    });
-  } else if (payload.type === 'decision' || payload.type === 'inference') {
-    console.log(`REPORT: ${payload.report?.title}`);
-    (payload.report?.sections || []).forEach(s => {
-      console.log(`    - ${s.heading}:`);
-      (s.points || []).slice(0, 2).forEach(p => console.log(`        * ${p}`));
-    });
-  }
-  console.log(`-----------------\n`);
-
-  // Save Memory
-  if (resolverResult.kind !== 'greeting' && resolverResult.kind !== 'off_topic') {
-    try {
-      const answerText = payload.type === 'list' ? 'List of items' : (payload.report?.title || 'Report');
-      await updateState({
-        conversationId: CONV_ID,
-        userMessage: queryForPipeline,
-        answer: answerText,
-        currentState,
+    // ── NEW: Print the suggestions that would be shown to the user ──
+    if (result.payload.suggestions && result.payload.suggestions.length > 0) {
+      console.log(`\n💡 SUGGESTED FOLLOW-UPS:`);
+      result.payload.suggestions.forEach((s, i) => {
+        console.log(`   ${i + 1}. ${s}`);
       });
-    } catch (err) {}
+    } else {
+      console.log(`\n💡 SUGGESTED FOLLOW-UPS: (none)`);
+    }
+    // ────────────────────────────────────────────────────────────────
+  } catch (e) {
+    console.log(`Pipeline Error: ${e.message}`);
   }
+
+  console.log(`\n======================================================\n`);
 }
 
 function promptUser() {
-  rl.question('You: ', async (input) => {
+  rl.question('Press ENTER to run diagnostics on the 3 failing questions, or type a custom question (or "exit"): ', async (input) => {
     const text = input.trim();
     if (text.toLowerCase() === 'exit' || text.toLowerCase() === 'quit') {
-      console.log('Goodbye!');
       rl.close();
       process.exit(0);
     }
+
     if (text.length > 0) {
-      await handleQuery(text);
+      await runDeepDiagnostic(text);
+    } else {
+      // Run the 3 specific failing questions automatically
+      await runDeepDiagnostic("what is Operation Soundarya");
+      await runDeepDiagnostic("eyeliner trend in japan");
+      await runDeepDiagnostic("skincare trends in cambodia");
     }
+    
     promptUser();
   });
 }
 
-console.log('Clean Playground Started. Type "exit" to quit.');
+console.log('Deep Diagnostics Playground Started.');
 promptUser();

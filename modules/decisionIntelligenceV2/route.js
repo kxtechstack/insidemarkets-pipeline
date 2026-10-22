@@ -240,13 +240,69 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   }
 
   // SEC numeric answer is authoritative — return it directly.
+  // EXCEPTION: For comparison questions where we only found one entity's data,
+  // route through the decision handler so it can add the missing-data warning.
   if (secResult && secResult.mode === 'numeric' && secResult.payload) {
-    console.log(`[V2 route] SEC numeric answer returned directly`);
-    return {
-      routerResult,
-      handlerResult: secResult.handlerResult || secResult.payload,
-      payload: secResult.payload,
-    };
+    const qLowerSec = String(question || '').toLowerCase();
+    const isComparisonForNumeric = /\b(vs\.?|versus|against|compare)\b/i.test(qLowerSec);
+    
+    let isPartialComparison = false;
+    if (isComparisonForNumeric) {
+      const entities = (routerResult && routerResult.entity_mentions) || [];
+      const tickersInSources = new Set(
+        (secResult.payload.sources || [])
+          .map(s => s.ticker)
+          .filter(Boolean)
+      );
+      // If we detected 2+ entities but only returned 1 ticker's worth of data, it's partial
+      isPartialComparison = entities.length > 1 && tickersInSources.size < entities.length;
+    }
+
+    if (isPartialComparison) {
+      console.log(`[V2 route] Partial numeric comparison — routing through decision handler for merge+warning`);
+      // Force decision type so the merge logic runs
+      routerResult.type = 'decision';
+
+      // Get the actual company name from the source title
+      const sourceTitle = secResult.payload.sources?.[0]?.title || '';
+      const ticker = secResult.payload.sources?.[0]?.ticker || 'SEC';
+      // Extract company name from source title like "Estée Lauder Companies (The) (EL) — FY2025 Revenue"
+      const companyNameMatch = sourceTitle.match(/^(.+?)\s*\([A-Z.]+\)/);
+      const companyName = companyNameMatch ? companyNameMatch[1].trim() : ticker;
+
+      // Wrap the numeric answer as a synthetic "framework" chunk so it's merged
+      const syntheticChunk = {
+        id: '__sec_numeric__',
+        score: 1.0,
+        module_id: '__sec__',
+        module_name: 'SEC Filing',
+        title: `${companyName} (${ticker}) — Verified Financial Facts`,
+        chunk_text: `Company: ${companyName}\nTicker: ${ticker}\n\n${secResult.payload.report?.bodyText || ''}`,
+        article_id: null,
+        published_date: null,
+        submodule_id: null,
+        _matched: true,
+        _sec: true,
+        _sec_payload: {
+          ticker: ticker,
+          fiscal_year: null,
+          item_code: 'financial_facts',
+        },
+      };
+      // Don't return yet — fall through and let decision handler merge
+      // We'll pass this chunk into secInjectChunks
+      secResult = {
+        mode: 'framework',
+        injectChunks: [syntheticChunk],
+      };
+    } else {
+      console.log(`[V2 route] SEC numeric answer returned directly`);
+      return {
+        routerResult,
+        handlerResult: secResult.handlerResult || secResult.payload,
+        payload: secResult.payload,
+      };
+    }
   }
 
   // SEC region fallback (non-US + SEC-numeric) — return directly.
@@ -266,16 +322,22 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     ? secResult.injectChunks
     : [];
 
-    // If SEC produced framework chunks, force the type to `decision` so the
-  // pipeline routes to the decision handler — that's the only handler that
-  // consumes secInjectChunks.
-  // EXCEPTION: If the user explicitly said "list", NEVER hijack it.
-  if (secInjectChunks.length > 0 && !isListRequest) {
+    // ── NEW: COMPARISON MERGE ──────────────────────────────────────────
+  // If the user asks "A vs B", we must force the decision handler, even if
+  // SEC only found data for A or dropped data. The decision handler will merge 
+  // whatever SEC found with client signals (which may have data for B).
+  const isComparisonQuestion = /\b(vs\.?|versus|against|compare)\b/i.test(question);
+
+  if (isComparisonQuestion && !isListRequest) {
+    console.log(`[V2 route] Comparison detected — forcing type=decision to merge SEC + Client signals.`);
+    routerResult.type = 'decision';
+  } else if (secInjectChunks.length > 0 && !isListRequest) {
     console.log(`[V2 route] SEC framework chunks present — forcing type=decision (was ${routerResult.type})`);
     routerResult.type = 'decision';
   } else if (secInjectChunks.length > 0 && isListRequest) {
     console.log(`[V2 route] SEC chunks present but user said "list" — ignoring SEC hijack.`);
   }
+  // ───────────────────────────────────────────────────────────────────
 
   // ── 2. Non market-intelligence short-circuits ───────────────────────
   if (routerResult.intent === 'greeting') {

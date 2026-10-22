@@ -271,7 +271,7 @@ async function designInferenceSchema(question, context = '') {
 // ─────────────────────────────────────────────────────────────────────────
 // Sanitize the schema-path writer output
 // ─────────────────────────────────────────────────────────────────────────
-function sanitizeSectionsReport(report, headings, question) {
+function sanitizeSectionsReport(report, headings, question, partialInfo = null) {
   const byHeading = new Map();
   if (report && Array.isArray(report.sections)) {
     for (const s of report.sections) {
@@ -297,12 +297,29 @@ function sanitizeSectionsReport(report, headings, question) {
     };
   }
 
+  let finalBottomLine = typeof report.bottom_line === 'string'
+    ? report.bottom_line.trim()
+    : '';
+
+  if (partialInfo && partialInfo._partial && partialInfo._missingEntity) {
+    const missingName = String(partialInfo._missingEntity).trim();
+    const warningAlreadyPresent = /could not find|not available|not in the|no data for|unable to find|comparison is partial/i.test(finalBottomLine);
+
+    if (!warningAlreadyPresent) {
+      const looksLikeName = missingName.length <= 40 && !/\bnot\b|\bis\b|\bwas\b|\bdata\b/i.test(missingName);
+
+      const warningText = looksLikeName
+        ? `Unfortunately, we could not find data for ${missingName} to complete this comparison.`
+        : `Unfortunately, data for one of the compared entities was not available, so this comparison is partial.`;
+
+      finalBottomLine = `${warningText} ${finalBottomLine}`;
+    }
+  }
+
   return {
     title: (report.title || question).toString().slice(0, 200),
     sections: finalSections,
-    bottom_line: typeof report.bottom_line === 'string'
-      ? report.bottom_line.trim()
-      : '',
+    bottom_line: finalBottomLine,
   };
 }
 
@@ -447,10 +464,26 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
       .map((h, i) => `${i + 1}. ${h}`)
       .join('\n');
 
-    const writerPrompt =
-      `Context:\n${context}\n\nQuestion: ${question}\n\n` +
-      `Required section headings (exact, in this order):\n${headingsBlock}\n\n` +
-      `Fill each section with 2-4 bullets drawn from the context. Return JSON only.`;
+    let writerPrompt = '';
+    if (coverage._partial) {
+      writerPrompt =
+        `⚠️ PARTIAL DATA AVAILABLE ⚠️\n` +
+        `The user asked: ${question}\n` +
+        `We could not find data for all entities. Specifically: ${coverage._missingEntity}\n\n` +
+        `CRITICAL INSTRUCTIONS — FOLLOW EXACTLY:\n` +
+        `1. In EVERY section, end the bullets with ONE additional bullet: "No data available for ${coverage._missingEntity || 'the other entity'}."\n` +
+        `2. The bottom_line MUST BEGIN with the exact sentence: "Unfortunately, we could not find data for ${coverage._missingEntity || 'the compared entity'} to complete this comparison."\n` +
+        `3. After that sentence, summarize the entity we DO have data for.\n` +
+        `4. Do NOT omit the warning.\n\n` +
+        `Context:\n${context}\n\n` +
+        `Required section headings (exact, in this order):\n${headingsBlock}\n\n` +
+        `Fill each section with 2-4 bullets plus the required warning bullet. Return JSON only.`;
+    } else {
+      writerPrompt =
+        `Context:\n${context}\n\nQuestion: ${question}\n\n` +
+        `Required section headings (exact, in this order):\n${headingsBlock}\n\n` +
+        `Fill each section with 2-4 bullets drawn from the context. Return JSON only.`;
+    }
 
     let writerRaw;
     try {
@@ -487,7 +520,7 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
     }
 
     if (report && Array.isArray(report.sections)) {
-      const sanitized = sanitizeSectionsReport(report, headings, question);
+      const sanitized = sanitizeSectionsReport(report, headings, question, coverage);
       return {
         report: sanitized,
         sources: collectSources(filteredClientHits, filteredCustomHits, isFrameworkQuestion),
@@ -511,6 +544,8 @@ async function buildInferenceAnswer(question, clientHits = [], customSourceHits 
   return {
     report: legacyReport,
     sources: collectSources(filteredClientHits, filteredCustomHits, isFrameworkQuestion),
+    _partial: coverage._partial || false,
+    _missingEntity: coverage._missingEntity || null,
   };
 }
 

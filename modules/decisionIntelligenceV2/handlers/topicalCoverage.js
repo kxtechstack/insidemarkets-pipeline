@@ -130,6 +130,30 @@ Examples of the CORRECT behavior:
   → reason says: "No document mentions ATTAIN Cosmetics."
   → covered: FALSE
 
+  =========================
+SPECIAL RULE — COMPARISON QUESTIONS
+=========================
+
+If the user's question asks to COMPARE two or more entities (contains
+"vs", "versus", "against", "compare"), and the documents mention AT LEAST
+ONE of those entities with real information, you MUST return covered=true.
+
+The system will handle the missing entity by generating a partial answer
+and telling the user which side is missing. Do NOT reject the whole batch
+just because one of the entities has no data.
+
+Examples:
+  Q: "How does Estée Lauder perform against Lakme?"
+  Documents: 15 documents about Estée Lauder (financials, news), 0 about Lakme.
+  → covered: TRUE (Estée Lauder data is here)
+  → on_topic_indices: [1, 2, 3, ..., 15]
+  → reason: "Estée Lauder data is present; Lakme data is not in the dataset."
+
+  Q: "Estée Lauder vs L'Oreal"
+  Documents: 6 about Estée Lauder, 4 about L'Oreal.
+  → covered: TRUE
+  → on_topic_indices: [all 10]
+
 =========================
 OUTPUT
 =========================
@@ -452,6 +476,51 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   console.log(
     `[TopicalCoverage] covered=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
   );
+
+  // ── NEW: PARTIAL DATA FALLBACK (Comparison Only) ──
+  // Only intercepts if this is a comparison (vs/against) AND coverage failed.
+  const isComparison = /\b(vs\.?|versus|against|compare)\b/i.test(question);
+  
+  if (!covered && isComparison) {
+    const secHits = (clientHits || []).filter(h => h._sec);
+    const strongClientHits = (clientHits || []).filter(h => !h._sec && h.score >= 0.45);
+
+    if (secHits.length > 0 || strongClientHits.length > 0) {
+      console.log(`[TopicalCoverage] PARTIAL FALLBACK: Found ${secHits.length} SEC + ${strongClientHits.length} strong client hits.`);
+      
+      // Extract the missing entity name from the LLM reason string.
+      // Examples:
+      //   "Estée Lauder data is present; Lakme data is not in the dataset" → "Lakme"
+      //   "Lakme is not mentioned in any document" → "Lakme"
+      //   "The documents discuss Estée Lauder but not Himalaya" → "Himalaya"
+      //   "Nykaa data is missing" → "Nykaa"
+      let missingEntity = null;
+      const reasonStr = String(reason || '');
+      
+      // Pattern 1: "; NAME data is not in the dataset"
+      const m1 = reasonStr.match(/;\s*([A-Z][A-Za-z0-9&'.\-\s]{1,40}?)\s+(?:data\s+)?(?:is\s+)?(?:not|missing|absent)/i);
+      // Pattern 2: "but not NAME" / "except NAME" / "other than NAME"
+      const m2 = reasonStr.match(/\b(?:but\s+not|except|other\s+than)\s+([A-Z][A-Za-z0-9&'.\-\s]{1,40}?)(?:\s+(?:is|data|in)|\.|,|$)/i);
+      // Pattern 3: "NAME is not mentioned" / "NAME data is not available"
+      const m3 = reasonStr.match(/^([A-Z][A-Za-z0-9&'.\-\s]{1,40}?)\s+(?:data\s+)?(?:is\s+)?(?:not|missing|absent)/i);
+      
+      if (m1) missingEntity = m1[1].trim();
+      else if (m2) missingEntity = m2[1].trim();
+      else if (m3) missingEntity = m3[1].trim();
+      
+      return {
+        covered: true, // Force true so the handler proceeds
+        confidence: 0.5,
+        reason: reason,
+        onTopicIndices: indices,
+        filteredClientHits: [...secHits, ...strongClientHits],
+        filteredCustomHits: [], 
+        _partial: true, 
+        _missingEntity: missingEntity || reason, // fallback to reason if extraction fails
+      };
+    }
+  }
+  // ──────────────────────────────────────────────────
 
   return {
     covered,

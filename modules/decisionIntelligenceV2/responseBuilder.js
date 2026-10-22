@@ -142,9 +142,16 @@ async function buildInferenceResponse({ handlerResult, clientId, question }) {
   }
 
   const sources = await prepareSources(handlerResult.sources || [], clientId);
+
+  const finalReport = handlerResult.report;
+  if (handlerResult._partial && handlerResult._missingEntity) {
+    finalReport.partialWarning = 
+      `⚠️ Note: ${handlerResult._missingEntity}. Showing available data instead.`;
+  }
+
   return {
     type: 'inference',
-    report: handlerResult.report,
+    report: finalReport,
     sources,
   };
 }
@@ -188,9 +195,15 @@ async function buildDecisionResponse({ handlerResult, clientId, question }) {
     };
   }
 
+  const finalReport = handlerResult.report;
+  if (handlerResult._partial && handlerResult._missingEntity) {
+    finalReport.partialWarning = 
+      `⚠️ Note: ${handlerResult._missingEntity}. Showing available data instead.`;
+  }
+
   return {
     type: 'decision',
-    report: handlerResult.report,
+    report: finalReport,
     sources,
     chart: null,
     chartMeta: null,

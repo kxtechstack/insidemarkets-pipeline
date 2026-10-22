@@ -39,7 +39,8 @@ function buildNumericAnswer(facts) {
       const valueStr = (f.unit || 'USD') === 'USD'
         ? formatUsd(f.metric_value)
         : `${f.metric_value} ${f.unit || ''}`;
-      lines.push(`- ${f.metric_name} (FY${f.fiscal_year}): ${valueStr} (verified financial data)`);
+      const formattedMetric = f.metric_name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/Eps/i, 'EPS');
+      lines.push(`- ${formattedMetric} (FY${f.fiscal_year}): ${valueStr} (verified financial data)`);
     }
   }
 
