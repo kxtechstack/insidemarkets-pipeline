@@ -326,6 +326,7 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
     }
 
     if (distinctiveKeywords.length >= 2) {
+      const sets = distinctiveKeywords.map(kw => articlesPerKeyword.get(kw));
       // NEW: If the user is asking about specific entities (e.g. "L'Oreal and Estee Lauder"),
       // do NOT intersect them. An article about L'Oreal will never mention Estee Lauder.
       // We want the union (all articles about L'Oreal + all articles about Estee Lauder).
