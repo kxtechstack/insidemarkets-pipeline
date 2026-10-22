@@ -716,8 +716,15 @@ async function retrieveForIntent(question, intent, opts = {}) {
     ? await retrieveChunksStratified(question, intent, 12, opts)
     : await retrieveChunks(question, intent, 6);
 
+  // Fetch facts when:
+  //   - the intent is numeric (normal case), OR
+  //   - the caller explicitly asked (opts.fetchFacts, used by Guard B
+  //     for qualitative comparisons so the answer includes hard numbers)
+  const shouldFetchFacts = intent.isNumericQuestion || opts.fetchFacts === true;
+
   let facts = [];
-  if (intent.isNumericQuestion) {
+
+  if (shouldFetchFacts) {
     const metricForLookup = intent.metric || 'Revenue';
 
     for (const ticker of intent.tickers) {
@@ -737,10 +744,17 @@ async function retrieveForIntent(question, intent, opts = {}) {
       }
     }
 
+    // Filter to the right metrics:
+    // - explicit metrics → keep those
+    // - single metric → keep that one
+    // - qualitative comparison (opts.fetchFacts) → keep the headline trio
     if (intent.metricsFound && intent.metricsFound.length >= 2) {
       facts = facts.filter(f => intent.metricsFound.includes(f.metric_name));
     } else if (intent.metric) {
       facts = facts.filter(f => f.metric_name === intent.metric);
+    } else if (!intent.isNumericQuestion && opts.fetchFacts) {
+      const HEADLINE_METRICS = new Set(['Revenue', 'NetIncome', 'TotalAssets']);
+      facts = facts.filter(f => HEADLINE_METRICS.has(f.metric_name));
     }
 
     if (

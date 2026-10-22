@@ -88,25 +88,26 @@ async function questionNamesCompany(question, tickers) {
 function detectSecShape(question, routerResult, intent) {
   const q = String(question || '').toLowerCase();
 
+  const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
+  const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
+  const hasRealMetric = looksNumeric || Boolean(intent.metric) || Boolean(intent.requestedYearCount);
+
+  // company_set only if there's an ACTUAL numeric metric in the question.
+  // Otherwise, fall through to framework path so SEC 10-K chunks are used.
   if (routerResult && routerResult.is_company_set_query === true) {
-    return 'company_set';
+    if (hasRealMetric) return 'company_set';
+    console.log(`[secHandler] company-set but no numeric metric — using framework path`);
+    return 'framework';
   }
 
-  const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
   if (!hasTickers) return null;
 
   if (FRAMEWORK_CATEGORIES.has(intent.questionCategory)) return 'framework';
 
-  const looksNumeric = NUMERIC_KEYWORDS.some((k) => q.includes(k));
   if (looksNumeric || intent.metric || intent.requestedYearCount) return 'numeric';
 
   if (intent.questionCategory === 'qualitative') return 'framework';
 
-  // Fallback: the question names a company we have SEC 10-K chunks for,
-  // but isn't numeric and isn't one of the standard framework/qualitative
-  // shapes ("Tell me about IBM", "What are IBM's strengths?"). Route to
-  // the framework path so we pull from sec10k_chunks instead of falling
-  // through to the client-signal pipeline, which would return no_data.
   console.log(`[secHandler] named company + non-numeric question → framework path`);
   return 'framework';
 }
@@ -403,8 +404,9 @@ async function runCompanySetPath(question, intent) {
   };
 }
 
-async function runNumericPath(question, intent) {
-  const { facts } = await retrieveForIntent(question, intent);
+async function runNumericPath(question, intent, opts = {}) {
+  const { facts } = await retrieveForIntent(question, intent, opts);
+  
   if (!facts || !facts.length) {
     console.log(`[secHandler] numeric path: 0 facts for tickers=[${intent.tickers.join(',')}]`);
     return null;
@@ -674,18 +676,16 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     
     if (isComparison && hasTickers) {
       const entities = routerResult?.entity_mentions || [];
-      // If the router found multiple entities but we only found one ticker
-      if (entities.length > 1 && intent.tickers.length < entities.length) {
-        console.log(`[secHandler] Comparison detected, but only found tickers for ${intent.tickers.join(',')}. Returning partial SEC data.`);
 
-        // ── NEW: Force numeric path if the question mentions a metric.
-        // This ensures we return the actual $14.33B revenue figure from
-        // financial_facts, not just Item 7 segment commentary.
+      // ── GUARD A: Partial comparison (one ticker missing) ──
+      if (entities.length > 1 && intent.tickers.length < entities.length) {
+        console.log(`[secHandler] Partial comparison — only found tickers for ${intent.tickers.join(',')}.`);
+
         const qLowerForNumeric = String(question).toLowerCase();
         const hasNumericMetric = NUMERIC_KEYWORDS.some(k => qLowerForNumeric.includes(k));
 
         if (hasNumericMetric) {
-          console.log(`[secHandler] Comparison + numeric metric "${NUMERIC_KEYWORDS.find(k => qLowerForNumeric.includes(k))}" detected — using numeric path.`);
+          console.log(`[secHandler] Comparison + numeric metric detected — using numeric path.`);
           const numericResult = await runNumericPath(question, intent);
           if (numericResult) return numericResult;
         }
@@ -697,6 +697,54 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
         } else {
           const partial = await runFrameworkPath(question, intent);
           if (partial) return partial;
+        }
+      }
+
+      // ── GUARD B: Full qualitative comparison (both tickers present, no metric).
+      // Merge framework chunks with verified financial facts so the LLM
+      // gets BOTH qualitative business descriptions AND hard numbers.
+      if (entities.length > 1 && intent.tickers.length >= entities.length) {
+        const qLowerForNumeric = String(question).toLowerCase();
+        const hasNumericMetric = NUMERIC_KEYWORDS.some(k => qLowerForNumeric.includes(k));
+        const shape = detectSecShape(question, routerResult, intent);
+
+        if (shape === 'framework' && !hasNumericMetric) {
+          console.log(`[secHandler] Full qualitative comparison — fetching framework + numeric facts for [${intent.tickers.join(',')}]`);
+
+          const [frameworkResult, numericResult] = await Promise.all([
+            runFrameworkPath(question, intent),
+            runNumericPath(question, intent, { fetchFacts: true }),
+          ]);
+
+          const injectChunks = frameworkResult?.injectChunks || [];
+
+          if (numericResult && numericResult.payload?.report?.bodyText) {
+            const factsText = numericResult.payload.report.bodyText;
+            const syntheticChunk = {
+              id: '__sec_numeric_facts__',
+              score: 1.5,
+              module_id: '__sec__',
+              module_name: 'SEC Filing',
+              title: `Verified Financial Facts for ${intent.tickers.join(', ')}`,
+              chunk_text: `VERIFIED FINANCIAL FACTS (use these exact numbers):\n\n${factsText}`,
+              article_id: null,
+              published_date: null,
+              submodule_id: null,
+              _matched: true,
+              _sec: true,
+              _sec_payload: {
+                ticker: intent.tickers[0],
+                fiscal_year: null,
+                item_code: 'financial_facts',
+              },
+            };
+            injectChunks.unshift(syntheticChunk);
+            console.log(`[secHandler] Injected ${factsText.length} chars of verified financial facts.`);
+          }
+
+          if (injectChunks.length > 0) {
+            return { mode: 'framework', injectChunks };
+          }
         }
       }
     }
