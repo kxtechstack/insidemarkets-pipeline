@@ -473,8 +473,18 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
 
   const filtered = applyIndexFilter(indexMap, indices, clientHits, customSourceHits);
 
+  // ── PRESERVE SEC CHUNKS ─────────────────────────────────────────────
+  // The SEC handler already filtered its chunks by ticker + item_code.
+  // TopicalCoverage should NEVER drop them, or the sources panel will
+  // show fewer companies than the answer actually used.
+  const secChunks = (clientHits || []).filter(h => h._sec);
+  const mergedClientHits = [
+    ...secChunks,
+    ...filtered.filteredClientHits.filter(h => !h._sec),
+  ];
+
   console.log(
-    `[TopicalCoverage] covered=${covered} kept=${filtered.filteredClientHits.length} client + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
+    `[TopicalCoverage] covered=${covered} kept=${mergedClientHits.length} client (incl ${secChunks.length} SEC) + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
   );
 
   // ── NEW: PARTIAL DATA FALLBACK (Comparison Only) ──
@@ -527,7 +537,7 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
     confidence: covered ? 1 : 0,
     reason,
     onTopicIndices: indices,
-    filteredClientHits: filtered.filteredClientHits,
+    filteredClientHits: mergedClientHits,
     filteredCustomHits: filtered.filteredCustomHits,
   };
 }

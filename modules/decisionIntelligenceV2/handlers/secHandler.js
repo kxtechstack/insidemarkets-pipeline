@@ -684,6 +684,7 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
         const qLowerForNumeric = String(question).toLowerCase();
         const hasNumericMetric = NUMERIC_KEYWORDS.some(k => qLowerForNumeric.includes(k));
 
+        // If explicit metric → numeric-only path
         if (hasNumericMetric) {
           console.log(`[secHandler] Comparison + numeric metric detected — using numeric path.`);
           const numericResult = await runNumericPath(question, intent);
@@ -695,8 +696,43 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
           const partial = await runNumericPath(question, intent);
           if (partial) return partial;
         } else {
-          const partial = await runFrameworkPath(question, intent);
-          if (partial) return partial;
+          // Qualitative partial comparison — merge framework chunks with
+          // the tickers we DO have numbers for. This way, e.g. Estée Lauder
+          // vs Lakme still shows Estée Lauder's exact revenue.
+          const [frameworkResult, numericResult] = await Promise.all([
+            runFrameworkPath(question, intent),
+            runNumericPath(question, intent, { fetchFacts: true }),
+          ]);
+
+          const injectChunks = frameworkResult?.injectChunks || [];
+
+          if (numericResult && numericResult.payload?.report?.bodyText) {
+            const factsText = numericResult.payload.report.bodyText;
+            const syntheticChunk = {
+              id: '__sec_numeric_facts__',
+              score: 1.5,
+              module_id: '__sec__',
+              module_name: 'SEC Filing',
+              title: `Verified Financial Facts for ${intent.tickers.join(', ')}`,
+              chunk_text: `VERIFIED FINANCIAL FACTS (use these exact numbers):\n\n${factsText}`,
+              article_id: null,
+              published_date: null,
+              submodule_id: null,
+              _matched: true,
+              _sec: true,
+              _sec_payload: {
+                ticker: intent.tickers[0],
+                fiscal_year: null,
+                item_code: 'financial_facts',
+              },
+            };
+            injectChunks.unshift(syntheticChunk);
+            console.log(`[secHandler] Partial comparison: injected ${factsText.length} chars of facts for [${intent.tickers.join(',')}].`);
+          }
+
+          if (injectChunks.length > 0) {
+            return { mode: 'framework', injectChunks };
+          }
         }
       }
 
@@ -734,6 +770,7 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
               _sec: true,
               _sec_payload: {
                 ticker: intent.tickers[0],
+                tickers: intent.tickers,      // ← NEW: full ticker list
                 fiscal_year: null,
                 item_code: 'financial_facts',
               },

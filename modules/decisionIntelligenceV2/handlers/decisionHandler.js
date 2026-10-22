@@ -66,7 +66,8 @@ You have been given retrieved signals and uploaded documents from the client's o
 Content rules:
 - Each section gets 3-5 bullets.
 - Bullets must be complete thoughts, not single words.
-- Every bullet must be grounded in the provided context. Do not invent facts, numbers, dates, or names.
+- HARD RULE: If a fact about a specific company is not explicitly present in the context, do NOT write it. Even if the fact is true in the real world (e.g., "Amazon is an e-commerce leader"), if it is not literally stated in the context chunks, it is forbidden. Fabricating general knowledge about companies is a critical error.
+- CRITICAL: If ANY chunk in the context contains the phrase "VERIFIED FINANCIAL FACTS", you MUST include those exact numbers verbatim in a "Financial Performance" or "Market Share" section. Do NOT paraphrase. Do NOT substitute "the company reported strong revenue" — copy the actual "$X.XXB" figures. This is the most important part of the report for numeric comparisons.
 - If a section cannot be supported by the context, use a single bullet: "No relevant data in the current dataset."
 - Preserve exactly: organization names, regulation names, dates, numbers, monetary figures.
 - Do not mention "the provided articles", "the context", or "the retrieved data".
@@ -104,7 +105,16 @@ const ITEM_MAX_CHARS = 1200;
 function buildContext(clientHits, customHits) {
   const parts = [];
 
-  const secHits    = clientHits.filter((h) => h._sec).slice(0, 4);
+  // Take up to 2 SEC chunks per ticker so no single company dominates.
+  const allSecHits = clientHits.filter((h) => h._sec);
+  const byTicker = new Map();
+  for (const h of allSecHits) {
+    const ticker = h._sec_payload?.ticker || h._sec_payload?.tickers?.[0] || '__unk__';
+    if (!byTicker.has(ticker)) byTicker.set(ticker, []);
+    if (byTicker.get(ticker).length < 2) byTicker.get(ticker).push(h);
+  }
+  const secHits = [...byTicker.values()].flat().slice(0, MAX_CLIENT_CHUNKS);
+
   const clientOnly = clientHits.filter((h) => !h._sec);
   const matched    = clientOnly.filter((h) => h._matched);
   const unmatched  = clientOnly.filter((h) => !h._matched);
@@ -328,6 +338,26 @@ async function buildDecisionAnswer(question, clientHits = [], customSourceHits =
     }
   }
 
+  // Extract the verified facts chunk if it exists (injected by Guard A/B
+  // in secHandler for comparisons). We'll use this to guarantee the
+  // numbers appear in the final report even if the LLM ignores them.
+  const factsChunk = filteredClientHits.find(h =>
+    h._sec && h.chunk_text && /VERIFIED FINANCIAL FACTS/i.test(h.chunk_text)
+  );
+
+  if (factsChunk) {
+    // Keep only the bullet lines from the facts body. Skip headers.
+    const lines = factsChunk.chunk_text.split('\n');
+    const factLines = lines.filter(l => {
+      const t = l.trim();
+      return t.startsWith('-') || t.startsWith('###');
+    });
+    if (factLines.length > 0) {
+      coverage._sec_facts = factLines.map(l => l.replace(/^-\s*/, '').trim());
+      console.log(`[decisionHandler] Extracted ${coverage._sec_facts.length} verified facts for fallback injection`);
+    }
+  }
+
   const sanitizedReport = sanitizeReport(report, headings, question, coverage);
 
   return {
@@ -355,6 +385,28 @@ function sanitizeReport(report, headings, question, partialInfo = null) {
     heading: h,
     points: byHeading.get(h.toLowerCase()) || ['No relevant data in the current dataset.'],
   }));
+
+  // ── DETERMINISTIC FACTS INJECTION ──
+  // If the LLM ignored the verified financial facts, force them into
+  // the most relevant section (Financial / Market Share / Revenue).
+  if (partialInfo && Array.isArray(partialInfo._sec_facts) && partialInfo._sec_facts.length > 0) {
+    const targetHeading = headings.find(h => /financial|revenue|market\s+share/i.test(h))
+      || headings[0];
+
+    const targetSection = finalSections.find(s => s.heading === targetHeading);
+    if (targetSection) {
+      // Check if any number is already mentioned in this section
+      const alreadyPresent = targetSection.points.some(p =>
+        /\$[\d.,]+\s*[BMK]/i.test(p)
+      );
+
+      if (!alreadyPresent) {
+        targetSection.points = [...partialInfo._sec_facts, ...targetSection.points];
+        console.log(`[decisionHandler] Deterministically injected ${partialInfo._sec_facts.length} facts into "${targetHeading}"`);
+      }
+    }
+  }
+  // ──────────────────────────────────
 
   if (!report) {
     return {
@@ -408,23 +460,41 @@ function collectSources(clientHits, customSourceHits, isFrameworkQuestion = fals
     : (matched.length > 0 ? matched : unmatched.slice(0, 3));
 
   const seenArticles = new Set();
-  for (const h of ordered) {
+    for (const h of ordered) {
     if (h._sec) {
       const sec = h._sec_payload || {};
-      const key = `sec:${sec.ticker}:${sec.fiscal_year}:${sec.item_code}`;
-      if (seenArticles.has(key)) continue;
-      seenArticles.add(key);
-      out.push({
-        type: 'sec',
-        ticker: sec.ticker || null,
-        fiscal_year: sec.fiscal_year || null,
-        item_code: sec.item_code || null,
-        title: h.title,
-        url: null,
-        matched: true,
-      });
+
+      // Synthetic financial facts chunk can cover MULTIPLE tickers.
+      // Emit one source per ticker so the user sees all companies
+      // whose data appears in the answer.
+      const tickers = Array.isArray(sec.tickers) && sec.tickers.length > 0
+        ? sec.tickers
+        : (sec.ticker ? [sec.ticker] : [null]);
+
+      for (const t of tickers) {
+        const key = `sec:${t}:${sec.fiscal_year}:${sec.item_code}`;
+        if (seenArticles.has(key)) continue;
+        seenArticles.add(key);
+
+        // Build a per-ticker title for the facts chunk
+        let title = h.title;
+        if (sec.item_code === 'financial_facts' && t) {
+          title = `Verified Financial Facts for ${t}`;
+        }
+
+        out.push({
+          type: 'sec',
+          ticker: t,
+          fiscal_year: sec.fiscal_year || null,
+          item_code: sec.item_code || null,
+          title,
+          url: null,
+          matched: true,
+        });
+      }
       continue;
     }
+
     if (!h.article_id) continue;
     if (seenArticles.has(h.article_id)) continue;
     seenArticles.add(h.article_id);

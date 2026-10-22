@@ -626,6 +626,27 @@ async function searchOne(queryVector, ticker, fiscalYear, itemCode, topK) {
     hits = await qdrant.search(COLLECTION, { vector: queryVector, filter, limit: topK });
   }
 
+  // ── Absolute fallback: if still no hits, grab ANY chunk for this ticker.
+  if (!hits.length && ticker) {
+    console.log(`[secRetrieval] No semantic match for ${ticker} (itemCode=${itemCode}) — falling back to any available chunk.`);
+    const fallback = await qdrant.scroll(COLLECTION, {
+      filter: { must: [{ key: 'ticker', match: { value: ticker } }] },
+      limit: topK,
+      with_payload: true,
+    });
+    hits = (fallback.points || []).map(p => ({
+      id: p.id,
+      score: 0.5,
+      payload: p.payload,
+    }));
+  }
+
+  // ── FINAL fallback for tickers that have ZERO 10-K chunks in Qdrant:
+  // log clearly so the user sees "no data" instead of silent omission.
+  if (!hits.length && ticker) {
+    console.log(`[secRetrieval] ⚠️ ${ticker} has ZERO 10-K chunks in Qdrant. No qualitative data available for this ticker.`);
+  }
+
   return hits;
 }
 
@@ -690,6 +711,14 @@ async function retrieveChunksStratified(question, intent, topK = 12, opts = {}) 
     } else {
       const latest = ticker ? await getLatestFiscalYear(ticker) : null;
       years = latest ? [latest] : [];
+    }
+
+    // Even if we don't know the fiscal year (because getLatestFiscalYear
+    // checks financial_facts, which may have data even when Qdrant 10-K
+    // chunks are missing), still attempt retrieval. searchOne's fallback
+    // will grab whatever chunks exist for this ticker.
+    if (years.length === 0 && ticker) {
+      years = [null];
     }
     if (years.length === 0) continue;
 
