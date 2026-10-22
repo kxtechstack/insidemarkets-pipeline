@@ -208,10 +208,15 @@ async function searchModuleWithRetry(moduleId, params, maxAttempts = 2) {
 // Main retrieval
 // ─────────────────────────────────────────────────────────────────────────
 async function retrieveClientSignals(question, clientId, industry, opts = {}) {
-  const perModuleLimit = opts.perModuleLimit ?? DEFAULT_PER_MODULE_LIMIT;
+  // NEW: If the user asked about specific entities, bump up the limits
+  // so we don't truncate their news to just 12-15 items.
+  const isMultiEntity = (question.toLowerCase().includes('both') || 
+                        (opts.precomputedUnderstanding?.entity_mentions?.length > 1));
+
+  const perModuleLimit = opts.perModuleLimit ?? (isMultiEntity ? 30 : DEFAULT_PER_MODULE_LIMIT);
   const vectorFloor    = opts.vectorFloor    ?? DEFAULT_SCORE_FLOOR;
   const finalFloor     = opts.finalFloor     ?? DEFAULT_FINAL_FLOOR;
-  const topK           = opts.topK           ?? DEFAULT_TOP_K;
+  const topK           = opts.topK           ?? (isMultiEntity ? 50 : DEFAULT_TOP_K);
   const minHitsToStop  = opts.minHitsToStop  ?? DEFAULT_MIN_HITS_TO_STOP;
   const minResults     = opts.minResults     ?? DEFAULT_MIN_RESULTS;
   const modules        = opts.modules        ?? ALL_MODULE_IDS;
