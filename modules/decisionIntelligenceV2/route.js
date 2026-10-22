@@ -438,20 +438,45 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
 
     let selected;
-    
-    // NEW: If the user asked about specific companies, bypass the LLM list selection.
-    // The LLM has a habit of randomly dropping valid company news when asked for "both".
-    const hasSpecificEntities = (routerResult.entity_mentions && routerResult.entity_mentions.length > 0);
-    
-    if (candidates.length === 1 || hasSpecificEntities) {
-      selected = candidates;
-      console.log(`[V2 route] Bypassing LLM list selection — showing all ${candidates.length} candidates for named entities.`);
-    } else {
-      try {
-        selected = await selectRelevantHitsForList(question, candidates);
-      } catch (err) {
-        selected = candidates;
+    let missingEntityName = null;
+
+    // 1. Extract specific entities from the question (like "Slovakia" or "Elf")
+    const queryEntities = (question.match(/\b[A-Z][A-Za-z'’&.\-]+(?:\s+[A-Z][A-Za-z'’&.\-]+){0,2}\b/g) || [])
+      .filter(w => !/^(What|Which|Who|When|Where|Why|How|The|And|For|With|From|This|That|These|Those|List|Show|Give|Tell|Please|Details|Recent|News|Regulations|Regulation|Combat|Explain|New|Give|Both|Quarter|Days)$/i.test(w));
+
+    if (queryEntities.length > 0) {
+      // 2. If we have a specific entity, find ONLY the candidates that mention it.
+      const exactMatches = candidates.filter(h => {
+        const text = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
+        return queryEntities.some(e => text.includes(e.toLowerCase()));
+      });
+
+      if (exactMatches.length > 0) {
+        // We found exact matches! Show ONLY these. Do not show the random ones.
+        console.log(`[V2 route] EXACT MATCH FOUND: Filtering down to ${exactMatches.length} candidates containing [${queryEntities.join(', ')}]`);
+        selected = exactMatches; 
+      } else {
+        // We looked for "Slovakia" but didn't find it. 
+        console.log(`[V2 route] NO EXACT MATCH for [${queryEntities.join(', ')}] — showing top general results.`);
+        missingEntityName = queryEntities[0];
+        selected = candidates.slice(0, 5);
       }
+    } else {
+      // 3. No specific entity (e.g. "list recent funding"), use the LLM.
+      if (candidates.length === 1) {
+        selected = candidates;
+      } else {
+        try {
+          selected = await selectRelevantHitsForList(question, candidates);
+        } catch (err) {
+          selected = candidates;
+        }
+      }
+    }
+
+    // 4. If the LLM returned 0, show top 5.
+    if (selected.length === 0) {
+       selected = candidates.slice(0, 5);
     }
 
     if (!selected || selected.length === 0) {
@@ -463,7 +488,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
 
     const handlerResult = await buildListItems(selected);
-    const payload = await buildListResponse({ handlerResult, clientId, industry });
+    const payload = await buildListResponse({ handlerResult, clientId, industry, missingEntityName });
     return { routerResult, handlerResult, payload };
   }
 

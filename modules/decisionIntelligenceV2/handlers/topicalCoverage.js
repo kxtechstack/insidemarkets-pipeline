@@ -453,7 +453,10 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   // the LLM says "covered=true, reason: IBM is not mentioned" — a direct
   // contradiction that would otherwise leak a wrong answer downstream.
   const admitsMissing = /\b(not mentioned|no document|none of the documents|do(?:es)? not (?:discuss|mention|contain)|not present|absent|not in the (?:current )?dataset)\b/i.test(reason);
-  const covered = parsed.covered === true && !admitsMissing;
+  // NEW: For list queries, do not let the LLM block the results. 
+  // Lists are meant to be a broad sweep; we already filtered by vector search.
+  const isListQuery = /\b(list|recent|show|give|what are the)\b/i.test(question);
+  const covered = isListQuery || (parsed.covered === true && !admitsMissing);
 
   if (parsed.covered === true && admitsMissing) {
     console.log(`[TopicalCoverage] OVERRIDE: LLM said covered=true but reason admits missing data. Reason: "${reason}"`);
@@ -737,7 +740,7 @@ RULES
 2. If the user asks for "funding", you MUST reject articles that are not about capital being raised or invested. Reject "strategic moves", "incubators", or "trends".
 3. If the user asks for "acquisitions", you MUST reject anything that is not a direct purchase, merger, or buyout.
 4. If the user asks for "new entrants", "new players", or "startups", you MUST reject articles about regulations, policies, or product launches. Only accept articles about a brand new company or brand entering the market.
-
+4.5. BROAD QUERY RULE: If the user asks for a broad category (e.g., "regulatory filings", "news", "updates", "recent activity"), BE LENIENT. If a candidate is generally about that category (e.g., a new regulation, a policy change, an M&A deal), accept it. Do NOT reject it just because it doesn't contain the exact word "filing".
 5. If NONE of the candidates answer the question, return "relevant_indices": [].
 
 6. Return ONLY the JSON. No markdown fences, no explanation, no extra text.`;

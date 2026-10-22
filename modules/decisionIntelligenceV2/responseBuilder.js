@@ -109,7 +109,7 @@ async function buildClarificationResponse({ routerResult, clientId, industry }) 
   };
 }
 
-async function buildListResponse({ handlerResult, clientId, industry, question }) {
+async function buildListResponse({ handlerResult, clientId, industry, question, missingEntityName = null }) {
   if (!handlerResult || !handlerResult.items || handlerResult.items.length === 0) {
     const suggestions = await loadVerifiedSuggestions(clientId, question);
     return {
@@ -121,9 +121,16 @@ async function buildListResponse({ handlerResult, clientId, industry, question }
     };
   }
 
+  // NEW: If we fell back because a specific entity was missing, add a message.
+  let message = null;
+  if (missingEntityName) {
+    message = `I couldn't find specific data for "${missingEntityName}" in your current dataset. Here are the most relevant recent items instead.`;
+  }
+
   return {
     type: 'list',
     items: handlerResult.items,
+    ...(message ? { message } : {})
   };
 }
 
