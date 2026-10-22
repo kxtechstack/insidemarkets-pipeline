@@ -88,12 +88,6 @@ Never use a value greater than what fits in one year for that unit:
 Proper nouns ONLY: company names, brand names, regulator names,
 jurisdiction names, city names.
 
-CRITICAL: Extract ALL separate companies, brands, and people mentioned. 
-If the user asks about an acquisition (e.g., "elf acquisition of Rhode"), 
-extract BOTH "elf" and "Rhode" as separate entities. Do NOT combine them 
-into one long phrase. Always extract the shortest recognizable name for 
-each entity.
-
 NEVER include:
   ✗ Industry names (Cosmetics, Beauty, Healthcare, Logistics, Automobile,
     Airlines, Food, Retail, Technology, Finance, Pharmaceutical, etc.)
