@@ -326,11 +326,25 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
     }
 
     if (distinctiveKeywords.length >= 2) {
-      const sets = distinctiveKeywords.map(kw => articlesPerKeyword.get(kw));
-      const intersect = new Set([...sets[0]].filter(id => sets.every(s => s.has(id))));
-
-      const finalIds = [...intersect].filter(Boolean);
-      console.log(`  [Supabase Intersection] ${finalIds.length} articles match ALL ${distinctiveKeywords.length} distinctive keywords`);
+      // NEW: If the user is asking about specific entities (e.g. "L'Oreal and Estee Lauder"),
+      // do NOT intersect them. An article about L'Oreal will never mention Estee Lauder.
+      // We want the union (all articles about L'Oreal + all articles about Estee Lauder).
+      const hasEntities = (understanding.entity_mentions && understanding.entity_mentions.length > 0);
+      
+      let finalIds = [];
+      
+      if (hasEntities) {
+        const union = new Set();
+        for (const set of sets) {
+          for (const id of set) union.add(id);
+        }
+        finalIds = [...union].filter(Boolean);
+        console.log(`  [Supabase Union] ${finalIds.length} articles match ANY of the ${distinctiveKeywords.length} distinctive keywords (multi-entity query)`);
+      } else {
+        const intersect = new Set([...sets[0]].filter(id => sets.every(s => s.has(id))));
+        finalIds = [...intersect].filter(Boolean);
+        console.log(`  [Supabase Intersection] ${finalIds.length} articles match ALL ${distinctiveKeywords.length} distinctive keywords`);
+      }
 
       // HONESTY GUARD: If multi-keyword intersection is empty, clear all boosts
       const isComparisonQuery = /\b(vs\.?|versus|against|compare)\b/i.test(question);
@@ -341,7 +355,7 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
       } else if (finalIds.length === 0 && isComparisonQuery) {
         console.log(`  [Honesty Guard] Comparison query — preserving individual keyword hits.`);
         // Don't clear — let the partial keyword matches survive.
-      } else if (finalIds.length <= 10) {
+      } else if (finalIds.length <= 50) { // Increased from 10 to 50 to fetch more for multi-entity
         try {
           const fallbackHits = await qdrant.scroll(POLICY_COLLECTION, {
             filter: {

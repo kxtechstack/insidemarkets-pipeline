@@ -438,8 +438,14 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
 
     let selected;
-    if (candidates.length === 1) {
+    
+    // NEW: If the user asked about specific companies, bypass the LLM list selection.
+    // The LLM has a habit of randomly dropping valid company news when asked for "both".
+    const hasSpecificEntities = (routerResult.entity_mentions && routerResult.entity_mentions.length > 0);
+    
+    if (candidates.length === 1 || hasSpecificEntities) {
       selected = candidates;
+      console.log(`[V2 route] Bypassing LLM list selection — showing all ${candidates.length} candidates for named entities.`);
     } else {
       try {
         selected = await selectRelevantHitsForList(question, candidates);
