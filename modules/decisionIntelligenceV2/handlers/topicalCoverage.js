@@ -478,7 +478,7 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   // TopicalCoverage should NEVER drop them, or the sources panel will
   // show fewer companies than the answer actually used.
   const secChunks = (clientHits || []).filter(h => h._sec);
-  const mergedClientHits = [
+  let mergedClientHits = [
     ...secChunks,
     ...filtered.filteredClientHits.filter(h => !h._sec),
   ];
@@ -486,6 +486,86 @@ async function checkTopicalCoverage(question, clientHits, customSourceHits) {
   console.log(
     `[TopicalCoverage] covered=${covered} kept=${mergedClientHits.length} client (incl ${secChunks.length} SEC) + ${filtered.filteredCustomHits.length} custom of ${indexMap.length} — "${reason}"`
   );
+
+    // ── PRESERVE CLIENT CHUNKS MENTIONING NAMED ENTITIES ───────────────
+  // If the question names specific companies (e.g. "nyka", "loreal",
+  // "Estee Lauder") but those exact strings don't appear in the coverage
+  // LLM's on_topic_indices, we still preserve client chunks that mention
+  // them. This prevents "Estée Lauder vs nyka" from dropping Nykaa news.
+  //
+  // Matching is FUZZY (prefix + squished) so typos work without hardcoding:
+  //   "nyka"    → matches "Nykaa"         (4-char prefix)
+  //   "loreal"  → matches "L'Oréal"       (squished string)
+  //   "estee"   → matches "Estée Lauder"  (prefix)
+  //
+  // This is the ONLY change needed to make all comparison queries resilient
+  // to entity-name typos.
+  const isComparisonQuery = /\b(vs\.?|versus|against|compare)\b/i.test(question);
+
+  if (isComparisonQuery) {
+    // Extract capitalized words from the question (potential entity names)
+    const questionEntities = String(question || '')
+      .match(/\b[A-Z][A-Za-z'’&.\-]+(?:\s+[A-Z][A-Za-z'’&.\-]+){0,2}\b/g) || [];
+
+    const STOP = new Set([
+      'Compare', 'What', 'Which', 'Who', 'When', 'Where', 'Why', 'How',
+      'The', 'And', 'For', 'With', 'From', 'This', 'That', 'These', 'Those',
+      'List', 'Show', 'Give', 'Tell', 'Please', 'Revenue', 'Net', 'Income',
+      'Total', 'Assets', 'Liabilities', 'Cash', 'Flow', 'Profit', 'Earnings',
+      'Margin', 'Performance', 'Comparison', 'Analysis', 'Report', 'Data',
+      'SWOT', 'PESTLE', 'Porter', 'Risk', 'Forces', 'Five', 'Vs', 'Versus',
+      'Against',
+    ]);
+
+    const cleanedEntities = [...new Set(
+      questionEntities
+        .map(e => e.trim())
+        .filter(e => e.length > 2)
+        .filter(e => !STOP.has(e))
+    )];
+
+    // Build fuzzy variants for each entity
+    function nameVariants(name) {
+      const variants = new Set();
+      const clean = name.toLowerCase().replace(/[^\w\s&'-]/g, '').trim();
+      if (!clean) return [];
+      variants.add(clean);
+      variants.add(clean.replace(/[\s\-_]+/g, '')); // squished
+      if (clean.length >= 4) variants.add(clean.slice(0, 4)); // prefix
+      return [...variants].filter(v => v.length >= 3);
+    }
+
+    const alreadyIncludedIds = new Set(
+      mergedClientHits.map(h => h.article_id).filter(Boolean)
+    );
+
+    const extraEntityChunks = (clientHits || []).filter(h => {
+      if (h._sec) return false;
+      if (!h.article_id) return false;
+      if (alreadyIncludedIds.has(h.article_id)) return false;
+
+      const haystack = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
+      const haystackSquished = haystack.replace(/[\s\-_]+/g, '');
+
+      for (const entity of cleanedEntities) {
+        for (const variant of nameVariants(entity)) {
+          const escaped = variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const wordBoundary = new RegExp(`\\b${escaped}`, 'i');
+          if (wordBoundary.test(haystack)) return true;
+          if (haystackSquished.includes(variant)) return true;
+        }
+      }
+      return false;
+    });
+
+    if (extraEntityChunks.length > 0) {
+      console.log(
+        `[TopicalCoverage] Preserving ${extraEntityChunks.length} additional client chunks mentioning [${cleanedEntities.join(', ')}]`
+      );
+      mergedClientHits.push(...extraEntityChunks);
+    }
+  }
+  // ────────────────────────────────────────────────────────────────
 
   // ── NEW: PARTIAL DATA FALLBACK (Comparison Only) ──
   // Only intercepts if this is a comparison (vs/against) AND coverage failed.

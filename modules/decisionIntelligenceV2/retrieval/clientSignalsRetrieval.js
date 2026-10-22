@@ -333,9 +333,14 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
       console.log(`  [Supabase Intersection] ${finalIds.length} articles match ALL ${distinctiveKeywords.length} distinctive keywords`);
 
       // HONESTY GUARD: If multi-keyword intersection is empty, clear all boosts
-      if (finalIds.length === 0) {
+      const isComparisonQuery = /\b(vs\.?|versus|against|compare)\b/i.test(question);
+      
+      if (finalIds.length === 0 && !isComparisonQuery) {
         console.log(`  [Honesty Guard] No article matches ALL keywords — clearing boosts.`);
         exactMatchHits.clear();
+      } else if (finalIds.length === 0 && isComparisonQuery) {
+        console.log(`  [Honesty Guard] Comparison query — preserving individual keyword hits.`);
+        // Don't clear — let the partial keyword matches survive.
       } else if (finalIds.length <= 10) {
         try {
           const fallbackHits = await qdrant.scroll(POLICY_COLLECTION, {
