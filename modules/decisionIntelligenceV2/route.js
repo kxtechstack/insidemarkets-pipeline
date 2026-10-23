@@ -408,6 +408,17 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       ...(routerResult.entity_mentions || []),
     ];
     
+        // Time words are not topics. The time window is handled separately (time=90days).
+    const LIST_TIME_WORDS = new Set([
+      'quarter', 'quarters', 'quarterly', 'month', 'months', 'monthly',
+      'week', 'weeks', 'weekly', 'day', 'days', 'daily',
+      'year', 'years', 'yearly', 'annual', 'annually',
+      'recent', 'recently', 'latest', 'current', 'today',
+    ]);
+    conceptsForFilter = conceptsForFilter.filter(
+      (c) => !LIST_TIME_WORDS.has(String(c).toLowerCase().trim())
+    );
+    
     if (conceptsForFilter.length === 0) {
       const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
       conceptsForFilter = question.toLowerCase()
