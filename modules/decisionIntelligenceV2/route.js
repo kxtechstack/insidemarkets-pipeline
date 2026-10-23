@@ -134,45 +134,86 @@ function filterForInferenceOrDecision(clientHits, concepts) {
 // Runs ONLY on the list path. Inference / decision / framework paths are
 // unchanged.
 // ─────────────────────────────────────────────────────────────────────────
+
+const stripAccents = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+function textMentions(text, entity) {
+  const e = stripAccents(entity).toLowerCase().trim();
+  if (!e) return false;
+  return containsPhrase(stripAccents(text).toLowerCase(), e);
+}
+
+// Real company/place names from the router. Removes the industry word (e.g. "Cosmetics").
+function cleanListEntities(routerResult, industry) {
+  const industryWords = [industry, routerResult && routerResult.sector_term]
+    .filter(Boolean)
+    .map((s) => String(s).toLowerCase().trim());
+
+  const out = [];
+  for (const raw of (routerResult && routerResult.entity_mentions) || []) {
+    const e = String(raw || '').trim();
+    if (e.length < 2) continue;
+    const el = e.toLowerCase();
+    const isIndustryWord = industryWords.some(
+      (w) =>
+        w === el ||
+        (el.length >= 4 && w.startsWith(el)) ||
+        (w.length >= 4 && el.startsWith(w))
+    );
+    if (isIndustryWord) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 async function prepareListCandidates(hits) {
   if (!Array.isArray(hits) || hits.length === 0) return [];
 
-  // Stage 1 — dedupe by article_id, keep the first occurrence.
   const byArticleId = new Map();
   for (const h of hits) {
     if (!h || !h.article_id) continue;
     if (byArticleId.has(h.article_id)) continue;
     byArticleId.set(h.article_id, h);
   }
-
   if (byArticleId.size === 0) return [];
 
-  // Stage 2 — verify each article_id exists in Supabase with is_duplicate=false.
   const ids = [...byArticleId.keys()];
-  let policyRows = [], mdRows = [], foRows = [];
+  let policyRows, mdRows, foRows;
   try {
     [policyRows, mdRows, foRows] = await Promise.all([
-      supabase.from('policy_signals').select('article_id, is_duplicate').in('article_id', ids),
-      supabase.from('market_dynamics_signals').select('article_id, is_duplicate').in('article_id', ids),
-      supabase.from('trend_signals').select('article_id, is_duplicate').in('article_id', ids),
+      supabase.from('policy_signals').select('article_id, is_duplicate, category').in('article_id', ids),
+      supabase.from('market_dynamics_signals').select('article_id, is_duplicate, category').in('article_id', ids),
+      supabase.from('trend_signals').select('article_id, is_duplicate, sector').in('article_id', ids),
     ]);
   } catch (err) {
     console.log(`[prepareListCandidates] Supabase lookup failed, keeping all ${ids.length} candidates: ${err.message}`);
     return [...byArticleId.values()];
   }
 
-  // A candidate is valid if a row exists in any table with is_duplicate=false.
-  const valid = new Set();
-  for (const r of [...(policyRows.data || []), ...(mdRows.data || []), ...(foRows.data || [])]) {
-    if (r.is_duplicate === false) valid.add(r.article_id);
+  // supabase-js does not throw on errors, it returns {error}. Check it.
+  if ([policyRows, mdRows, foRows].some((r) => !r || r.error)) {
+    console.log(`[prepareListCandidates] Supabase returned an error, keeping all ${ids.length} candidates`);
+    return [...byArticleId.values()];
   }
 
-  const cleaned = [...byArticleId.values()].filter(h => valid.has(h.article_id));
+  const valid = new Set();
+  const categoryByArticle = new Map();
+  const add = (rows, field) => {
+    for (const r of rows || []) {
+      if (r.is_duplicate !== false) continue;
+      valid.add(r.article_id);
+      if (r[field] && !categoryByArticle.has(r.article_id)) categoryByArticle.set(r.article_id, r[field]);
+    }
+  };
+  add(policyRows.data, 'category');
+  add(mdRows.data, 'category');
+  add(foRows.data, 'sector');
 
-  console.log(
-    `[prepareListCandidates] ${hits.length} raw → ${byArticleId.size} unique → ${cleaned.length} verified`
-  );
+  const cleaned = [...byArticleId.values()]
+    .filter((h) => valid.has(h.article_id))
+    .map((h) => ({ ...h, category: categoryByArticle.get(h.article_id) || null }));
 
+  console.log(`[prepareListCandidates] ${hits.length} raw → ${byArticleId.size} unique → ${cleaned.length} verified`);
   return cleaned;
 }
 
@@ -379,7 +420,16 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter },
     });
 
+    const listEntities = cleanListEntities(routerResult, industry);
+
     let filtered = filterListHits(clientRetr.hits, conceptsForFilter);
+
+    // Keyword filter removed everything and no company/place is named?
+    // Don't give up. Keep the search matches and let the AI judge them.
+    if (filtered.length === 0 && listEntities.length === 0 && clientRetr.hits.length > 0) {
+      console.log(`[V2 route] list keyword filter removed all ${clientRetr.hits.length} hits — keeping them for AI selection`);
+      filtered = clientRetr.hits;
+    }
 
     // ── 2. STRICT CATEGORY PRE-CHECK (But flexible on categories) ──
     const qLower = question.toLowerCase();
@@ -437,46 +487,47 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    let selected;
+        let selected = [];
     let missingEntityName = null;
 
-    // 1. Extract specific entities from the question (like "Slovakia" or "Elf")
-    const queryEntities = (question.match(/\b[A-Z][A-Za-z'’&.\-]+(?:\s+[A-Z][A-Za-z'’&.\-]+){0,2}\b/g) || [])
-      .filter(w => !/^(What|Which|Who|When|Where|Why|How|The|And|For|With|From|This|That|These|Those|List|Show|Give|Tell|Please|Details|Recent|News|Regulations|Regulation|Combat|Explain|New|Give|Both|Quarter|Days)$/i.test(w));
+    if (listEntities.length > 0) {
+      // Question names a real company/place → keep only items that mention it.
+      const mentionsAny = (text) => listEntities.some((e) => textMentions(text, e));
+      const inTitle = candidates.filter((h) => mentionsAny(h.title || ''));
+      const inText  = candidates.filter((h) => mentionsAny(`${h.title || ''} ${h.chunk_text || ''}`));
 
-    if (queryEntities.length > 0) {
-      // 2. If we have a specific entity, find ONLY the candidates that mention it.
-      const exactMatches = candidates.filter(h => {
-        const text = `${h.title || ''} ${h.chunk_text || ''}`.toLowerCase();
-        return queryEntities.some(e => text.includes(e.toLowerCase()));
-      });
-
-      if (exactMatches.length > 0) {
-        // We found exact matches! Show ONLY these. Do not show the random ones.
-        console.log(`[V2 route] EXACT MATCH FOUND: Filtering down to ${exactMatches.length} candidates containing [${queryEntities.join(', ')}]`);
-        selected = exactMatches; 
+      if (inTitle.length > 0) {
+        console.log(`[V2 route] list entity in TITLE: ${inTitle.length}/${candidates.length} [${listEntities.join(', ')}]`);
+        selected = inTitle;
+      } else if (inText.length > 0) {
+        console.log(`[V2 route] list entity in TEXT: ${inText.length}/${candidates.length} [${listEntities.join(', ')}]`);
+        selected = inText;
       } else {
-        // We looked for "Slovakia" but didn't find it. 
-        console.log(`[V2 route] NO EXACT MATCH for [${queryEntities.join(', ')}] — showing top general results.`);
-        missingEntityName = queryEntities[0];
+        console.log(`[V2 route] list: nothing mentions [${listEntities.join(', ')}] — showing top general results`);
+        missingEntityName = listEntities[0];
         selected = candidates.slice(0, 5);
       }
+    } else if (candidates.length === 1) {
+      selected = candidates;
     } else {
-      // 3. No specific entity (e.g. "list recent funding"), use the LLM.
-      if (candidates.length === 1) {
+      try {
+        selected = await selectRelevantHitsForList(question, candidates);
+      } catch (err) {
         selected = candidates;
-      } else {
-        try {
-          selected = await selectRelevantHitsForList(question, candidates);
-        } catch (err) {
-          selected = candidates;
-        }
       }
-    }
 
-    // 4. If the LLM returned 0, show top 5.
-    if (selected.length === 0) {
-       selected = candidates.slice(0, 5);
+      if (!selected || selected.length === 0) {
+        // AI said nothing fits. Only keep items whose TITLE has a topic word.
+        const topicWords = normalizeConcepts(conceptsForFilter);
+        selected = candidates
+          .filter((h) => topicWords.some((c) => containsPhrase(h.title || '', c)))
+          .slice(0, 5);
+        console.log(`[V2 route] list: AI kept 0 — title-word rescue kept ${selected.length}`);
+      }
+
+      // Same order every time
+      const order = new Map(candidates.map((h, i) => [h, i]));
+      selected = [...selected].sort((a, b) => order.get(a) - order.get(b));
     }
 
     if (!selected || selected.length === 0) {
@@ -488,6 +539,17 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     }
 
     const handlerResult = await buildListItems(selected);
+
+    // Same title shown twice? Keep only the first one.
+    const seenTitles = new Set();
+    handlerResult.items = (handlerResult.items || []).filter((it) => {
+      const key = String(it.title || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!key) return true;
+      if (seenTitles.has(key)) return false;
+      seenTitles.add(key);
+      return true;
+    });
+
     const payload = await buildListResponse({ handlerResult, clientId, industry, missingEntityName });
     return { routerResult, handlerResult, payload };
   }

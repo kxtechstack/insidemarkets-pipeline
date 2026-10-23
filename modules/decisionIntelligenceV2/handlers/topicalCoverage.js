@@ -736,6 +736,7 @@ RULES
 =========================
 
 1. Judge each candidate independently. A candidate is either in or out.
+1.5. Use the Category and Module shown next to each candidate as hints. Do NOT accept a candidate just because it mentions the same industry as the question (for example "cosmetics"). It must be about the SUBJECT the user asked for (funding, acquisitions, regulations, new brands, technology, tariffs, and so on).
 
 2. If the user asks for "funding", you MUST reject articles that are not about capital being raised or invested. Reject "strategic moves", "incubators", or "trends".
 3. If the user asks for "acquisitions", you MUST reject anything that is not a direct purchase, merger, or buyout.
@@ -754,7 +755,7 @@ function buildListSelectionContext(clientHits) {
     const cat = h.category || h.insight_category || 'General';
     let snippet = h.chunk_text || '';
     if (snippet.length > LIST_ITEM_MAX_CHARS) snippet = snippet.slice(0, LIST_ITEM_MAX_CHARS) + '…';
-    lines.push(`[${i + 1}] ${title} (Category: ${cat})\n${snippet}`);
+    lines.push(`[${i + 1}] ${title} (Category: ${cat}; Module: ${h.module_name || 'Unknown'})\n${snippet}`);
   });
   return lines.join('\n\n---\n\n');
 }
@@ -772,7 +773,7 @@ async function selectRelevantHitsForList(question, clientHits) {
         { role: 'system', content: LIST_SELECTION_PROMPT },
         { role: 'user', content: `QUESTION:\n${question}\n\nCANDIDATE SIGNALS:\n${context}` },
       ],
-      { temperature: 0, max_tokens: 250, timeout: 30000 }
+      { temperature: 0, max_tokens: 400, timeout: 30000 }
     );
   } catch (err) {
     console.log(`[ListSelection] LLM call failed — failing open: ${err.message}`);

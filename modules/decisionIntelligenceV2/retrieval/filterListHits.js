@@ -90,7 +90,10 @@ function filterListHits(hits, concepts) {
     const haystackJoined = haystack.replace(/[\s\-_]+/g, '');
     for (const c of clean) {
       const conceptJoined = c.replace(/[\s\-_]+/g, '');
-      if (haystackJoined.includes(conceptJoined)) {
+      // Only for hyphenated words ("k-beauty" vs "kbeauty") or long words.
+      // Short words like "round" must not match inside "around" / "background".
+      const canSquish = /[-_]/.test(c) || conceptJoined.length >= 7;
+      if (canSquish && haystackJoined.includes(conceptJoined)) {
         return true;
       }
     }
