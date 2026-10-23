@@ -68,8 +68,12 @@ If intent is NOT "market_intelligence", put a short friendly reply in
 When unsure between list and inference, prefer "list".
 When unsure between inference and decision, prefer "inference".
 
---- time_constraint ---
-Fill ONLY if the question has an explicit time window.
+CRITICAL FRAMEWORK RULE:
+- PESTLE and Five Forces apply to INDUSTRIES, MARKETS, COUNTRIES or REGIONS. They do NOT apply to a single COMPANY or PRODUCT.
+- If the user asks for a framework on a subject it doesn't apply to (e.g., "PESTLE for Estee Lauder" or "Five Forces for Apple"), you must:
+  1. Set "type": "decision"
+  2. Put this exact text in "primary_intent": "Note: [Framework Name] analysis applies to industries and markets, not individual companies. Here is a SWOT analysis for [Subject Name] instead."
+  (Replace [Framework Name] with PESTLE or Five Forces based on what they asked, and [Subject Name] with the company).
 
 CRITICAL: value and unit MUST AGREE.
   "last week"      → { "value": 7,  "unit": "days", "phrase": "last week" }
