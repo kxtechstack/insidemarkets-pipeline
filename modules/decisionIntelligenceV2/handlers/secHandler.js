@@ -667,6 +667,17 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     const isFrameworkQuestion = FRAMEWORK_CATEGORIES.has(intent.questionCategory);
     const hasTickers = Array.isArray(intent.tickers) && intent.tickers.length > 0;
 
+    // ── GUARD: If no company or sector was found, bail out immediately. ──
+    // This prevents the SEC handler from running for generic queries like
+    // "what is the news on KanuFresh" (where "news" might fuzzy-match NWSA).
+    const routerHasSector = routerResult && typeof routerResult.sector_term === 'string' && routerResult.sector_term.trim().length > 0;
+    const routerIsCompanySet = routerResult && routerResult.is_company_set_query === true;
+
+    if (!hasTickers && !routerHasSector && !routerIsCompanySet) {
+      console.log(`[secHandler] No tickers, sector, or company-set detected for "${question.slice(0, 50)}" — skipping SEC.`);
+      return null;
+    }
+
         // ── NEW: COMPARISON PARTIAL DATA GUARD ─────────────────────────────
     // If the user asks "A vs B", but we only found tickers for A (because B
     // is not a US public company), we must return A's data so the decision
@@ -820,7 +831,6 @@ async function buildSecAnswer({ question, routerResult, clientId, industry }) {
     // company-set query (top N by metric) or a sector term (top 5 cosmetic
     // companies by revenue). Those legitimately have no explicit ticker in
     // the question text but should still go through the company-set path.
-    const routerIsCompanySet = routerResult && routerResult.is_company_set_query === true;
     const routerHasSectorTerm = routerResult && typeof routerResult.sector_term === 'string' && routerResult.sector_term.trim().length > 0;
     // Note: `hasTickers` is already declared above — do not redeclare.
 

@@ -46,7 +46,7 @@ const TICKER_ALIASES = {
 
 const STOPWORD_TICKERS = new Set([
   'ARE', 'ALL', 'ON', 'AT', 'IT', 'A', 'FOR', 'SO', 'OR', 'IS', 'BE',
-  'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'ONE', 'TWO', 'KEY', 'DAY', 'END',
+  'TECH', 'DOV', 'CAN', 'NOW', 'NEW', 'NEWS', 'UPDATE', 'UPDATES', 'STORY', 'ONE', 'TWO', 'KEY', 'DAY', 'END',
   'OIL', 'GAS', 'BIG', 'MAX', 'TOP', 'LOW', 'HIGH', 'SAFE', 'FAST', 'FREE',
   'REAL', 'OPEN', 'PLAY', 'RISE', 'SAVE', 'STAY', 'WELL', 'EXE', 'SEE',
   'ME', 'MY', 'BY', 'DO', 'UP', 'OF', 'PAY', 'LIFE', 'LOVE', 'WORK',
