@@ -514,7 +514,9 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
     applied = null;
     widened = false;
   } else {
-    for (const days of attempts) {
+    // strictTimeWindow (opt-in, list only): never widen the window
+    const windowAttempts = opts.strictTimeWindow === true ? [requested] : attempts;
+    for (const days of windowAttempts) {
       let slice;
       if (days === null) {
         slice = merged.filter((m) => m.score >= finalFloor);
@@ -528,7 +530,7 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
         });
       }
 
-      if (slice.length >= minHitsToStop || days === null) {
+      if (slice.length >= minHitsToStop || days === null || opts.strictTimeWindow === true) {
         timeFiltered = slice;
         applied = days;
         widened = days !== requested;

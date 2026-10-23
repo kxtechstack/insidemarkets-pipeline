@@ -403,8 +403,21 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   // Custom sources and SEC are NEVER used for list questions.
       if (routerResult.type === 'list') {
     // ── 1. FORCE CONCEPTS (Fixes the empty concepts=[] bug) ───────────
+    // Concepts only: if a typo made the router return two spellings of one word
+    // (filing / filling / fillings), keep just the shorter one.
+    const dedupedConcepts = [];
+    for (const c of (routerResult.concept_keywords || [])) {
+      const lc = String(c).toLowerCase().trim();
+      const idx = dedupedConcepts.findIndex((k) => {
+        const kl = String(k).toLowerCase().trim();
+        return kl === lc || stringSimilarity.compareTwoStrings(kl, lc) > 0.8;
+      });
+      if (idx === -1) dedupedConcepts.push(c);
+      else if (String(c).length < String(dedupedConcepts[idx]).length) dedupedConcepts[idx] = c;
+    }
+
     let conceptsForFilter = [
-      ...(routerResult.concept_keywords || []),
+      ...dedupedConcepts,
       ...(routerResult.entity_mentions || []),
     ];
     
@@ -418,7 +431,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
     conceptsForFilter = conceptsForFilter.filter(
       (c) => !LIST_TIME_WORDS.has(String(c).toLowerCase().trim())
     );
-    
+
     if (conceptsForFilter.length === 0) {
       const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
       conceptsForFilter = question.toLowerCase()
