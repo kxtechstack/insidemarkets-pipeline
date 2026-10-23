@@ -716,35 +716,25 @@ async function checkFrameworkSubjectCoverage(question, clientHits, customSourceH
 // ─────────────────────────────────────────────────────────────────────────
 // List-only per-item relevance filter — unchanged
 // ─────────────────────────────────────────────────────────────────────────
-const LIST_SELECTION_PROMPT = `You are filtering a list of retrieved signals for a client's question.
+const LIST_SELECTION_PROMPT = `You are checking retrieved news signals against a client's question.
 
-You will be given:
-  (1) A user's question.
-  (2) A numbered list of candidate signals, each with a title, category, and short excerpt.
+You get (1) the user's question and (2) a numbered list of candidates with title, category and a short excerpt.
 
-Your job: decide which of these candidates genuinely answer the question.
+For EACH candidate decide: does it directly answer the question? Answer true or false for every candidate.
 
-Return ONLY this JSON:
+Return ONLY this JSON (one entry per candidate, in order):
+{"verdicts":[{"n":1,"fit":true},{"n":2,"fit":false}]}
 
-{
-  "relevant_indices": [<1-based indices of the candidates that answer the question>],
-  "reason": "<one short sentence>"
-}
-
-=========================
 RULES
-=========================
-
-1. Judge each candidate independently. A candidate is either in or out.
-1.5. Use the Category and Module shown next to each candidate as hints. Do NOT accept a candidate just because it mentions the same industry as the question (for example "cosmetics"). It must be about the SUBJECT the user asked for (funding, acquisitions, regulations, new brands, technology, tariffs, and so on).
-
-2. If the user asks for "funding", you MUST reject articles that are not about capital being raised or invested. Reject "strategic moves", "incubators", or "trends".
-3. If the user asks for "acquisitions", you MUST reject anything that is not a direct purchase, merger, or buyout.
-4. If the user asks for "new entrants", "new players", or "startups", you MUST reject articles about regulations, policies, or product launches. Only accept articles about a brand new company or brand entering the market.
-4.5. BROAD QUERY RULE: If the user asks for a broad category (e.g., "regulatory filings", "news", "updates", "recent activity"), BE LENIENT. If a candidate is generally about that category (e.g., a new regulation, a policy change, an M&A deal), accept it. Do NOT reject it just because it doesn't contain the exact word "filing".
-5. If NONE of the candidates answer the question, return "relevant_indices": [].
-
-6. Return ONLY the JSON. No markdown fences, no explanation, no extra text.`;
+1. Judge every candidate on its own, using the title and excerpt.
+2. A candidate that is only about the same industry (for example "cosmetics") is NOT a match. It must be about the SUBJECT of the question.
+3. "funding", "funding rounds", "investment": fit=true only if money is being raised or invested (funding round, investment, capital raised, financing). Product launches, expansions, partnerships, distribution deals, trends and regulations are fit=false.
+4. "acquisitions", "mergers", "M&A", "consolidation": fit=true only for a purchase, merger, buyout or stake deal between companies.
+5. "new entrants", "new players", "startups", "new brands": fit=true only if the article is about a brand-new company or brand entering the market. Expansions of existing companies, regulations, product launches and distribution deals are fit=false.
+6. "regulation", "policy", "compliance", "filings", "law": fit=true if the article is about a regulation, law, rule, enforcement action or official filing. Be lenient here. It does not need to contain the exact word the user used.
+7. "technology", "innovation", "emerging": fit=true if the article is about a new technology, ingredient, method or product innovation.
+8. If the question is broad ("recent updates", "latest news"), be lenient and say true for anything clearly on topic.
+9. Return ONLY the JSON, no markdown, no extra text.`;
 
 const LIST_ITEM_MAX_CHARS = 300;
 
@@ -773,7 +763,7 @@ async function selectRelevantHitsForList(question, clientHits) {
         { role: 'system', content: LIST_SELECTION_PROMPT },
         { role: 'user', content: `QUESTION:\n${question}\n\nCANDIDATE SIGNALS:\n${context}` },
       ],
-      { temperature: 0, max_tokens: 400, timeout: 30000 }
+      { temperature: 0, max_tokens: 700, timeout: 30000 }
     );
   } catch (err) {
     console.log(`[ListSelection] LLM call failed — failing open: ${err.message}`);
@@ -782,7 +772,10 @@ async function selectRelevantHitsForList(question, clientHits) {
 
   const stripped = stripFences(raw);
   const jsonBlock = findBalancedJson(stripped);
-  if (!jsonBlock) return clientHits;
+  if (!jsonBlock) {
+    console.log(`[ListSelection] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
+    return clientHits;
+  }
 
   let parsed;
   try {
@@ -791,6 +784,29 @@ async function selectRelevantHitsForList(question, clientHits) {
     return clientHits;
   }
 
+  // New format: one true/false verdict per candidate
+  if (Array.isArray(parsed.verdicts)) {
+    const answered = new Set();
+    const fit = new Set();
+    for (const v of parsed.verdicts) {
+      const n = Number(v && v.n);
+      if (!Number.isInteger(n) || n < 1 || n > clientHits.length) continue;
+      answered.add(n);
+      if (v.fit === true || String(v.fit).toLowerCase() === 'true') fit.add(n);
+    }
+
+    // Model answered for less than half of them → don't trust it
+    if (answered.size < Math.ceil(clientHits.length / 2)) {
+      console.log(`[ListSelection] only ${answered.size}/${clientHits.length} verdicts — failing open`);
+      return clientHits;
+    }
+
+    const selected = clientHits.filter((_, i) => fit.has(i + 1));
+    console.log(`[ListSelection] verdicts: ${selected.length}/${clientHits.length} fit`);
+    return selected;
+  }
+
+  // Old format (just in case the model still answers this way)
   if (!Array.isArray(parsed.relevant_indices)) return clientHits;
 
   const seen = new Set();
@@ -804,10 +820,7 @@ async function selectRelevantHitsForList(question, clientHits) {
     selected.push(clientHits[n - 1]);
   }
 
-  console.log(
-    `[ListSelection] selected ${selected.length}/${clientHits.length} relevant (reason="${parsed.reason || ''}")`
-  );
-
+  console.log(`[ListSelection] selected ${selected.length}/${clientHits.length} relevant (old format)`);
   return selected;
 }
 
