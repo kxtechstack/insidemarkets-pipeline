@@ -440,9 +440,29 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
         .filter(w => w.length > 2 && !stopWords.has(w));
     }
 
+    // "recent" / "latest" with no number: use 30 days (same as the router rule).
+    const routerHasWindow = Boolean(routerResult.time_constraint && routerResult.time_constraint.present);
+    const timeForList = (!routerHasWindow && /\b(recent|recently|latest)\b/i.test(question))
+      ? { present: true, value: 30, unit: 'days', phrase: 'recent' }
+      : routerResult.time_constraint;
+
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
-      precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter },
+      precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter, time_constraint: timeForList },
+      strictTimeWindow: true,   // list only: never widen the date window
     });
+
+    const tw = clientRetr.timeWindow;
+    if (tw) console.log(`[V2 route] list time window: requested=${tw.requested}d applied=${tw.applied}d widened=${tw.widened}`);
+
+    // Nothing inside the requested period → say so, don't show older items.
+    if (tw && tw.requested && clientRetr.hits.length === 0) {
+      const emptyPayload = await buildListResponse({
+        handlerResult: { items: [], _empty: true },
+        clientId, industry, question,
+      });
+      emptyPayload.message = `I don't have any items for "${tw.phrase || 'that time period'}" in your current dataset. Would you like to explore one of these instead?`;
+      return { routerResult, handlerResult: { items: [] }, payload: emptyPayload };
+    }
 
     const listEntities = cleanListEntities(routerResult, industry);
 
