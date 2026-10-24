@@ -453,7 +453,7 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 
     const tw = clientRetr.timeWindow;
     if (tw) console.log(`[V2 route] list time window: requested=${tw.requested}d applied=${tw.applied}d widened=${tw.widened}`);
-    console.log('[V2 route] list hit dates:\n' + clientRetr.hits.map((h) => `   ${String(h.published_date).slice(0, 10)} | ${String(h.title || '').slice(0, 70)}`).join('\n'));
+
     // Nothing inside the requested period → say so, don't show older items.
     if (tw && tw.requested && clientRetr.hits.length === 0) {
       const emptyPayload = await buildListResponse({
@@ -551,8 +551,8 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
         missingEntityName = listEntities[0];
         selected = candidates.slice(0, 5);
       }
-    } else if (candidates.length === 1 && candidates[0]._matched) {
-      selected = candidates;   // exact keyword match: no AI check needed
+    } else if (candidates.length === 1) {
+      selected = candidates;
     } else {
       try {
         selected = await selectRelevantHitsForList(question, candidates);

@@ -164,15 +164,10 @@ Examples that are FOLLOWUPS, not off_topic:
   → kind = "followup"
   → standalone_query = "What is the SWOT analysis for Microsoft?"
 
-  Recent: "do a pestle analysis for cosmetics industry"
-  Current: "estee lauder"
+  Recent: "give me swot analysis for estee lauder"
+  Current: "apple"
   → kind = "followup"
-  → standalone_query = "Note: PESTLE analysis applies to industries and markets, not individual companies. Here is a SWOT analysis for Estee Lauder instead."
-
-  Recent: "five forces for the beauty market"
-  Current: "estee lauder"
-  → kind = "followup"
-  → standalone_query = "Note: Five Forces analysis applies to industries and markets, not individual companies. Here is a SWOT analysis for Estee Lauder instead."
+  → standalone_query = "What is the SWOT analysis for Apple?"
 
   Recent: "what is Apple's revenue?"
   Current: "google"
