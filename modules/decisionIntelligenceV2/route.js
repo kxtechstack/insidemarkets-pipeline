@@ -213,12 +213,45 @@ function buildListSearchText(question) {
   return t.length >= 8 ? t : String(question || '');
 }
 
-// Remembers "keep / drop" per topic and article for 30 minutes, so the same
-// topic (with any time window or wording) gives the same verdict every time.
+// Remembers "keep / drop" per client + topic + article for 30 minutes, so the same
+// question gives the same verdict every time. The key includes the client and the
+// industry rule, so two clients never share verdicts.
 const LIST_VERDICT_TTL_MS = 30 * 60 * 1000;
 const listVerdictCache = new Map();
-function listTopicKey(question) {
-  return buildListSearchText(question).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const MAX_LIST_CANDIDATES = 120;
+
+function listCacheKey(clientId, industryScope, question) {
+  // buildListSearchText removes time words and "List the / Give the", so different wordings share one topic
+  const topic = buildListSearchText(question).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return `${clientId}|${industryScope || 'all'}|${topic}`;
+}
+
+function purgeListVerdictCache() {
+  if (listVerdictCache.size < 5000) return;
+  const now = Date.now();
+  for (const [k, v] of listVerdictCache) {
+    if (now - v.t >= LIST_VERDICT_TTL_MS) listVerdictCache.delete(k);
+  }
+}
+
+function applyMajorRanking(items, question) {
+  const list = Array.isArray(items) ? [...items] : [];
+  if (!/\b(major|key|top|biggest|largest|significant|important|main|critical)\b/i.test(question)) return list;
+  const RANK = { high: 0, medium: 1, low: 2 };
+  const rankOf = (it) => {
+    const r = RANK[String(it.impact || '').toLowerCase()];
+    return r === undefined ? 3 : r;
+  };
+  const timeOf = (it) => {
+    const t = new Date(it.publishedDate).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+  list.sort((a, b) =>
+    rankOf(a) - rankOf(b) ||
+    timeOf(b) - timeOf(a) ||
+    String(a.title || '').localeCompare(String(b.title || ''))
+  );
+  return list.slice(0, 15);
 }
 
 async function prepareListCandidates(hits) {
@@ -456,10 +489,8 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
   //   5. If zero items → no_data.
   //
   // Custom sources and SEC are NEVER used for list questions.
-      if (routerResult.type === 'list') {
-    // ── 1. FORCE CONCEPTS (Fixes the empty concepts=[] bug) ───────────
-    // Concepts only: if a typo made the router return two spellings of one word
-    // (filing / filling / fillings), keep just the shorter one.
+        if (routerResult.type === 'list') {
+    // ── 1. Concepts ──────────────────────────────────────────────────
     const dedupedConcepts = [];
     for (const c of (routerResult.concept_keywords || [])) {
       const lc = String(c).toLowerCase().trim();
@@ -471,17 +502,25 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       else if (String(c).length < String(dedupedConcepts[idx]).length) dedupedConcepts[idx] = c;
     }
 
-        let conceptsForFilter = [
+    let conceptsForFilter = [
       ...dedupedConcepts,
       ...(routerResult.entity_mentions || []),
     ];
 
+    // No concepts from the router (for example the question was sent with a fixed type)?
+    // Use the meaningful words of the question instead.
     if (conceptsForFilter.length === 0) {
-      const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
+      const stopWords = new Set([
+        'list', 'give', 'show', 'tell', 'what', 'which', 'who', 'how', 'when', 'where', 'why',
+        'are', 'were', 'was', 'is', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an',
+        'our', 'my', 'all', 'any', 'major', 'key', 'main', 'new', 'recent', 'latest',
+        'last', 'past', 'one', 'two', 'three', 'this', 'that', 'these', 'those',
+        'sector', 'industry', 'market', 'markets',
+      ]);
       conceptsForFilter = question.toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
         .split(/\s+/)
-        .filter(w => w.length > 2 && !stopWords.has(w));
+        .filter((w) => w.length > 2 && !stopWords.has(w));
     }
 
     // Time words are not topics. The time window is handled separately.
@@ -495,24 +534,26 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       (c) => !LIST_TIME_WORDS.has(String(c).toLowerCase().trim())
     );
 
-    // "recent" / "latest" with no number: use 30 days (same as the router rule).
+    // ── 2. Period ────────────────────────────────────────────────────
     // "current" / "now" mean "as things stand", not a date window. Ignore them.
     const rawRouterTime = routerResult.time_constraint;
     const routerTime = (rawRouterTime && /^(current|currently|now|latest)$/i.test(String(rawRouterTime.phrase || '').trim()))
       ? { present: false, value: null, unit: null, phrase: null }
       : rawRouterTime;
-    const routerHasWindow = Boolean(routerTime && routerTime.present);
-    const timeForList = (!routerHasWindow && /\b(recent|recently|latest)\b/i.test(question))
-      ? { present: true, value: 30, unit: 'days', phrase: 'recent' }
-      : routerTime;
-
+    // An explicit period in the question wins, then the router's period, then "recent" = 30 days.
+    const timeForList = parseListTimeWindow(question, routerTime);
     const hasWindow = Boolean(timeForList && timeForList.present);
     const industryScope = industryScopeFor(question, industry);
 
+    // ── 3. Retrieval ─────────────────────────────────────────────────
+    // With a date window the search is already limited to that period, so a big pool is fine.
+    // Without a window keep the pool small (speed).
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter, time_constraint: timeForList },
       strictTimeWindow: true,   // list only: never widen the date window
-      perModuleLimit: 150, minResults: 300, topK: 300, vectorFloor: 0.10, finalFloor: 0.05,
+      ...(hasWindow
+        ? { perModuleLimit: 150, minResults: 300, topK: 300, vectorFloor: 0.10, finalFloor: 0.05 }
+        : { perModuleLimit: 40, minResults: 40, topK: 40 }),
     });
 
     const tw = clientRetr.timeWindow;
@@ -539,65 +580,23 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       filtered = clientRetr.hits;
     }
 
-    // ── 2. STRICT CATEGORY PRE-CHECK (But flexible on categories) ──
-    const qLower = question.toLowerCase();
-    let allowedCategories = null;
-
-    if (/\b(funding|investment|raise|series\s+[a-z]|vc|capital)\b/i.test(qLower)) {
-      allowedCategories = ['funding', 'investment', 'industry structure'];
-    } else if (/\b(acquisition|merger|m&a|takeover)\b/i.test(qLower)) {
-      allowedCategories = ['acquisition', 'merger', 'industry structure'];
-    } else if (/\b(new entrants|new players|startups|new brands|emerging brands)\b/i.test(qLower)) {
-      allowedCategories = ['industry structure', 'product', 'innovation'];
-    } else if (/\b(regulation|policy|law|compliance|regulatory)\b/i.test(qLower)) {
-      allowedCategories = ['regulatory', 'compliance', 'policy', 'legal'];
-    } else if (/\b(leadership|executive|ceo|hiring|talent)\b/i.test(qLower)) {
-      allowedCategories = ['talent movement', 'industry structure']; // Added industry structure
-    } else if (/\b(technology|ai|innovation|tech)\b/i.test(qLower)) {
-      allowedCategories = ['technology', 'product', 'innovation'];
-    } else if (/\b(expansion|expands|new market)\b/i.test(qLower)) {
-      allowedCategories = ['industry structure', 'expansion', 'product'];
-    } else if (/\b(partnership|joint venture|collaboration)\b/i.test(qLower)) {
-      allowedCategories = ['industry structure', 'partnership', 'product', 'licensing'];
-    } else if (/\b(launch|product launch|new product)\b/i.test(qLower)) {
-      allowedCategories = ['product', 'innovation'];
-    }
-
-    let catFiltered = filtered;
-    let categoryMatched = false;
-
-    if (allowedCategories) {
-      catFiltered = filtered.filter(h => {
-        const cat = (h.category || h.insight_category || '').toLowerCase();
-        return allowedCategories.some(allowed => cat.includes(allowed));
-      });
-
-      if (catFiltered.length > 0) {
-        categoryMatched = true;
-        filtered = catFiltered;
-        console.log(`[V2 route] list category filter: kept ${filtered.length}/${clientRetr.hits.length} (allowed=[${allowedCategories.join(', ')}])`);
-      } else {
-        // If 0 matches, DO NOT throw away the signals. Keep all 15 and let the LLM decide.
-        console.log(`[V2 route] list category filter: 0 matches, falling back to all ${filtered.length} signals`);
-      }
-    }
-    // ────────────────────────────────────────────────────────────────
-
     if (filtered.length === 0) {
       const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry, question });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    const candidates = await prepareListCandidates(filtered);
+    // ── 4. Candidates (dedupe + Supabase check), best matches first, capped for speed ──
+    const candidates = (await prepareListCandidates(filtered)).slice(0, MAX_LIST_CANDIDATES);
 
     if (candidates.length === 0) {
       const payload = await buildListResponse({ handlerResult: { items: [] }, clientId, industry, question });
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-        let selected = [];
+    // ── 5. Selection ─────────────────────────────────────────────────
+    let selected = [];
     let missingEntityName = null;
-    const topicKey = listTopicKey(question);
+    const cacheBase = listCacheKey(clientId, industryScope, question);
     let evaluatedIds = [];
     let cachedKeepAll = [];
 
@@ -620,13 +619,14 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       }
     } else {
       try {
+        purgeListVerdictCache();
         const stableAll = [...candidates].sort((a, b) =>
           String(a.article_id).localeCompare(String(b.article_id))
         );
         const nowTs = Date.now();
         const stableCandidates = [];
         for (const h of stableAll) {
-          const c = listVerdictCache.get(topicKey + '|' + h.article_id);
+          const c = listVerdictCache.get(cacheBase + '|' + h.article_id);
           if (c && nowTs - c.t < LIST_VERDICT_TTL_MS) {
             if (c.keep) cachedKeepAll.push(h);
           } else {
@@ -655,10 +655,6 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
           .slice(0, 5);
         console.log(`[V2 route] list: AI kept 0 — title-word rescue kept ${selected.length}`);
       }
-
-      // Same order every time
-      const order = new Map(candidates.map((h, i) => [h, i]));
-      selected = [...selected].sort((a, b) => order.get(a) - order.get(b));
     }
 
     if (!selected || selected.length === 0) {
@@ -669,28 +665,44 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
-    selected = [...selected].sort((a, b) => String(a.article_id).localeCompare(String(b.article_id)));
-    const cachedIdSet = new Set(cachedKeepAll.map((h) => h.article_id));
-    const toVerify = selected.filter((h) => !cachedIdSet.has(h.article_id));
-    const verifiedNew = await verifyListRelevance(question, toVerify, industryScope);
-    const keepIdSet = new Set(verifiedNew.map((h) => h.article_id));
-    const stampTs = Date.now();
-    for (const id of evaluatedIds) {
-      listVerdictCache.set(topicKey + '|' + id, { keep: keepIdSet.has(id), t: stampTs });
-    }
-    selected = [...verifiedNew, ...cachedKeepAll];
+    // ── 6. Final check (not for questions that name a company or place) ──
+    if (listEntities.length === 0) {
+      selected = [...selected].sort((a, b) => String(a.article_id).localeCompare(String(b.article_id)));
+      const cachedIdSet = new Set(cachedKeepAll.map((h) => h.article_id));
+      const toVerify = selected.filter((h) => !cachedIdSet.has(h.article_id));
+      const verifiedNew = await verifyListRelevance(question, toVerify, industryScope);
 
-    if (!selected || selected.length === 0) {
-      const payload = await buildListResponse({
-        handlerResult: { items: [], _empty: true, _reason: 'no signals genuinely answer this question' },
-        clientId, industry, question,
-      });
-      return { routerResult, handlerResult: { items: [] }, payload };
+      // Remember the verdicts, but only when the check really ran (not when the AI call failed)
+      if (!verifiedNew._failedOpen) {
+        const keepIdSet = new Set(verifiedNew.map((h) => h.article_id));
+        const stampTs = Date.now();
+        for (const id of evaluatedIds) {
+          listVerdictCache.set(cacheBase + '|' + id, { keep: keepIdSet.has(id), t: stampTs });
+        }
+      }
+      selected = [...verifiedNew, ...cachedKeepAll];
+
+      if (selected.length === 0) {
+        const payload = await buildListResponse({
+          handlerResult: { items: [], _empty: true, _reason: 'no signals genuinely answer this question' },
+          clientId, industry, question,
+        });
+        return { routerResult, handlerResult: { items: [] }, payload };
+      }
     }
+
+    // Newest first, same order every time
+    const tsOf = (h) => {
+      const t = h.published_date ? new Date(h.published_date).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    };
+    selected = [...selected].sort((a, b) =>
+      (tsOf(b) - tsOf(a)) || String(a.article_id).localeCompare(String(b.article_id))
+    );
 
     const handlerResult = await buildListItems(selected);
 
-    // Same title shown twice? Keep only the first one.
+    // Same title or same link shown twice? Keep only the first one.
     const seenTitles = new Set();
     const seenUrls = new Set();
     handlerResult.items = (handlerResult.items || []).filter((it) => {
@@ -702,6 +714,9 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       if (key) seenTitles.add(key);
       return true;
     });
+
+    // "major / key / top ..." questions: highest impact first, at most 15
+    handlerResult.items = applyMajorRanking(handlerResult.items, question);
 
     const payload = await buildListResponse({ handlerResult, clientId, industry, missingEntityName });
     return { routerResult, handlerResult, payload };
