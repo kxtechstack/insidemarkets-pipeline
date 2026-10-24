@@ -720,22 +720,25 @@ const LIST_SELECTION_PROMPT = `You are checking retrieved news signals against a
 
 You get (1) the user's question and (2) a numbered list of candidates with title, category and a short excerpt.
 
-For EACH candidate decide: does it directly answer the question? Answer true or false for every candidate.
+For EACH candidate decide: would this item be a correct row in the answer to the question? Answer true or false for every candidate. When unsure, say false.
 
 Return ONLY this JSON (one entry per candidate, in order):
 {"verdicts":[{"n":1,"fit":true},{"n":2,"fit":false}]}
 
 RULES
 1. Judge every candidate on its own, using the title and excerpt.
-2. A candidate that is only about the same industry (for example "cosmetics") is NOT a match. It must be about the SUBJECT of the question.
-3. "funding", "funding rounds", "investment": fit=true only if money is being raised or invested (funding round, investment, capital raised, financing). Product launches, expansions, partnerships, distribution deals, trends and regulations are fit=false.
-4. "acquisitions", "mergers", "M&A", "consolidation": fit=true only for a purchase, merger, buyout or stake deal between companies.
-5. "new entrants", "new players", "startups", "new brands": fit=true only if the article is about a brand-new company or brand entering the market. Expansions of existing companies, regulations, product launches and distribution deals are fit=false.
-6. "regulation", "policy", "compliance", "filings", "law": fit=true if the article is about a regulation, law, rule, enforcement action or official filing. Be lenient here. It does not need to contain the exact word the user used.
-7. "technology", "innovation", "emerging": fit=true if the article is about a new technology, ingredient, method or product innovation.
-8. If the question is broad ("recent updates", "latest news"), be lenient and say true for anything clearly on topic.
+2. Matching one word of the question (for example "cosmetics", "market", "ingredient") is NOT enough. The article must be about what the question asks for.
+3. "funding", "investment": fit=true only if money is being raised or invested (funding round, capital raised, stake purchase). Product launches, expansions, partnerships, market reports and regulations are fit=false.
+4. "acquisitions", "mergers", "M&A", "consolidation": fit=true only for a purchase, merger, buyout or stake deal between companies. Regulatory commentary about mergers in general is fit=false.
+5. "new entrants", "new brands", "startups": fit=true only if a brand-new company or brand is entering the market. Expansions of existing companies, new labs or offices, product launches, laws, regulations, ingredient lists and government policy are ALWAYS fit=false. The item must name the new company or brand.
+6. Use this rule only when no more specific rule below (7a to 7d, or rules 3 to 5) matches the question. "regulation", "policy", "law", "compliance", "filings": fit=true if the article reports a new or changed law, rule, ban, restriction, standard, official filing or a regulator's enforcement action. Lawsuits between private parties, opinion pieces and market reports are fit=false.
+7. "technology", "innovation", "emerging": fit=true only if the article names a specific technology, process, ingredient science or digital tool. Marketing, branding, trend and consumer-behaviour stories are fit=false.
+7a. "tariff", "duty", "trade", "import": fit=true only if the article is about tariffs, duties, customs or trade measures. Market-size reports and trend pieces are fit=false.
+7b. "clinical trial", "protocol", "testing", "study": fit=true only if the article is about clinical or safety testing requirements, trial rules or study approval. Recalls and general enforcement are fit=false.
+7c. "restricted list", "banned ingredients": fit=true only if a specific ingredient or substance is newly banned, restricted or limited. Disclosure laws, recalls, supplement rules and food labelling are fit=false.
+7d. "competitive moves", "major players": fit=true only if a named company takes an action (launch, deal, expansion, partnership, investment, restructuring). Trends, market-size reports, interviews and consumer behaviour are fit=false.
+8. Even for broad questions ("recent updates", "latest news"), the article must clearly match the topic of the question.
 9. Return ONLY the JSON, no markdown, no extra text.`;
-
 const LIST_ITEM_MAX_CHARS = 300;
 
 function buildListSelectionContext(clientHits) {
@@ -750,20 +753,23 @@ function buildListSelectionContext(clientHits) {
   return lines.join('\n\n---\n\n');
 }
 
-async function selectRelevantHitsForList(question, clientHits) {
+async function selectRelevantHitsForList(question, clientHits, industryScope = null) {
   if (!Array.isArray(clientHits) || clientHits.length === 0) return clientHits;
 
   const context = buildListSelectionContext(clientHits);
   if (!context || context.trim().length < 20) return clientHits;
+    const scopeNote = industryScope
+    ? `INDUSTRY SCOPE: The question is about the ${industryScope} industry. A candidate is fit=true only if it is about that industry (its companies, brands, products, ingredients, regulations or market). News from other industries is fit=false, even when it matches the subject of the question.\n\n`
+    : '';
 
   let raw;
   try {
     raw = await callLLM(
       [
         { role: 'system', content: LIST_SELECTION_PROMPT },
-        { role: 'user', content: `QUESTION:\n${question}\n\nCANDIDATE SIGNALS:\n${context}` },
+        { role: 'user', content: `QUESTION:\n${question}\n\n${scopeNote}CANDIDATE SIGNALS:\n${context}` },
       ],
-      { temperature: 0, max_tokens: 700, timeout: 30000 }
+      { temperature: 0, max_tokens: 1500, timeout: 45000 }
     );
   } catch (err) {
     console.log(`[ListSelection] LLM call failed — failing open: ${err.message}`);
@@ -771,6 +777,34 @@ async function selectRelevantHitsForList(question, clientHits) {
   }
 
   const stripped = stripFences(raw);
+
+  // Read the true/false answers with a pattern. The model sometimes forgets the final "}",
+  // which made JSON.parse fail and the code showed everything.
+  {
+    const answered = new Set();
+    const fit = new Set();
+    const readVerdict = (n, value) => {
+      if (!Number.isInteger(n) || n < 1 || n > clientHits.length) return;
+      answered.add(n);
+      if (String(value).toLowerCase() === 'true') fit.add(n);
+    };
+    let m;
+    const reA = /"n"\s*:\s*(\d+)\s*,\s*"fit"\s*:\s*(true|false)/gi;
+    while ((m = reA.exec(stripped)) !== null) readVerdict(Number(m[1]), m[2]);
+    const reB = /"fit"\s*:\s*(true|false)\s*,\s*"n"\s*:\s*(\d+)/gi;
+    while ((m = reB.exec(stripped)) !== null) readVerdict(Number(m[2]), m[1]);
+
+    if (answered.size > 0) {
+      if (answered.size < Math.ceil(clientHits.length / 2)) {
+        console.log(`[ListSelection] only ${answered.size}/${clientHits.length} verdicts — failing open`);
+        return clientHits;
+      }
+      const selected = clientHits.filter((_, i) => fit.has(i + 1));
+      console.log(`[ListSelection] verdicts: ${selected.length}/${clientHits.length} fit`);
+      return selected;
+    }
+  }
+
   const jsonBlock = findBalancedJson(stripped);
   if (!jsonBlock) {
     console.log(`[ListSelection] no JSON in output — failing open: ${stripped.slice(0, 200)}`);
@@ -824,7 +858,73 @@ async function selectRelevantHitsForList(question, clientHits) {
   return selected;
 }
 
+const LIST_VERIFY_PROMPT = `You are the final quality check for a list answer.
+
+You get the user's question and numbered items that were already selected. For EACH item decide: does it directly answer the question, so that a client reading the list would say "yes, this belongs here"?
+
+Say fit=false ONLY if the item is clearly about a different kind of event than the one asked for (for example a law when the question asks for new brands, a lawsuit when the question asks for funding), or is about an unrelated industry, or is a market report or opinion piece when the question asks for specific events. If the item reasonably answers the question, say fit=true.
+
+Return ONLY this JSON: {"verdicts":[{"n":1,"fit":true},{"n":2,"fit":false}]}
+No markdown, no extra text.`;
+
+async function verifyListRelevance(question, hits, industryScope = null) {
+  if (!Array.isArray(hits) || hits.length === 0) return hits;
+
+  const BATCH = 20;
+  const kept = [];
+
+  for (let i = 0; i < hits.length; i += BATCH) {
+    const batch = hits.slice(i, i + BATCH);
+    const context = buildListSelectionContext(batch);
+    const scopeNote = industryScope
+      ? `INDUSTRY SCOPE: the question is about the ${industryScope} industry.\n\n`
+      : '';
+
+    let raw;
+    try {
+      raw = await callLLM(
+        [
+          { role: 'system', content: LIST_VERIFY_PROMPT },
+          { role: 'user', content: `QUESTION:\n${question}\n\n${scopeNote}ITEMS:\n${context}` },
+        ],
+        { temperature: 0, max_tokens: 1200, timeout: 45000 }
+      );
+    } catch (err) {
+      console.log(`[ListVerify] batch ${i / BATCH + 1} failed — keeping batch: ${err.message}`);
+      kept.push(...batch);
+      continue;
+    }
+
+    const text = stripFences(raw);
+    const answered = new Set();
+    const fit = new Set();
+    let m;
+    const reA = /"n"\s*:\s*(\d+)\s*,\s*"fit"\s*:\s*(true|false)/gi;
+    while ((m = reA.exec(text)) !== null) {
+      const n = Number(m[1]);
+      if (n < 1 || n > batch.length) continue;
+      answered.add(n);
+      if (m[2].toLowerCase() === 'true') fit.add(n);
+    }
+
+    if (answered.size < Math.ceil(batch.length / 2)) {
+      console.log(`[ListVerify] batch ${i / BATCH + 1}: only ${answered.size}/${batch.length} verdicts — keeping batch`);
+      kept.push(...batch);
+      continue;
+    }
+
+    batch.forEach((h, idx) => {
+      if (fit.has(idx + 1)) kept.push(h);
+      else console.log(`[ListVerify] DROP "${String(h.title).slice(0, 80)}"`);
+    });
+  }
+
+  console.log(`[ListVerify] ${kept.length}/${hits.length} kept`);
+  return kept;
+}
+
 module.exports = {
+  verifyListRelevance,
   checkTopicalCoverage,
   checkFrameworkSubjectCoverage,
   selectRelevantHitsForList,

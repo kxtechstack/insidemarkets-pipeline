@@ -31,7 +31,7 @@ const {
 const { route } = require('./routing/router');
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const { selectRelevantHitsForList } = require('./handlers/topicalCoverage');
+const { selectRelevantHitsForList, verifyListRelevance } = require('./handlers/topicalCoverage');
 const { retrieveClientSignals } = require('./retrieval/clientSignalsRetrieval');
 const { retrieveCustomSourceHits } = require('./retrieval/customSourceRetrieval');
 const { filterListHits, normalizeConcepts, containsPhrase } = require('./retrieval/filterListHits');
@@ -164,6 +164,61 @@ function cleanListEntities(routerResult, industry) {
     out.push(e);
   }
   return out;
+}
+
+// Does the question name the client's industry? ("in Cosmetics", "our industry", "our core products")
+function industryScopeFor(question, industry) {
+  const ind = String(industry || '').trim();
+  if (!ind) return null;
+  const escaped = ind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = new RegExp('\\b' + escaped + '\\b', 'i').test(question);
+  const ours = /\b(?:our|my)\s+(?:\w+\s+)?(?:industry|sector|market|category|products?)\b/i.test(question);
+  return (named || ours) ? ind : null;
+}
+
+// ── List: period + search-text helpers ─────────────────────────────────
+function parseListTimeWindow(question, routerTime) {
+  const q = String(question || '').toLowerCase();
+  const WORD_NUM = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const UNIT_DAYS = { day: 1, week: 7, month: 30, quarter: 90, year: 365 };
+
+
+  // "last 5 days", "past two weeks", "in the last month"
+  let m = q.match(/\b(?:last|past|previous)\s+(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(day|week|month|quarter|year)s?\b/);
+  if (m && (m[1] || (m[2] !== 'quarter' && m[2] !== 'year'))) {
+    const n = !m[1] ? 1 : (/^\d+$/.test(m[1]) ? Number(m[1]) : WORD_NUM[m[1]]);
+    if (n >= 1) return { present: true, value: n * UNIT_DAYS[m[2]], unit: 'days', phrase: m[0] };
+  }
+
+  // "this quarter", "this month", "current week"
+  m = q.match(/\b(?:this|current)\s+(week|month|quarter|year)\b/);
+  if (m) return { present: true, value: UNIT_DAYS[m[1]], unit: 'days', phrase: m[0] };
+
+  if (/\btoday\b/.test(q)) return { present: true, value: 1, unit: 'days', phrase: 'today' };
+
+  // Nothing explicit: trust the router, else "recent" = 30 days
+  if (routerTime && routerTime.present) return routerTime;
+  if (/\b(recent|recently|latest)\b/.test(q)) return { present: true, value: 30, unit: 'days', phrase: 'recent' };
+  return routerTime;
+}
+
+// Topic-only text for the vector search (no time words, no "List the / Give the")
+function buildListSearchText(question) {
+  let t = String(question || '');
+  t = t.replace(/\b(?:in|over|during|within|for|from)?\s*(?:the\s+)?(?:last|past|previous)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)?\s*(?:day|week|month|quarter|year)s?\b/gi, ' ');
+  t = t.replace(/\b(?:this|current)\s+(?:day|week|month|quarter|year)\b/gi, ' ');
+  t = t.replace(/\b(?:most\s+recent|recently|recent|latest|today|yesterday)\b/gi, ' ');
+  t = t.replace(/^\s*(?:please\s+)?(?:list|give|show|tell|provide|display|get|find|fetch)\s+(?:me\s+)?(?:the\s+|all\s+)?/i, '');
+  t = t.replace(/\s+/g, ' ').replace(/\s+([?.!,])/g, '$1').trim();
+  return t.length >= 8 ? t : String(question || '');
+}
+
+// Remembers "keep / drop" per topic and article for 30 minutes, so the same
+// topic (with any time window or wording) gives the same verdict every time.
+const LIST_VERDICT_TTL_MS = 30 * 60 * 1000;
+const listVerdictCache = new Map();
+function listTopicKey(question) {
+  return buildListSearchText(question).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 async function prepareListCandidates(hits) {
@@ -416,12 +471,20 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       else if (String(c).length < String(dedupedConcepts[idx]).length) dedupedConcepts[idx] = c;
     }
 
-    let conceptsForFilter = [
+        let conceptsForFilter = [
       ...dedupedConcepts,
       ...(routerResult.entity_mentions || []),
     ];
-    
-        // Time words are not topics. The time window is handled separately (time=90days).
+
+    if (conceptsForFilter.length === 0) {
+      const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
+      conceptsForFilter = question.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !stopWords.has(w));
+    }
+
+    // Time words are not topics. The time window is handled separately.
     const LIST_TIME_WORDS = new Set([
       'quarter', 'quarters', 'quarterly', 'month', 'months', 'monthly',
       'week', 'weeks', 'weekly', 'day', 'days', 'daily',
@@ -432,23 +495,24 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       (c) => !LIST_TIME_WORDS.has(String(c).toLowerCase().trim())
     );
 
-    if (conceptsForFilter.length === 0) {
-      const stopWords = new Set(['list', 'recent', 'the', 'in', 'for', 'of', 'and', 'or', 'to', 'a', 'an', 'sector', 'industry']);
-      conceptsForFilter = question.toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter(w => w.length > 2 && !stopWords.has(w));
-    }
-
     // "recent" / "latest" with no number: use 30 days (same as the router rule).
-    const routerHasWindow = Boolean(routerResult.time_constraint && routerResult.time_constraint.present);
+    // "current" / "now" mean "as things stand", not a date window. Ignore them.
+    const rawRouterTime = routerResult.time_constraint;
+    const routerTime = (rawRouterTime && /^(current|currently|now|latest)$/i.test(String(rawRouterTime.phrase || '').trim()))
+      ? { present: false, value: null, unit: null, phrase: null }
+      : rawRouterTime;
+    const routerHasWindow = Boolean(routerTime && routerTime.present);
     const timeForList = (!routerHasWindow && /\b(recent|recently|latest)\b/i.test(question))
       ? { present: true, value: 30, unit: 'days', phrase: 'recent' }
-      : routerResult.time_constraint;
+      : routerTime;
+
+    const hasWindow = Boolean(timeForList && timeForList.present);
+    const industryScope = industryScopeFor(question, industry);
 
     const clientRetr = await retrieveClientSignals(question, clientId, industry, {
       precomputedUnderstanding: { ...routerResult, concept_keywords: conceptsForFilter, time_constraint: timeForList },
       strictTimeWindow: true,   // list only: never widen the date window
+      perModuleLimit: 150, minResults: 300, topK: 300, vectorFloor: 0.10, finalFloor: 0.05,
     });
 
     const tw = clientRetr.timeWindow;
@@ -533,6 +597,9 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
 
         let selected = [];
     let missingEntityName = null;
+    const topicKey = listTopicKey(question);
+    let evaluatedIds = [];
+    let cachedKeepAll = [];
 
     if (listEntities.length > 0) {
       // Question names a real company/place → keep only items that mention it.
@@ -551,11 +618,31 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
         missingEntityName = listEntities[0];
         selected = candidates.slice(0, 5);
       }
-    } else if (candidates.length === 1) {
-      selected = candidates;
     } else {
       try {
-        selected = await selectRelevantHitsForList(question, candidates);
+        const stableAll = [...candidates].sort((a, b) =>
+          String(a.article_id).localeCompare(String(b.article_id))
+        );
+        const nowTs = Date.now();
+        const stableCandidates = [];
+        for (const h of stableAll) {
+          const c = listVerdictCache.get(topicKey + '|' + h.article_id);
+          if (c && nowTs - c.t < LIST_VERDICT_TTL_MS) {
+            if (c.keep) cachedKeepAll.push(h);
+          } else {
+            stableCandidates.push(h);
+          }
+        }
+        evaluatedIds = stableCandidates.map((h) => h.article_id);
+        const BATCH = 25;
+        const batches = [];
+        for (let i = 0; i < stableCandidates.length; i += BATCH) {
+          batches.push(stableCandidates.slice(i, i + BATCH));
+        }
+        const batchResults = await Promise.all(
+          batches.map((b) => selectRelevantHitsForList(question, b, industryScope))
+        );
+        selected = batchResults.flat().concat(cachedKeepAll);
       } catch (err) {
         selected = candidates;
       }
@@ -582,15 +669,37 @@ async function runV2Pipeline({ question, clientId, industry, forcedType }) {
       return { routerResult, handlerResult: { items: [] }, payload };
     }
 
+    selected = [...selected].sort((a, b) => String(a.article_id).localeCompare(String(b.article_id)));
+    const cachedIdSet = new Set(cachedKeepAll.map((h) => h.article_id));
+    const toVerify = selected.filter((h) => !cachedIdSet.has(h.article_id));
+    const verifiedNew = await verifyListRelevance(question, toVerify, industryScope);
+    const keepIdSet = new Set(verifiedNew.map((h) => h.article_id));
+    const stampTs = Date.now();
+    for (const id of evaluatedIds) {
+      listVerdictCache.set(topicKey + '|' + id, { keep: keepIdSet.has(id), t: stampTs });
+    }
+    selected = [...verifiedNew, ...cachedKeepAll];
+
+    if (!selected || selected.length === 0) {
+      const payload = await buildListResponse({
+        handlerResult: { items: [], _empty: true, _reason: 'no signals genuinely answer this question' },
+        clientId, industry, question,
+      });
+      return { routerResult, handlerResult: { items: [] }, payload };
+    }
+
     const handlerResult = await buildListItems(selected);
 
     // Same title shown twice? Keep only the first one.
     const seenTitles = new Set();
+    const seenUrls = new Set();
     handlerResult.items = (handlerResult.items || []).filter((it) => {
       const key = String(it.title || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      if (!key) return true;
-      if (seenTitles.has(key)) return false;
-      seenTitles.add(key);
+      const urlKey = String(it.url || '').trim().toLowerCase();
+      if (urlKey && seenUrls.has(urlKey)) return false;
+      if (key && seenTitles.has(key)) return false;
+      if (urlKey) seenUrls.add(urlKey);
+      if (key) seenTitles.add(key);
       return true;
     });
 

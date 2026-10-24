@@ -414,7 +414,19 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
     }
   }
 
-  const perModuleResults = await Promise.all(
+    // List only (strictTimeWindow): count days from the start of today (UTC), because
+  // signal dates are whole days, and filter by date INSIDE the search, so the top
+  // results are chosen among articles that are really in the window.
+  const dayStartUtc = new Date();
+  dayStartUtc.setUTCHours(0, 0, 0, 0);
+  const strictNow = opts.strictTimeWindow === true ? dayStartUtc.getTime() : Date.now();
+
+  const { requested: prefilterDays } = buildWindowAttempts(understanding.time_constraint);
+  const datePrefilter = (opts.strictTimeWindow === true && prefilterDays)
+    ? [{ key: 'published_date', range: { gte: new Date(strictNow - prefilterDays * 24 * 60 * 60 * 1000).toISOString() } }]
+    : [];
+
+  const searchAllModules = (extraMust) => Promise.all(
     modules.map(async (moduleId) => {
       try {
         const hits = await searchModuleWithRetry(moduleId, {
@@ -425,19 +437,25 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
               { key: 'client_id', match: { value: clientId } },
               { key: 'industry',  match: { value: industry } },
               { key: 'module_id', match: { value: moduleId } },
+              ...extraMust,
             ],
           },
           with_payload: true,
         });
         return { moduleId, hits };
       } catch (err) {
-        console.log(
-          `[retrieveClientSignals] search failed for module ${moduleId} after retry: ${err.message}`
-        );
+        console.log(`[retrieveClientSignals] search failed for module ${moduleId} after retry: ${err.message}`);
         return { moduleId, hits: [] };
       }
     })
   );
+
+  let perModuleResults = await searchAllModules(datePrefilter);
+  // Safety: if the date pre-filter fails or finds nothing at all, search the old way
+  if (datePrefilter.length > 0 && perModuleResults.every((r) => r.hits.length === 0)) {
+    console.log('[retrieval] date pre-filter returned nothing — searching without it');
+    perModuleResults = await searchAllModules([]);
+  }
 
   const merged = [];
   const processedIds = new Set();
@@ -521,7 +539,7 @@ async function retrieveClientSignals(question, clientId, industry, opts = {}) {
       if (days === null) {
         slice = merged.filter((m) => m.score >= finalFloor);
       } else {
-        const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+        const cutoff = strictNow - days * 24 * 60 * 60 * 1000;
         slice = merged.filter((m) => {
           if (m.score < finalFloor) return false;
           if (!m.published_date) return false;
