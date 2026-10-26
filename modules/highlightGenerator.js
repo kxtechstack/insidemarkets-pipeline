@@ -12,26 +12,28 @@ const POLICY_MODULE_ID          = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 
-// Each module keeps its signals in its own table
 const MODULE_CONFIG = {
   [POLICY_MODULE_ID]: {
     label: 'Policy & Risk Monitor',
     table: 'policy_signals',
-    columns: 'signal_title, category, impact_level, country, summary, created_at',
+    columns: 'id, signal_title, category, impact_level, country, summary, created_at',
+    tagField: 'category',
   },
   [MARKET_DYNAMICS_MODULE_ID]: {
     label: 'Market Dynamics',
     table: 'market_dynamics_signals',
-    columns: 'signal_title, category, organization, country, summary, created_at',
+    columns: 'id, insight_id, signal_title, category, organization, country, summary, created_at',
+    tagField: 'category',
   },
   [FORWARD_OUTLOOK_MODULE_ID]: {
     label: 'Forward Outlook',
     table: 'trend_signals',
-    columns: 'signal_title, sector, organization, horizon_estimate, summary, created_at',
+    columns: 'id, signal_title, sector, organization, horizon_estimate, summary, created_at',
+    tagField: 'sector',
   },
 };
 
-const MAX_SIGNALS = 12;
+const MAX_SIGNALS = 15;
 const MAX_ATTEMPTS = 3;
 const ATTEMPT_TEMPERATURES = [0.2, 0.4, 0.5];
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -182,6 +184,14 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
     }
     console.log(`${tag}: using ${signals.length} signals (${startIso} to ${endIso})`);
 
+        // Keep the exact list of signals used, so the page can show the same ones
+    const signalsUsed = signals.map(s => ({
+      id: s.id,
+      insight_id: s.insight_id || null,
+      title: s.signal_title,
+      tag: s[config.tagField] || null,
+    }));
+
     // 3. Build the prompt
     const template = await loadPromptTemplate();
     const signalBlock = signals
@@ -220,7 +230,7 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
     // 5. Save the new one first, then remove the older ones
     const { data: inserted, error: insertErr } = await supabase
       .from('daily_highlights')
-      .insert({ client_id: clientId, module_id: moduleId, highlight_text: highlightText, signal_date: signalDate })
+      .insert({ client_id: clientId, module_id: moduleId, highlight_text: highlightText, signal_date: signalDate, signals_used: signalsUsed })
       .select('id')
       .single();
     if (insertErr) throw new Error(`Insert failed: ${insertErr.message}`);

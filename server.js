@@ -1064,7 +1064,7 @@ app.get('/daily-highlights/:clientId', async (req, res) => {
 
     const { data, error } = await supabaseClient
       .from('daily_highlights')
-      .select('module_id, kind, highlight_text, signal_date, created_at')
+      .select('module_id, kind, highlight_text, signal_date, created_at, signals_used')
       .eq('client_id', clientId)
       .order('created_at', { ascending: false });
 
