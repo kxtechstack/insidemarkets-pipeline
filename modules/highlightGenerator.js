@@ -16,20 +16,23 @@ const MODULE_CONFIG = {
   [POLICY_MODULE_ID]: {
     label: 'Policy & Risk Monitor',
     table: 'policy_signals',
-    columns: 'id, signal_title, category, impact_level, country, summary, created_at',
+    columns: 'id, signal_title, category, impact_level, country, summary, created_at, source_published_date',
     tagField: 'category',
+    dateField: 'source_published_date',
   },
   [MARKET_DYNAMICS_MODULE_ID]: {
     label: 'Market Dynamics',
     table: 'market_dynamics_signals',
-    columns: 'id, insight_id, signal_title, category, organization, country, summary, created_at',
+    columns: 'id, insight_id, signal_title, category, organization, country, summary, created_at, published_date',
     tagField: 'category',
+    dateField: 'published_date',
   },
   [FORWARD_OUTLOOK_MODULE_ID]: {
     label: 'Forward Outlook',
     table: 'trend_signals',
-    columns: 'id, signal_title, sector, organization, horizon_estimate, summary, created_at',
+    columns: 'id, signal_title, sector, organization, horizon_estimate, summary, created_at, source_published_date',
     tagField: 'sector',
+    dateField: 'source_published_date',
   },
 };
 
@@ -165,12 +168,13 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
   const tag = `[HighlightGen] ${config.label}`;
 
   try {
-    // 1. Find the newest signal for this client in this module
+    // 1. Find the newest signal DATE (the same date the module page uses)
     const { data: newest, error: newestErr } = await supabase
       .from(config.table)
-      .select('created_at')
+      .select(config.dateField)
       .eq('client_id', clientId)
-      .order('created_at', { ascending: false })
+      .not(config.dateField, 'is', null)
+      .order(config.dateField, { ascending: false })
       .limit(1);
     if (newestErr) throw new Error(`Newest signal query failed: ${newestErr.message}`);
 
@@ -179,24 +183,27 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
       return { success: true, skipped: true, reason: 'no signals' };
     }
 
-    // 2. Take the signals from that same (IST) day
-    const { startIso, endIso } = getIstDayWindow(newest[0].created_at);
-    const signalDate = new Date(new Date(startIso).getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+    // 2. Take the signals of that latest day only (1 signal is fine, max 15)
+    const latestDay = String(newest[0][config.dateField]).slice(0, 10);
+    const nextDay = new Date(new Date(`${latestDay}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000)
+      .toISOString().slice(0, 10);
+    const signalDate = latestDay;
     const { data: signals, error: signalsErr } = await supabase
       .from(config.table)
       .select(config.columns)
       .eq('client_id', clientId)
-      .gte('created_at', startIso)
-      .lt('created_at', endIso)
+      .gte(config.dateField, latestDay)
+      .lt(config.dateField, nextDay)
       .order('created_at', { ascending: false })
       .limit(MAX_SIGNALS);
     if (signalsErr) throw new Error(`Signals query failed: ${signalsErr.message}`);
 
     if (!signals || signals.length === 0) {
-      console.log(`${tag}: no signals found in the window, old highlight is kept.`);
+      console.log(`${tag}: no signals found for ${latestDay}, old highlight is kept.`);
       return { success: true, skipped: true, reason: 'no signals in window' };
     }
-    console.log(`${tag}: using ${signals.length} signals (${startIso} to ${endIso})`);
+    console.log(`${tag}: using ${signals.length} signals from ${latestDay}`);
+    
     // Count signals per category, so the AI knows which theme is biggest
     const tagCounts = {};
     for (const s of signals) {
