@@ -141,7 +141,8 @@ const removeUnsupportedSentences = (text, badNumbers) => {
 const isTooWeak = (text, signalCount) => {
   const paragraphs = text.split(/\n\s*\n/).filter(Boolean).length;
   const minParagraphs = signalCount >= 3 ? 2 : 1;
-  return text.length < 200 || paragraphs < minParagraphs;
+  const minLength = signalCount >= 3 ? 200 : 80;
+  return text.length < minLength || paragraphs < minParagraphs;
 };
 
 const loadPromptTemplate = async () => {
@@ -233,7 +234,7 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
     const signalBlock = orderedSignals
       .map((s, i) => `Signal ${i + 1}\n${describeSignal(s)}`)
       .join('\n\n-----\n\n');
-    const finalPrompt = `${template}\n\nMODULE: ${config.label}\n\nSIGNAL COUNT BY CATEGORY (biggest first): ${themeLine}\nUse this only as a hint. Group by what the signals are really about. The first paragraph must cover the biggest group. Every category with 5 or more signals must have its own paragraph.\n\nSIGNALS:\n\n${signalBlock}`;
+    const finalPrompt = `${template}\n\nMODULE: ${config.label}\nNUMBER OF SIGNALS: ${signals.length}. Write only about these ${signals.length} signals. Do not add any other country, company or event.\n\nSIGNAL COUNT BY CATEGORY (biggest first): ${themeLine}\nUse this only as a hint. Group by what the signals are really about. The first paragraph must cover the biggest group. Every category with 5 or more signals must have its own paragraph.\n\nSIGNALS:\n\n${signalBlock}`;
     const sourceText = signals.map(s => describeSignal(s, false)).join('\n');
 
     // 4. Write it (try again if the answer is broken)
