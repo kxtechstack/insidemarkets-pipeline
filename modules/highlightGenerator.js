@@ -86,9 +86,23 @@ const cleanHighlightText = (raw) => {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
+  // Sentences with these phrases are filler or talk about the data, so we drop them
+  const BAD_SENTENCE = /\b(the article|the signals?|several signals|broader (trend|problem)|highlight(s|ed|ing)? the need|part of a broader|could lead to|could improve)\b/i;
+  const MAX_SENTENCES_PER_PARAGRAPH = 3;
+
   return text
     .split(/\n\s*\n/)
     .map(p => p.trim())
+    .filter(Boolean)
+    .map(p =>
+      p
+        .split(/(?<=[.!?])\s+/)
+        .filter(s => !BAD_SENTENCE.test(s))
+        .slice(0, MAX_SENTENCES_PER_PARAGRAPH)
+        .join(' ')
+        .replace(/\b(significant|major|crucial)\s+/gi, '')
+        .trim()
+    )
     .filter(Boolean)
     .filter(p => !(p.length < 110 && (p.match(/[.!?]/g) || []).length <= 1))
     .slice(0, 3)
@@ -183,7 +197,22 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
       return { success: true, skipped: true, reason: 'no signals in window' };
     }
     console.log(`${tag}: using ${signals.length} signals (${startIso} to ${endIso})`);
-
+    // Count signals per category, so the AI knows which theme is biggest
+    const tagCounts = {};
+    for (const s of signals) {
+      const t = s[config.tagField] || 'Other';
+      tagCounts[t] = (tagCounts[t] || 0) + 1;
+    }
+    const themeLine = Object.entries(tagCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([t, n]) => `${t}: ${n}`)
+      .join(', ');
+    // Put signals of the same category together, biggest category first
+    const orderedSignals = [...signals].sort((a, b) => {
+      const ta = a[config.tagField] || 'Other';
+      const tb = b[config.tagField] || 'Other';
+      return (tagCounts[tb] - tagCounts[ta]) || ta.localeCompare(tb);
+    });
         // Keep the exact list of signals used, so the page can show the same ones
     const signalsUsed = signals.map(s => ({
       id: s.id,
@@ -194,10 +223,10 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
 
     // 3. Build the prompt
     const template = await loadPromptTemplate();
-    const signalBlock = signals
+    const signalBlock = orderedSignals
       .map((s, i) => `Signal ${i + 1}\n${describeSignal(s)}`)
       .join('\n\n-----\n\n');
-    const finalPrompt = `${template}\n\nMODULE: ${config.label}\n\nSIGNALS:\n\n${signalBlock}`;
+    const finalPrompt = `${template}\n\nMODULE: ${config.label}\n\nSIGNAL COUNT BY CATEGORY (biggest first): ${themeLine}\nUse this only as a hint. Group by what the signals are really about. The first paragraph must cover the biggest group. Every category with 5 or more signals must have its own paragraph.\n\nSIGNALS:\n\n${signalBlock}`;
     const sourceText = signals.map(s => describeSignal(s, false)).join('\n');
 
     // 4. Write it (try again if the answer is broken)
