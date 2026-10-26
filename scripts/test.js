@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { generateHighlight, generateBriefingFrame } = require('../modules/highlightGenerator');
-const CLIENT_ID = '19174b66-5ad9-44fa-8071-b30a90c15ea2';
-const INDUSTRY = 'Renewable Energy';
+const CLIENT_ID = 'b61b4d3b-caeb-457b-9971-636c83688ee4';
+const INDUSTRY = 'Cosmetics';
 const MODULE_IDS = [
   '55c5ee19-bfca-468b-81b3-b89ca4f303c8', // Market Dynamics
   '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960', // Policy & Risk

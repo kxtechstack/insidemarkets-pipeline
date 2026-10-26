@@ -304,7 +304,8 @@ const cleanFrameText = (raw) =>
     .replace(/\*\*/g, '')
     .replace(/^#+\s*/gm, '')
     .replace(/^["“]+|["”]+$/g, '')
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 
 const loadPromptById = async (promptId) => {
@@ -318,14 +319,14 @@ const loadPromptById = async (promptId) => {
   return data.prompt_template;
 };
 
-const writeFrameText = async ({ promptId, sourceBlock, sourceText, maxSentences, tag }) => {
+const writeFrameText = async ({ promptId, sourceBlock, sourceText, maxParagraphs, maxSentencesPerParagraph, maxTokens, tag }) => {
   const template = await loadPromptById(promptId);
   const finalPrompt = `${template}\n\nMODULE HIGHLIGHTS:\n\n${sourceBlock}`;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const raw = await callLLM(
       [{ role: 'user', content: finalPrompt }],
-      { temperature: ATTEMPT_TEMPERATURES[attempt - 1], max_tokens: 200, timeout: 120000 }
+      { temperature: ATTEMPT_TEMPERATURES[attempt - 1], max_tokens: maxTokens, timeout: 120000 }
     );
     let text = cleanFrameText(raw);
 
@@ -335,7 +336,14 @@ const writeFrameText = async ({ promptId, sourceBlock, sourceText, maxSentences,
       text = cleanFrameText(removeUnsupportedSentences(text, unsupported));
     }
 
-    text = splitSentences(text).slice(0, maxSentences).join(' ');
+    text = text
+      .split(/\n\s*\n/)
+      .map(p => p.trim())
+      .filter(Boolean)
+      .slice(0, maxParagraphs)
+      .map(p => splitSentences(p).slice(0, maxSentencesPerParagraph).join(' '))
+      .join('\n\n');
+
     if (text.length >= 40) return text;
     console.log(`${tag}: attempt ${attempt}/${MAX_ATTEMPTS} was too short, trying again`);
   }
@@ -386,15 +394,15 @@ const generateBriefingFrame = async (clientId) => {
     const sourceText = available.map(id => latest[id].highlight_text).join('\n');
 
     const intro = await writeFrameText({
-      promptId: 'daily_highlight_intro_v1', sourceBlock, sourceText, maxSentences: 3, tag,
+      promptId: 'daily_highlight_intro_v1', sourceBlock, sourceText, maxParagraphs: 2, maxSentencesPerParagraph: 3, maxTokens: 450, tag,
     });
     if (intro) await saveFrameRow(clientId, 'intro', intro);
     else console.error(`${tag}: intro failed, old intro is kept.`);
 
     const recap = await writeFrameText({
-      promptId: 'daily_highlight_conclusion_v1', sourceBlock, sourceText, maxSentences: 1, tag,
+      promptId: 'daily_highlight_conclusion_v1', sourceBlock, sourceText, maxParagraphs: 1, maxSentencesPerParagraph: 3, maxTokens: 300, tag,
     });
-    if (recap) await saveFrameRow(clientId, 'conclusion', `${recap} ${CONCLUSION_CLOSING}`);
+    if (recap) await saveFrameRow(clientId, 'conclusion', recap);
     else console.error(`${tag}: conclusion failed, old conclusion is kept.`);
 
     console.log(`${tag}: done (intro: ${!!intro}, conclusion: ${!!recap}).`);
