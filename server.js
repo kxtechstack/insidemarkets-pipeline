@@ -1057,6 +1057,32 @@ app.get('/daily-snapshot-latest/:clientId', async (req, res) => {
   }
 });
 
+// Latest highlight text for each module (landing page)
+app.get('/daily-highlights/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    const { data, error } = await supabaseClient
+      .from('daily_highlights')
+      .select('module_id, highlight_text, created_at')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Keep only the newest row for each module
+    const latestByModule = {};
+    for (const row of data || []) {
+      if (!latestByModule[row.module_id]) latestByModule[row.module_id] = row;
+    }
+
+    return res.json({ highlights: Object.values(latestByModule) });
+  } catch (err) {
+    console.error('[DailyHighlights] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Credit usage — count every user message this client has ever sent.
 app.get('/credit-usage/:clientId', async (req, res) => {
   const CREDIT_TOTAL = 10000;
