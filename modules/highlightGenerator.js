@@ -165,6 +165,7 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
 
     // 2. Take the signals from that same (IST) day
     const { startIso, endIso } = getIstDayWindow(newest[0].created_at);
+    const signalDate = new Date(new Date(startIso).getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
     const { data: signals, error: signalsErr } = await supabase
       .from(config.table)
       .select(config.columns)
@@ -219,7 +220,7 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
     // 5. Save the new one first, then remove the older ones
     const { data: inserted, error: insertErr } = await supabase
       .from('daily_highlights')
-      .insert({ client_id: clientId, module_id: moduleId, highlight_text: highlightText })
+      .insert({ client_id: clientId, module_id: moduleId, highlight_text: highlightText, signal_date: signalDate })
       .select('id')
       .single();
     if (insertErr) throw new Error(`Insert failed: ${insertErr.message}`);
@@ -241,4 +242,122 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
   }
 };
 
-module.exports = { generateHighlight };
+// ───────────────────────────────────────────────────────────────────────
+// Intro + conclusion for the landing page.
+// Written ONLY from the module highlights above (never from raw signals).
+// ───────────────────────────────────────────────────────────────────────
+const MODULE_ORDER = [MARKET_DYNAMICS_MODULE_ID, POLICY_MODULE_ID, FORWARD_OUTLOOK_MODULE_ID];
+const CONCLUSION_CLOSING = 'Use Ask Decision Intelligence below to explore any of these developments in more detail.';
+
+const splitSentences = (text) =>
+  text.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
+
+const cleanFrameText = (raw) =>
+  (raw || '')
+    .replace(/^(here'?s|below is|the following is)[^\n]*\n+/i, '')
+    .replace(/\*\*/g, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^["“]+|["”]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const loadPromptById = async (promptId) => {
+  const { data, error } = await supabase
+    .from('prompts')
+    .select('prompt_template')
+    .eq('id', promptId)
+    .eq('is_active', true)
+    .single();
+  if (error || !data) throw new Error(`Could not load prompt ${promptId}: ${error?.message}`);
+  return data.prompt_template;
+};
+
+const writeFrameText = async ({ promptId, sourceBlock, sourceText, maxSentences, tag }) => {
+  const template = await loadPromptById(promptId);
+  const finalPrompt = `${template}\n\nMODULE HIGHLIGHTS:\n\n${sourceBlock}`;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const raw = await callLLM(
+      [{ role: 'user', content: finalPrompt }],
+      { temperature: ATTEMPT_TEMPERATURES[attempt - 1], max_tokens: 200, timeout: 120000 }
+    );
+    let text = cleanFrameText(raw);
+
+    const unsupported = findUnsupportedNumbers(text, sourceText);
+    if (unsupported.length > 0) {
+      console.log(`${tag}: numbers not in highlights (${unsupported.join(', ')}) -- removing those sentences`);
+      text = cleanFrameText(removeUnsupportedSentences(text, unsupported));
+    }
+
+    text = splitSentences(text).slice(0, maxSentences).join(' ');
+    if (text.length >= 40) return text;
+    console.log(`${tag}: attempt ${attempt}/${MAX_ATTEMPTS} was too short, trying again`);
+  }
+  return null;
+};
+
+const saveFrameRow = async (clientId, kind, text) => {
+  const { data: inserted, error } = await supabase
+    .from('daily_highlights')
+    .insert({ client_id: clientId, module_id: null, kind, highlight_text: text })
+    .select('id')
+    .single();
+  if (error) throw new Error(`Insert (${kind}) failed: ${error.message}`);
+
+  const { error: cleanupErr } = await supabase
+    .from('daily_highlights')
+    .delete()
+    .eq('client_id', clientId)
+    .eq('kind', kind)
+    .neq('id', inserted.id);
+  if (cleanupErr) console.error(`[HighlightGen] could not remove old ${kind}: ${cleanupErr.message}`);
+};
+
+const generateBriefingFrame = async (clientId) => {
+  const tag = '[HighlightGen] Briefing frame';
+  try {
+    const { data: rows, error } = await supabase
+      .from('daily_highlights')
+      .select('module_id, highlight_text, created_at')
+      .eq('client_id', clientId)
+      .eq('kind', 'module')
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(`Load module highlights failed: ${error.message}`);
+
+    const latest = {};
+    for (const r of rows || []) {
+      if (r.module_id && !latest[r.module_id]) latest[r.module_id] = r;
+    }
+    const available = MODULE_ORDER.filter(id => latest[id]);
+    if (available.length === 0) {
+      console.log(`${tag}: no module highlights yet, nothing to do.`);
+      return { success: true, skipped: true };
+    }
+
+    const sourceBlock = available
+      .map(id => `${MODULE_CONFIG[id].label.toUpperCase()}:\n${latest[id].highlight_text}`)
+      .join('\n\n=====\n\n');
+    const sourceText = available.map(id => latest[id].highlight_text).join('\n');
+
+    const intro = await writeFrameText({
+      promptId: 'daily_highlight_intro_v1', sourceBlock, sourceText, maxSentences: 3, tag,
+    });
+    if (intro) await saveFrameRow(clientId, 'intro', intro);
+    else console.error(`${tag}: intro failed, old intro is kept.`);
+
+    const recap = await writeFrameText({
+      promptId: 'daily_highlight_conclusion_v1', sourceBlock, sourceText, maxSentences: 1, tag,
+    });
+    if (recap) await saveFrameRow(clientId, 'conclusion', `${recap} ${CONCLUSION_CLOSING}`);
+    else console.error(`${tag}: conclusion failed, old conclusion is kept.`);
+
+    console.log(`${tag}: done (intro: ${!!intro}, conclusion: ${!!recap}).`);
+    return { success: true, intro: !!intro, conclusion: !!recap };
+
+  } catch (err) {
+    console.error(`${tag}: failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+};
+
+module.exports = { generateHighlight, generateBriefingFrame };

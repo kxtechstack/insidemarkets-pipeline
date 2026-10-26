@@ -1057,26 +1057,38 @@ app.get('/daily-snapshot-latest/:clientId', async (req, res) => {
   }
 });
 
-// Latest highlight text for each module (landing page)
+// Latest highlights for the landing page: 3 module texts + intro + conclusion
 app.get('/daily-highlights/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
 
     const { data, error } = await supabaseClient
       .from('daily_highlights')
-      .select('module_id, highlight_text, created_at')
+      .select('module_id, kind, highlight_text, signal_date, created_at')
       .eq('client_id', clientId)
       .order('created_at', { ascending: false });
 
     if (error) return res.status(500).json({ error: error.message });
 
-    // Keep only the newest row for each module
-    const latestByModule = {};
+    const modules = {};
+    let intro = null;
+    let conclusion = null;
     for (const row of data || []) {
-      if (!latestByModule[row.module_id]) latestByModule[row.module_id] = row;
+      const kind = row.kind || 'module';
+      if (kind === 'intro') { if (!intro) intro = row; }
+      else if (kind === 'conclusion') { if (!conclusion) conclusion = row; }
+      else if (row.module_id && !modules[row.module_id]) modules[row.module_id] = row;
     }
 
-    return res.json({ highlights: Object.values(latestByModule) });
+    const highlights = Object.values(modules);
+    const signalDates = highlights.map(h => h.signal_date).filter(Boolean).sort();
+
+    return res.json({
+      highlights,
+      intro: intro ? intro.highlight_text : null,
+      conclusion: conclusion ? conclusion.highlight_text : null,
+      latestSignalDate: signalDates.length ? signalDates[signalDates.length - 1] : null,
+    });
   } catch (err) {
     console.error('[DailyHighlights] Error:', err.message);
     return res.status(500).json({ error: err.message });

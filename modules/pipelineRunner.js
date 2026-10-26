@@ -176,10 +176,11 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
       console.error(`[Pipeline] Daily snapshot generation failed (non-fatal): ${snapErr.message}`);
     }
 
-        // Daily highlight text for the landing page — runs for ALL 3 modules
+           // Daily highlight text for the landing page — runs for ALL 3 modules
     try {
-      const { generateHighlight } = require('./highlightGenerator');
+      const { generateHighlight, generateBriefingFrame } = require('./highlightGenerator');
       await generateHighlight(clientId, moduleId, industry);
+      await generateBriefingFrame(clientId);
     } catch (hlErr) {
       console.error(`[Pipeline] Daily highlight generation failed (non-fatal): ${hlErr.message}`);
     }

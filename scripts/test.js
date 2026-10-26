@@ -1,6 +1,5 @@
 require('dotenv').config();
-const { generateHighlight } = require('../modules/highlightGenerator');
-
+const { generateHighlight, generateBriefingFrame } = require('../modules/highlightGenerator');
 const CLIENT_ID = '19174b66-5ad9-44fa-8071-b30a90c15ea2';
 const INDUSTRY = 'Renewable Energy';
 const MODULE_IDS = [
@@ -13,5 +12,6 @@ const MODULE_IDS = [
   for (const id of MODULE_IDS) {
     console.log(await generateHighlight(CLIENT_ID, id, INDUSTRY));
   }
+    console.log(await generateBriefingFrame(CLIENT_ID));
   process.exit(0);
 })();
