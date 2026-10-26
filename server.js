@@ -1095,6 +1095,98 @@ app.get('/daily-highlights/:clientId', async (req, res) => {
   }
 });
 
+// Landing page: the signals behind each highlight, grouped into cards
+// (Market Dynamics = insight cards, Forward Outlook = trend cards)
+const MD_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
+const FO_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
+
+// Runs .in() in small chunks so the URL never gets too long
+const selectInChunks = async (table, columns, column, values, size = 50) => {
+  const out = [];
+  for (let i = 0; i < values.length; i += size) {
+    const { data, error } = await supabaseClient
+      .from(table)
+      .select(columns)
+      .in(column, values.slice(i, i + size));
+    if (error) throw new Error(error.message);
+    out.push(...(data || []));
+  }
+  return out;
+};
+
+app.get('/daily-highlight-cards/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    const { data: rows, error } = await supabaseClient
+      .from('daily_highlights')
+      .select('module_id, signals_used, created_at')
+      .eq('client_id', clientId)
+      .eq('kind', 'module')
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+
+    // newest row for each module
+    const latest = {};
+    for (const r of rows || []) {
+      if (r.module_id && !latest[r.module_id]) latest[r.module_id] = r;
+    }
+
+    const modules = {};
+    for (const [moduleId, row] of Object.entries(latest)) {
+      const signals = (Array.isArray(row.signals_used) ? row.signals_used : []).map(s => ({
+        id: s.id,
+        title: s.title,
+        tag: s.tag || null,
+        insight_id: s.insight_id || null,
+      }));
+
+      const cardInfo = {}; // card id -> { id, title, tag }
+      const cardOf = {};   // signal id -> card id
+
+      if (moduleId === MD_MODULE_ID) {
+        const insightIds = [...new Set(signals.map(s => s.insight_id).filter(Boolean))];
+        const cards = await selectInChunks('market_insights_live', 'id, title, category', 'id', insightIds);
+        for (const c of cards) cardInfo[c.id] = { id: c.id, title: c.title, tag: c.category || null };
+        for (const s of signals) {
+          if (s.insight_id && cardInfo[s.insight_id]) cardOf[s.id] = s.insight_id;
+        }
+      } else if (moduleId === FO_MODULE_ID) {
+        const members = await selectInChunks('trend_membership', 'trend_id, signal_id', 'signal_id', signals.map(s => s.id));
+        const trendIds = [...new Set(members.map(m => m.trend_id))];
+        const trends = await selectInChunks('trend_clusters', 'id, name, sector', 'id', trendIds);
+        for (const t of trends) {
+          if (t.name) cardInfo[t.id] = { id: t.id, title: t.name, tag: t.sector || null };
+        }
+        for (const m of members) {
+          if (cardInfo[m.trend_id] && !cardOf[m.signal_id]) cardOf[m.signal_id] = m.trend_id;
+        }
+      }
+
+      const cardsMap = {};
+      const loose = []; // signals that have no card (all of Policy & Risk)
+      for (const s of signals) {
+        const item = { id: s.id, title: s.title, tag: s.tag };
+        const cardId = cardOf[s.id];
+        if (cardId) {
+          if (!cardsMap[cardId]) cardsMap[cardId] = { ...cardInfo[cardId], signals: [] };
+          cardsMap[cardId].signals.push(item);
+        } else {
+          loose.push(item);
+        }
+      }
+
+      const cards = Object.values(cardsMap).sort((a, b) => b.signals.length - a.signals.length);
+      modules[moduleId] = { cards, loose, total: signals.length };
+    }
+
+    return res.json({ modules });
+  } catch (err) {
+    console.error('[DailyHighlightCards] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Credit usage — count every user message this client has ever sent.
 app.get('/credit-usage/:clientId', async (req, res) => {
   const CREDIT_TOTAL = 10000;

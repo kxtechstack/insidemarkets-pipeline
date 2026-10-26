@@ -37,6 +37,7 @@ const MODULE_CONFIG = {
 };
 
 const MAX_SIGNALS = 15;
+const MAX_SIGNALS_TO_SHOW = 200;
 const MAX_ATTEMPTS = 3;
 const ATTEMPT_TEMPERATURES = [0.2, 0.4, 0.5];
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -189,15 +190,18 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
     const nextDay = new Date(new Date(`${latestDay}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000)
       .toISOString().slice(0, 10);
     const signalDate = latestDay;
-    const { data: signals, error: signalsErr } = await supabase
+    const { data: allSignals, error: signalsErr } = await supabase
       .from(config.table)
       .select(config.columns)
       .eq('client_id', clientId)
       .gte(config.dateField, latestDay)
       .lt(config.dateField, nextDay)
       .order('created_at', { ascending: false })
-      .limit(MAX_SIGNALS);
+      .limit(MAX_SIGNALS_TO_SHOW);
     if (signalsErr) throw new Error(`Signals query failed: ${signalsErr.message}`);
+
+    // The text is written from the newest MAX_SIGNALS. The page shows all of them.
+    const signals = (allSignals || []).slice(0, MAX_SIGNALS);
 
     if (!signals || signals.length === 0) {
       console.log(`${tag}: no signals found for ${latestDay}, old highlight is kept.`);
@@ -222,7 +226,7 @@ const generateHighlight = async (clientId, moduleId, industry = '') => {
       return (tagCounts[tb] - tagCounts[ta]) || ta.localeCompare(tb);
     });
         // Keep the exact list of signals used, so the page can show the same ones
-    const signalsUsed = signals.map(s => ({
+    const signalsUsed = allSignals.map(s => ({
       id: s.id,
       insight_id: s.insight_id || null,
       title: s.signal_title,
