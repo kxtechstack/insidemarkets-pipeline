@@ -1,0 +1,75 @@
+{
+  "_note": "Test only. Nothing is saved to the database. company_domain = the company website the admin would type (used only with --with-company). expect_* = websites we believe are right; any listed one counts as correct. Empty = check by eye.",
+  "clients": [
+    {
+      "client": "Test - Cosmetics UK",
+      "industry": "Cosmetics",
+      "location": "London, United Kingdom",
+      "competitors": [
+        { "name": "Lancôme", "company_domain": "loreal.com", "expect_shop": ["lancome.co.uk"], "expect_company": ["loreal.com"] },
+        { "name": "Estée Lauder", "company_domain": "elcompanies.com", "expect_shop": ["esteelauder.co.uk"], "expect_company": ["elcompanies.com"] },
+        { "name": "Clinique", "company_domain": "elcompanies.com", "expect_shop": ["clinique.co.uk"], "expect_company": ["elcompanies.com"] },
+        { "name": "Charlotte Tilbury", "company_domain": "puig.com", "expect_shop": ["charlottetilbury.com"], "expect_company": ["charlottetilbury.com", "puig.com"] },
+        { "name": "The Ordinary", "company_domain": "elcompanies.com", "expect_shop": ["theordinary.com"], "expect_company": ["theordinary.com", "deciem.com", "elcompanies.com"] },
+        { "name": "Shiseido", "company_domain": "corp.shiseido.com", "expect_shop": ["shiseido.co.uk"], "expect_company": ["shiseido.com"] },
+        { "name": "Clarins", "company_domain": "groupeclarins.com", "expect_shop": ["clarins.co.uk"], "expect_company": ["clarins.com", "groupeclarins.com", "groupe-clarins.com"] }
+      ]
+    },
+    {
+      "client": "Test - Smartphones India",
+      "industry": "Consumer Electronics",
+      "location": "Bengaluru, India",
+      "competitors": [
+        { "name": "Samsung", "company_domain": "news.samsung.com", "expect_shop": ["samsung.com"], "expect_company": ["samsung.com"] },
+        { "name": "Apple", "company_domain": "apple.com", "expect_shop": ["apple.com"], "expect_company": ["apple.com"] },
+        { "name": "Xiaomi", "company_domain": "mi.com", "expect_shop": ["mi.com", "xiaomi.com"], "expect_company": ["mi.com", "xiaomi.com"] },
+        { "name": "OnePlus", "company_domain": "oneplus.com", "expect_shop": ["oneplus.in", "oneplus.com"], "expect_company": ["oneplus.in", "oneplus.com"] },
+        { "name": "Vivo", "company_domain": "vivo.com", "expect_shop": ["vivo.com"], "expect_company": ["vivo.com"] },
+        { "name": "Realme", "company_domain": "realme.com", "expect_shop": ["realme.com"], "expect_company": ["realme.com"] },
+        { "name": "OPPO", "company_domain": "oppo.com", "expect_shop": ["oppo.com"], "expect_company": ["oppo.com"] }
+      ]
+    },
+    {
+      "client": "Test - Quick Service Restaurants Singapore",
+      "industry": "Food & Beverage",
+      "location": "Singapore",
+      "competitors": [
+        { "name": "McDonald's", "company_domain": "corporate.mcdonalds.com", "expect_shop": ["mcdonalds.com.sg"], "expect_company": ["mcdonalds.com", "mcdonalds.com.sg"] },
+        { "name": "KFC", "company_domain": "yum.com", "expect_shop": ["kfc.com.sg"], "expect_company": ["kfc.com.sg", "yum.com"] },
+        { "name": "Burger King", "company_domain": "rbi.com", "expect_shop": ["burgerking.com.sg"], "expect_company": ["burgerking.com.sg", "rbi.com"] },
+        { "name": "Jollibee", "company_domain": "jfc.com.ph", "expect_shop": ["jollibee.com.sg"], "expect_company": ["jollibee.com.sg", "jfc.com.ph", "jollibeefoods.com"] },
+        { "name": "Subway", "company_domain": "subway.com", "expect_shop": ["subway.com"], "expect_company": ["subway.com"] },
+        { "name": "Pizza Hut", "company_domain": "yum.com", "expect_shop": ["pizzahut.com.sg"], "expect_company": ["pizzahut.com.sg", "yum.com"] },
+        { "name": "Domino's", "company_domain": "", "expect_shop": ["dominos.com.sg"], "expect_company": [] }
+      ]
+    },
+    {
+      "client": "Test - Sportswear Australia",
+      "industry": "Apparel & Footwear",
+      "location": "Sydney, Australia",
+      "competitors": [
+        { "name": "Nike", "company_domain": "about.nike.com", "expect_shop": ["nike.com"], "expect_company": ["nike.com"] },
+        { "name": "Adidas", "company_domain": "adidas-group.com", "expect_shop": ["adidas.com.au"], "expect_company": ["adidas-group.com", "adidas.com"] },
+        { "name": "Puma", "company_domain": "about.puma.com", "expect_shop": ["puma.com"], "expect_company": ["puma.com"] },
+        { "name": "Lululemon", "company_domain": "corporate.lululemon.com", "expect_shop": ["lululemon.com.au"], "expect_company": ["lululemon.com"] },
+        { "name": "ASICS", "company_domain": "corp.asics.com", "expect_shop": ["asics.com"], "expect_company": ["asics.com"] },
+        { "name": "New Balance", "company_domain": "newbalance.com", "expect_shop": ["newbalance.com.au"], "expect_company": ["newbalance.com"] },
+        { "name": "Under Armour", "company_domain": "about.underarmour.com", "expect_shop": ["underarmour.com.au", "underarmour.com"], "expect_company": ["underarmour.com"] }
+      ]
+    },
+    {
+      "client": "Test - Payments USA",
+      "industry": "Fintech",
+      "location": "New York, United States",
+      "competitors": [
+        { "name": "PayPal", "company_domain": "newsroom.paypal-corp.com", "expect_shop": ["paypal.com"], "expect_company": ["paypal-corp.com", "paypal.com"] },
+        { "name": "Stripe", "company_domain": "stripe.com", "expect_shop": ["stripe.com"], "expect_company": ["stripe.com"] },
+        { "name": "Square", "company_domain": "block.xyz", "expect_shop": ["squareup.com"], "expect_company": ["block.xyz", "squareup.com"] },
+        { "name": "Wise", "company_domain": "wise.com", "expect_shop": ["wise.com"], "expect_company": ["wise.com"] },
+        { "name": "Revolut", "company_domain": "revolut.com", "expect_shop": ["revolut.com"], "expect_company": ["revolut.com"] },
+        { "name": "Affirm", "company_domain": "investors.affirm.com", "expect_shop": ["affirm.com"], "expect_company": ["affirm.com"] },
+        { "name": "Klarna", "company_domain": "klarna.com", "expect_shop": ["klarna.com"], "expect_company": ["klarna.com"] }
+      ]
+    }
+  ]
+}
