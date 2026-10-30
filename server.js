@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
+const { registerEmailAlertsRoute } = require('./modules/emailAlerts/route');
 const { registerCompetitiveRadarRoute } = require('./modules/competitiveIntelligence/route');
 const { triggerPipelineRun } = require('./modules/pipelineRunner');
 const { startScheduler } = require('./modules/scheduler');
@@ -1257,6 +1258,8 @@ const PORT = process.env.PORT || 3000;
 registerDecisionIntelligenceRoute(app);
 registerDecisionIntelligenceV2Route(app);
 registerCompetitiveRadarRoute(app);
+registerEmailAlertsRoute(app);
+
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
