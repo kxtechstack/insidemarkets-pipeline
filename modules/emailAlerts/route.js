@@ -10,12 +10,13 @@
  *  POST /email-alerts/run                 send today's emails now (body {clientId?} = only that client)
  *  GET  /email-alerts/log/:clientId       what was sent / failed / skipped
  *
- *  Timer: every day at EMAIL_ALERTS_TIME (India time, default 07:00). EMAIL_ALERTS_TIME=off turns it off.
+ *  Timer: every minute it checks the ONE send time for all clients (admin.app_settings 'email_alert_time',
+ *         India time, default 07:00, changed on the console Settings page). EMAIL_ALERTS_TIME=off turns it off on a machine.
  */
 
 const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
-const { runDailyEmails, sendDailyForClient, sendTestEmail, previewHtml } = require('./dailyEmail');
+const { runDailyEmails, runDueEmails, getSendTime, sendDailyForClient, sendTestEmail, previewHtml } = require('./dailyEmail');
 const { isConfigured } = require('./mailer');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -28,7 +29,7 @@ async function runOnce(label, job) {
   running = true;
   try {
     const r = await job();
-    console.log(`[EmailAlerts] ${label}:`, JSON.stringify(r));
+    if (label !== 'due check') console.log(`[EmailAlerts] ${label}:`, JSON.stringify(r));
     return r;
   } finally {
     running = false;
@@ -83,21 +84,23 @@ function registerEmailAlertsRoute(app) {
     return res.json({ ok: true, log: data || [] });
   });
 
-  // ---- daily timer ----
-  const when = String(process.env.EMAIL_ALERTS_TIME || '07:00').trim();
-  const m = when.match(/^(\d{1,2}):(\d{2})$/);
-  if (when.toLowerCase() !== 'off' && m) {
-    cron.schedule(`${Number(m[2])} ${Number(m[1])} * * *`, async () => {
-      if (!isConfigured()) { console.log('[EmailAlerts] daily run skipped: SMTP settings missing in .env'); return; }
+  // ---- timer: every minute, check if the send time has come ----
+  // ONE time for all clients (admin.app_settings 'email_alert_time', India time), set on the console Settings page.
+  // EMAIL_ALERTS_TIME=off in .env turns sending off on this machine (use it on your laptop).
+  const off = String(process.env.EMAIL_ALERTS_TIME || '').trim().toLowerCase() === 'off';
+  if (!off) {
+    cron.schedule('* * * * *', async () => {
+      if (!isConfigured()) return;
       try {
-        await runOnce('daily run', runDailyEmails);
+        const r = await runOnce('due check', runDueEmails);
+        if (Array.isArray(r) && r.length) console.log('[EmailAlerts] daily run:', JSON.stringify(r));
       } catch (e) {
         console.error(`[EmailAlerts] daily run failed: ${e.message}`);
       }
     }, { timezone: 'Asia/Kolkata' });
-    console.log(`[EmailAlerts] daily emails set for ${when} India time`);
+    getSendTime().then((t) => console.log(`[EmailAlerts] daily emails ON - sent at ${t} India time (change it in the console Settings page)${isConfigured() ? '' : ' - BUT SMTP settings are missing in .env'}`)).catch(() => {});
   } else {
-    console.log(`[EmailAlerts] daily emails are OFF (EMAIL_ALERTS_TIME=${when})`);
+    console.log('[EmailAlerts] daily emails are OFF on this machine (EMAIL_ALERTS_TIME=off)');
   }
 }
 

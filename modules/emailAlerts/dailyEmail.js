@@ -148,4 +148,53 @@ async function previewHtml(clientId) {
   return buildEmail(data, users[0] || {}, appUrl()).html;
 }
 
-module.exports = { runDailyEmails, sendDailyForClient, sendTestEmail, previewHtml };
+/**
+ * Runs every minute. ONE send time for ALL clients: admin.app_settings 'email_alert_time'
+ * (India time, 'HH:MM', default 07:00), changed by the admin on the console Settings page.
+ * A client is sent when:
+ *   - its "Email alerts" toggle is ON
+ *   - now is between the send time and 60 minutes after it (so a short server restart does not lose the day)
+ *   - nothing was done for it yet today (sent / skipped / failed are all written in email_alert_log)
+ */
+const SEND_WINDOW_MIN = 60;
+const DEFAULT_TIME = '07:00';
+const toMinutes = (hhmm) => {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+async function getSendTime() {
+  const { data, error } = await admin().from('app_settings').select('value').eq('key', 'email_alert_time').maybeSingle();
+  if (error) console.log(`[EmailAlerts] could not read the send time, using ${DEFAULT_TIME}: ${error.message}`);
+  return (data && toMinutes(data.value) !== null) ? data.value : DEFAULT_TIME;
+}
+
+async function runDueEmails() {
+  const nowIst = new Date(Date.now() + 5.5 * 3600e3);
+  const nowMin = nowIst.getUTCHours() * 60 + nowIst.getUTCMinutes();
+  const t = toMinutes(await getSendTime());
+  if (nowMin < t || nowMin >= t + SEND_WINDOW_MIN) return [];
+  const today = istDate();
+
+  const { data: clients, error } = await admin().from('clients')
+    .select('id, company_name').eq('email_alerts_enabled', true);
+  if (error) throw new Error(`could not read clients: ${error.message}`);
+
+  const results = [];
+  for (const c of clients || []) {
+    const { count } = await supabase.from('email_alert_log').select('id', { count: 'exact', head: true })
+      .eq('client_id', c.id).eq('send_type', 'daily').eq('send_date', today);
+    if (count) continue; // already done today
+
+    try {
+      results.push(await sendDailyForClient(c.id));
+    } catch (e) {
+      console.error(`[EmailAlerts] ${c.company_name} failed: ${e.message}`);
+      await log({ client_id: c.id, email: '(all users)', send_date: today, status: 'failed', reason: short(e.message) });
+      results.push({ client: c.company_name, error: e.message });
+    }
+  }
+  return results;
+}
+
+module.exports = { runDailyEmails, runDueEmails, getSendTime, sendDailyForClient, sendTestEmail, previewHtml };
