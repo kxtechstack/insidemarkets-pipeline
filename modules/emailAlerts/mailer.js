@@ -41,9 +41,19 @@ function getTransport() {
   return transport;
 }
 
+// EMAIL_FROM in .env = the sending ADDRESS (password-protected, so it stays in .env).
+// The NAME people see ("InsideMarkets") is changed by the admin in the console (Settings -> Email Template).
+function parseFrom() {
+  const raw = String(process.env.EMAIL_FROM || '').trim();
+  const m = raw.match(/^(.*?)\s*<([^>]+)>$/);
+  return m ? { name: m[1].replace(/^"|"$/g, '').trim(), address: m[2].trim() } : { name: '', address: raw };
+}
+
 /** @returns {Promise<string>} the provider's message id */
-async function sendEmail({ to, subject, html, text }) {
-  const info = await getTransport().sendMail({ from: process.env.EMAIL_FROM, to, subject, html, text });
+async function sendEmail({ to, subject, html, text, attachments, fromName }) {
+  const f = parseFrom();
+  const from = { name: fromName || f.name || 'InsideMarkets', address: f.address };
+  const info = await getTransport().sendMail({ from, to, subject, html, text, attachments });
   return info.messageId;
 }
 

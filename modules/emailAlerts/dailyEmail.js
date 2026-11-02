@@ -13,6 +13,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { loadHighlights, buildEmail } = require('./emailContent');
 const { sendEmail } = require('./mailer');
+const { loadTemplate } = require('./templateSettings');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const admin = () => supabase.schema('admin');
@@ -46,7 +47,8 @@ async function activeUsers(clientId) {
  */
 async function sendDailyForClient(clientId) {
   const sendDate = istDate();
-  const data = await loadHighlights(clientId);
+  const tpl = await loadTemplate();
+  const data = await loadHighlights(clientId, tpl);
   const { data: client } = await admin().from('clients')
     .select('id, company_name, status, email_alerts_enabled').eq('id', clientId).maybeSingle();
   const out = { client: client ? client.company_name : clientId, sent: 0, failed: 0, skipped: 0 };
@@ -80,7 +82,7 @@ async function sendDailyForClient(clientId) {
   for (const u of users) {
     const email = u.email.trim().toLowerCase();
     if (already.has(email)) { out.skipped++; continue; }
-    const mail = buildEmail(data, u, appUrl());
+    const mail = buildEmail(data, u, appUrl(), tpl);
     try {
       await sendEmail({ to: email, ...mail });
       out.sent++;
@@ -126,10 +128,11 @@ async function sendTestEmail(clientId, to) {
   const adminUser = (au || []).find((u) => String(u.email).toLowerCase() === email);
   if (!user && !adminUser) throw new Error('test emails can only go to a user of this client or an admin user');
 
-  const data = await loadHighlights(clientId);
+  const tpl = await loadTemplate({ fresh: true });
+  const data = await loadHighlights(clientId, tpl);
   if (!data) throw new Error('this client has no highlights yet - nothing to send');
   const name = user ? user.first_name : (adminUser.full_name || '').split(' ')[0];
-  const mail = buildEmail(data, { first_name: name, email }, appUrl());
+  const mail = buildEmail(data, { first_name: name, email }, appUrl(), tpl);
   try {
     await sendEmail({ to: email, ...mail });
     await log({ client_id: clientId, email, send_date: istDate(), send_type: 'test', status: 'sent', highlights_at: data.newestAt });
@@ -142,10 +145,16 @@ async function sendTestEmail(clientId, to) {
 
 /** HTML of the email, for the browser (no email is sent) */
 async function previewHtml(clientId) {
-  const data = await loadHighlights(clientId);
+  const tpl = await loadTemplate({ fresh: true }); // always the latest saved settings
+  const data = await loadHighlights(clientId, tpl);
   if (!data) return null;
   const users = await activeUsers(clientId);
-  return buildEmail(data, users[0] || {}, appUrl()).html;
+  const mail = buildEmail(data, users[0] || {}, appUrl(), tpl);
+  // a browser cannot show cid: images, so put the logo straight into the page for the preview
+  const logo = (mail.attachments || [])[0];
+  return logo
+    ? mail.html.replace(`cid:${logo.cid}`, `data:${logo.contentType};base64,${logo.content.toString('base64')}`)
+    : mail.html;
 }
 
 /**
