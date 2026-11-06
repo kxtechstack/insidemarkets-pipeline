@@ -443,13 +443,13 @@ function registerCompetitiveRadarRoute(app) {
   app.get('/competitive-radar/activity/:clientId', async (req, res) => {
     const { clientId } = req.params;
     if (!UUID.test(clientId)) return bad(res, 'bad clientId');
-    const limit = Math.min(Number(req.query.limit) || 100, 300);
-    const days = Math.min(Number(req.query.days) || 90, 365);
-    const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+    const limit = Math.min(Number(req.query.limit) || 300, 1000);
+    // all cards, any date. Only when ?days=N is given, cards older than N days are left out.
     let q = supabase.from('competitor_changes_live')
-      .select('id, competitor_id, organization, category, signal_name, signal_title, summary, business_impact, importance, signal_count, last_signal_at, event_date, country')
-      .eq('client_id', clientId).gte('event_date', since)
+      .select('id, competitor_id, organization, category, signal_name, signal_title, summary, business_impact, importance, signal_count, last_signal_at, card_written_at, event_date, country')
+      .eq('client_id', clientId)
       .order('last_signal_at', { ascending: false, nullsFirst: false }).order('event_date', { ascending: false }).limit(limit);
+    if (Number(req.query.days) > 0) q = q.gte('event_date', new Date(Date.now() - Number(req.query.days) * 864e5).toISOString().slice(0, 10));
     if (req.query.competitorId && UUID.test(req.query.competitorId)) q = q.eq('competitor_id', req.query.competitorId);
     if (req.query.category) q = q.eq('category', String(req.query.category));
     if (req.query.importance) q = q.in('importance', String(req.query.importance).split(',').map((x) => x.trim()));
@@ -488,7 +488,8 @@ function registerCompetitiveRadarRoute(app) {
         business_impact: Array.isArray(c.business_impact) ? c.business_impact : [],
         importance: c.importance,
         signal_count: signals.length || c.signal_count || 1,
-        updated: c.last_signal_at || c.event_date,
+        updated: c.card_written_at || c.last_signal_at || c.event_date,   // when the card was made or last rewritten (new signal added)
+        latest_news_date: c.last_signal_at || c.event_date,               // date of the newest news inside the card
         country: c.country,
         signals,
       };
@@ -496,6 +497,34 @@ function registerCompetitiveRadarRoute(app) {
     const categories = Object.entries(out.reduce((m, c) => ({ ...m, [c.category]: (m[c.category] || 0) + 1 }), {}))
       .map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
     res.json({ client_id: clientId, total: out.length, categories, cards: out });
+  });
+
+  // -------------------------------------------------------------------
+  // FRONTEND: "Who is where" - per competitor + type: signals in the last 30 days, overall total, arrow vs the day before
+  // GET /competitive-radar/who-is-where/:clientId          ?refresh=true  -> count again for today first
+  // -------------------------------------------------------------------
+  app.get('/competitive-radar/who-is-where/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    if (req.query.refresh === 'true') {
+      try { await require('./activity').refreshActivity(clientId); } catch (e) { return bad(res, e.message, 500); }
+    }
+    const { data, error } = await supabase.from('competitor_activity_live')
+      .select('competitor_id, competitor, category, day, window_from, count_30d, prev_from, prev_to, prev_count_30d, change_30d, trend, count_total')
+      .eq('client_id', clientId).order('competitor').order('category');
+    if (error) return bad(res, error.message, 500);
+    const byComp = new Map();
+    for (const r of data || []) {
+      if (!byComp.has(r.competitor_id)) byComp.set(r.competitor_id, { competitor_id: r.competitor_id, competitor: r.competitor, all: null, categories: [] });
+      const cell = { category: r.category, count_30d: r.count_30d, count_total: r.count_total, prev_count_30d: r.prev_count_30d, change_30d: r.change_30d, trend: r.trend };
+      if (r.category === 'All') byComp.get(r.competitor_id).all = cell; else byComp.get(r.competitor_id).categories.push(cell);
+    }
+    const r0 = data && data[0];
+    const day = r0 ? r0.day : null;
+    return res.json({ client_id: clientId, day,
+      window: r0 ? { from: r0.window_from, to: r0.day } : null,                 // this 30 days, e.g. Oct 6 .. Nov 6
+      compared_with: r0 ? { from: r0.prev_from, to: r0.prev_to } : null,      // the 30 days before, e.g. Sep 6 .. Oct 5
+      competitors: [...byComp.values()] });
   });
 
   app.get('/competitive-radar/changes/:clientId', async (req, res) => {

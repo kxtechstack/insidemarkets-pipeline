@@ -198,6 +198,8 @@ const LIST_PAGE_TITLE = /^(all |latest |recent )?(articles|news|stories|posts|pr
 const isDateNotice = (title) => DATE_NOTICE.test(String(title || ''));
 
 // stock price / quote / analysis pages are never news
+// shopping, deals, coupon and gift-guide sections of news sites (affiliate pages, not company news)
+const DEALS_PAGE = /\/(shopping|deals?|offers|coupons?|vouchers?|discount-codes?|gift-guides?|gifts?-for|best-buys?|buying-guides?)\//i;
 const STOCK_PAGE = /simplywall\.st|\/quote\/|tradingview\.com\/symbols|\/stock-reference|\/stock-price/i;
 
 /** a year written as a folder in the link (/2011/...) that is older than the article year = an old page with a wrong date */
@@ -211,6 +213,13 @@ function oldYearInUrl(url, publishedDate) {
   return null;
 }
 
+// shopping lists ("29 best Advent calendars", "gift guide"), reviews ("I tried it"), and stories about how a famous
+// person used a product ("the makeup behind X's look"): about the product, not an action by the company. Any industry.
+const LIST_TITLE = /^(the )?\d+ (best|top|must|favou?rite|great|cheapest)\b|\bbest\b.{0,50}\b(to buy|for 20\d\d|of 20\d\d|right now|out now|on sale|money can buy)\b|\bgift (guide|ideas?)\b|\bhottest buys\b|\bhere are the\b|\b(deals?|discounts?) (on|of) the (day|week)\b|\bbuyer'?s guide\b/i;
+const REVIEW_TITLE = /\b(I|we) (tried|tested|used|swapped)\b|\bput (it|them) to the test\b|\b(honest|full|in-depth) review\b|\breview\s*[:|]|\bworth the (hype|money)\b|\bis it (worth|any good)\b/i;
+const CELEB_TITLE = /\b(makeup|beauty|skincare|hair) (look|behind|secrets?|routine)\b|\bget the look\b|\b(wore|wears|wearing)\b.{0,60}\b(show|carpet|gala|awards?|premiere|wedding|concert)\b/i;
+const isListOrReview = (title) => { const t = String(title || ''); return LIST_TITLE.test(t) || REVIEW_TITLE.test(t) || CELEB_TITLE.test(t); };
+
 /**
  * @returns {string|null} reason to drop, or null = send to the AI
  */
@@ -223,18 +232,22 @@ function precheck(item, comp, terms, since, opts = {}) {
   if (!item.publishedDate) return 'no date';
   if (!opts.ignoreAge && new Date(item.publishedDate).getTime() < new Date(since).getTime() - 864e5) return 'older than this run';
   if (STOCK_PAGE.test(item.url)) return 'stock price page, not news';
+  if (!opts.ownSite && !opts.ownBlog && !opts.press && DEALS_PAGE.test(item.url)) return 'shopping / deals page, not news';
   if ((opts.ownSite || opts.ownBlog) && isEvergreen(item.url, item.title)) return 'how-to / guide page, not news';
   if (isJobPage(item.url, item.title)) return 'job advert, not news (for the hiring tracker later)';
   const oy = oldYearInUrl(item.url, item.publishedDate);
   if (oy) return `old page (the link says ${oy}) - history, not news`;
   if (isDateNotice(item.title)) return 'only gives the date of a results release or call - not news';
   if (isMarketChatter(item.title)) return 'share-market talk (stock, analysts) - not an action by the company';
+  if (!opts.press && isListOrReview(item.title)) return 'shopping list, review or "how someone used it" story - not an action by the company';
   if (LIST_PAGE_TITLE.test(String(item.title || '').trim())) return 'a page that lists many articles, not one article';
   const mentions = brandMentions(`${item.title} ${item.text}`, terms);
   item.mentions = mentions;
   if (!opts.ownSite && !opts.ownBlog && mentions === 0) return 'competitor not named'; // own blog posts often do not repeat the company name
   // own website: a plain product page is not news unless it says it is new
-  if (opts.ownSite && looksSingleProduct(item.url)) { // shop pages have no real news date, so they are never news
+  // a news / press address (/news/, /press-releases/, newsroom.) with a long number in it is a news post, not a product
+  const NEWS_URL = /\/\/(newsroom|news|press|media|investors?|ir)\.|\/(news|newsroom|press|press-releases?|news-releases?|media|stories|blog)(\/|-)/i;
+  if (opts.ownSite && looksSingleProduct(item.url) && !NEWS_URL.test(item.url)) { // shop pages have no real news date, so they are never news
     return 'product page, not news';
   }
   return null;
@@ -364,7 +377,7 @@ async function collectPress(source, comp, since, maxItems, budget, counter) {
   return { items, health: 'ok', note: 'site search' };
 }
 
-module.exports = { isEnglishArticle, isEvergreen,
+module.exports = { isEnglishArticle, isEvergreen, isListOrReview,
   parseLooseDate, isDateNotice, isMarketChatter, articleFromHtml, readArticle, brandTerms, brandMentions, precheck,
   collectNews, collectOwnSite, collectPress, postLinksFromList,
 };

@@ -241,7 +241,7 @@ async function runNewsForCompetitor(competitorId, opts = {}) {
           run_id: runId, client_id: comp.client_id, competitor_id: comp.id, source_id: it.sourceId || null,
           source_kind: section, url: it.url, title: clean(it.title, 300) || null,
         };
-        const pre = collector.precheck(it, comp, ctx.terms, since, { ownSite: section === 'own_site', ownBlog: section === 'blog', ignoreAge: !!it.isRetry });
+        const pre = collector.precheck(it, comp, ctx.terms, since, { ownSite: section === 'own_site', ownBlog: section === 'blog', press: section === 'press', ignoreAge: !!it.isRetry });
         if (pre) {
           counts.dropped++;
           report.items.push({ url: it.url, title: it.title, date: it.publishedDate, outcome: 'dropped', reason: pre, step: 'code check' });
@@ -364,6 +364,8 @@ async function runNewsForClient(clientId, opts = {}) {
         out.push({ competitor: c.name, error: e.message });
       }
     }
+    // "who is moving where": worked out here at the end of the run and saved (the screen only reads it)
+    if (!opts.dryRun) await require('./activity').refreshActivitySafe(clientId);
     return { clientId, client: client.company_name, competitors: out };
   } finally {
     running.delete(clientId);

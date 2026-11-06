@@ -24,6 +24,8 @@
 const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { clean, norm } = require('./webTools');
+// a title is never cut in the middle of a word: cut back to the last whole word
+const cutTitle = (t, n = 160) => { const x = clean(t, 2000); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '').replace(/[\s,;:(\-–]+$/, ''); };
 const store = require('./changeStore');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -102,7 +104,7 @@ const unknownNumbers = (text, allowed) => [...new Set(numbersOf(text))].filter((
 
 const META = /\b(was|were|been) (reported|announced|published|confirmed) (on|by|in|through)\b|according to (the )?(article|signals?|press release|news)|\b(the|this) (article|signals?|press release|information|news) (does|do|did|is|was|provides?|confirms?|mentions?)\b|\bno (specific |further |more )?(details|date|information|figures|numbers)\b|\bthis event (occurred|happened|took place)\b|\bnot (specified|mentioned|provided|disclosed) in\b|\bthis information\b/i;
 const EMPTY = /\bshould monitor\b|\bmonitor\b|keep an eye|stay informed|may (impact|affect) the [a-z ]{0,30}market|could be a positive sign|potential(ly)? impact/i;
-const VAGUE = /review (its |their |the )?(pricing |sales |business )?strateg(y|ies)|analy[sz]e (the )?(implications|market|landscape)|assess (the |its )?(implications|landscape|impact)|adjust (its |their )?strateg|consider (expanding|exploring|the implications)|\baccordingly\b|update (its|their) market analysis|reassess (the|its) [a-z ]*strategy/i;
+const VAGUE = /\b(assess|evaluate|review)\w* (its|your|their) (own )?[a-z ]{0,25}(strateg\w*|approach|plans?)\b|\bexplore (this|the) (opportunity|option)\b|\bstay(ing)? competitive\b|\bconsider (adjusting|reviewing|exploring|developing)\b|\breview (your |its |their )?(product )?offerings?\b|\b(adjust|review|reassess)\w* (your|its|their) [a-z ]{0,20}strateg|\bfocus on your own\b|\bremain competitive\b|review (its |their |the |your )?(pricing |sales |business )?strateg(y|ies)|analy[sz]e (the )?(implications|market|landscape)|assess (the |its )?(implications|landscape|impact)|adjust (its |their )?strateg|consider (expanding|exploring|the implications)|\baccordingly\b|update (its|their) market analysis|reassess (the|its) [a-z ]*strategy/i;
 // "may harm SolarGrid's reputation" - the sources never say that about the client
 function claimsAboutClient(why, clientName) {
   if (!clientName) return false;
@@ -145,6 +147,18 @@ const MORE_COMPETITION = /\b(increas\w*|more|greater|stronger|higher|intensif\w*
 const CLIENT_LINK = /\b(demand|buyers?|market for|gap|room|prices?|pricing|compet\w*|rival|threat|pressure|market share|share of|win|wins|lose|loses|losing|switch\w*|supplier\w*|supply|contracts?|bids?|tenders?|costs?|margins?|orders?)\b/i;
 // how the client is touched (wider than CLIENT_LINK: attention, shelf space, channels, partners, product plans too)
 const IMPACT_LINK = /\b(demand|buyers?|shoppers?|customers?|consumers?|attention|notice|visib\w*|shelf|shelves|space|channels?|retailers?|stores?|partners?|distributors?|market for|gap|room|prices?|pricing|discount\w*|compet\w*|rival|threat|pressure|market share|share of|win|wins|lose|loses|losing|switch\w*|supplier\w*|supply|contracts?|bids?|tenders?|costs?|margins?|orders?|launch\w*|range|portfolio|offer\w*|you|your|client)\b/i;
+// words that fit ANY card - a point made only of these is a template, not about this card
+const GENERIC = new Set(('products product market markets customers customer buyers buyer shoppers brand brands company companies competition competitor competitors '
+  + 'rival rivals launch launches launched launching offer offers offering offerings sales growth global consumer consumers attention clearly closest better '
+  + 'their which these those about could would should other unique benefits benefit highlight similar develop increase increased business industry sector '
+  + 'premium luxury quality value strategy pricing prices price event events new range ranges items while because there where people').split(' '));
+function specificWords(text, skip) {
+  return new Set((norm(text).match(/[a-z]{5,}/g) || []).filter((w) => !GENERIC.has(w) && !skip.has(w)));
+}
+// country / region names (any client): a point that is only about a market the client is not in is not useful
+const COUNTRIES = ('Japan|China|Korea|South Korea|India|Indonesia|Thailand|Vietnam|Malaysia|Singapore|Philippines|Taiwan|Hong Kong|Australia|New Zealand|'
+  + 'Brazil|Mexico|Argentina|Chile|Colombia|Peru|Canada|United States|USA|US|UK|United Kingdom|Britain|Ireland|France|Germany|Italy|Spain|Portugal|'
+  + 'Netherlands|Belgium|Switzerland|Austria|Poland|Sweden|Norway|Denmark|Finland|Russia|Turkey|Saudi Arabia|UAE|Dubai|Qatar|Egypt|Nigeria|South Africa|Kenya|Pakistan|Bangladesh|Sri Lanka|Croatia|Zagreb|Toronto|Paris|London|Tokyo|Shanghai|São Paulo|Sao Paulo').split('|');
 const EFFECT = { risk: 'Risk', threat: 'Risk', opportunity: 'Opportunity', low: 'Low direct impact' };
 
 // a quote cut in the middle of a word ("to develop, bu") -> cut back to the last whole word
@@ -170,7 +184,7 @@ const splitSentences = (s) => String(s || '').split(/(?<=[.!?])\s+/).map((x) => 
 
 // a source title worth showing as a card title (not "Newsroom", "ICYMI: ... this month", "Press releases")
 const usefulSourceTitle = (t) => t.length >= 25 && !/newsroom|news releases?|press releases?|icymi|developments around|round-?up|this week in|this month/i.test(t);
-const cleanSourceTitle = (t) => clean(String(t || '').replace(/\s+[|\-–·]\s+[^|\-–·]{2,60}$/, ''), 160);
+const cleanSourceTitle = (t) => cutTitle(String(t || '').replace(/\s+[|\-–·]\s+[^|\-–·]{2,60}$/, ''), 160);
 const withCompetitor = (title, competitor) => (norm(title).includes(norm(competitor).split(' ')[0]) ? title : `${competitor}: ${title}`);
 
 function fallbackTitle(ctx) {
@@ -207,7 +221,7 @@ function composeCard(ans, ctx, rawSnippet) {
   if (!ans) repairs.push(`AI gave no valid JSON - everything built from the sources (answer started: "${clean(rawSnippet, 120)}")`);
 
   // ---- title: bad -> built from the real source title
-  let title = clean(a.title, 160);
+  let title = cutTitle(a.title, 160);
   const titleBad = !title || title.split(/\s+/).length < 3
     || inventedActions(title, ctx.signalsText).length || unknownNumbers(title, allowed).length
     || (title.split(/\s+/).length >= 6 && !isEnglish(title));   // the card is in English
@@ -231,7 +245,19 @@ function composeCard(ans, ctx, rawSnippet) {
 
   // ---- business impact: 3-4 points "what this means for the client" + "what the client can do".
   // Each point is tied to a FACT number (checked source text). Only bad POINTS are dropped, never the card.
-  const items = (Array.isArray(a.business_impact) ? a.business_impact : []).slice(0, 5).filter((x) => x && typeof x === 'object');
+  // v4 prompt: business_impact is an object with one point per ANGLE (buyers / price / channels / products);
+  // older prompts: a list. Both are turned into one list here.
+  const ANGLES = ['buyers', 'price', 'channels', 'products', 'markets'];
+  const bi = a.business_impact;
+  const rawItems = Array.isArray(bi) ? bi
+    : (bi && typeof bi === 'object' ? ANGLES.map((k) => {
+      const v = bi[k];
+      if (v && typeof v === 'object') return { ...v, angle: k };
+      // the small model sometimes writes the angle as a plain sentence instead of an object
+      if (typeof v === 'string' && v.split(/\s+/).length >= 6) return { point: v, effect: 'risk', area_number: 0, angle: k };
+      return null;
+    }) : []);
+  const items = rawItems.filter((x) => x && typeof x === 'object' && /[a-z]{3,}.*[a-z]{3,}/i.test(String(x.point || x.impact || x.why || ''))).slice(0, 5);
   const impact = [];
   const factUse = new Map();
   const wordsOf = (t) => new Set((norm(t).match(/[a-z]{4,}/g) || []));
@@ -240,7 +266,7 @@ function composeCard(ans, ctx, rawSnippet) {
     const tag = `Impact ${i + 1}:`;
     let effect = EFFECT[String(it.effect || '').toLowerCase().trim()];
     const area = Number(it.area_number) === 0 ? 'General' : ctx.areas[Number(it.area_number) - 1];
-    const fact = ctx.facts[Number(it.fact_number) - 1];
+    const fact = ctx.facts[Number(it.fact_number) - 1] || '';   // optional: the point itself must name something from the card
     // ONE sentence: what may change for the client + what to do ("..., so ..."). Older prompts: "point"+"action" or "why".
     const lowFirst = (t) => t.charAt(0).toLowerCase() + t.slice(1);
     const joined = it.impact && it.action ? `${clean(it.impact, 300).replace(/[.\s]+$/, '')}, so ${lowFirst(clean(it.action, 250))}` : '';
@@ -248,12 +274,11 @@ function composeCard(ans, ctx, rawSnippet) {
     const problems = [];
     if (!effect) problems.push('"effect" must be one word: risk, opportunity or low');
     if (!area) problems.push('"area_number" must be a number from the AREAS list (0 = general)');
-    if (!fact) problems.push('"fact_number" must be a number from the FACTS list');
     if (!why || why.split(/\s+/).length > 50) problems.push('"point" must be one sentence of at most 40 words');
     else if (EMPTY.test(why)) problems.push('"point" is an empty phrase - say in plain words what changes for the client (never "monitor")');
     else if (VAGUE.test(why)) problems.push('"point" is vague - say what changes for the client');
     else if (unknownNumbers(why, allowed).length) problems.push(`"point" has numbers that are not in the sources: ${unknownNumbers(why, allowed).join(', ')}`);
-    if (!problems.length && (factUse.get(Number(it.fact_number)) || 0) >= 2) problems.push('this fact_number is already used twice - use another fact');
+    if (!problems.length && fact && (factUse.get(Number(it.fact_number)) || 0) >= 2) problems.push('this fact_number is already used twice - use another fact');
     if (!problems.length && claimsAboutClient(why, ctx.clientName)) problems.push(`"point" states something about ${ctx.clientName} (its reputation, quality, sales or customers) as a fact. Say what MAY happen ("may", "could")`);
     if (!problems.length && onlyDescribesCompetitor(why, ctx.competitor)) problems.push(`"point" only describes ${ctx.competitor}. Say what it means for the client`);
     if (!problems.length && repeatsFact(why, fact)) problems.push('"point" only repeats the fact. Say what it MEANS for the client');
@@ -262,10 +287,21 @@ function composeCard(ans, ctx, rawSnippet) {
     if (!problems.length && namedMarket) problems.push(`"point" names ${namedMarket}, but the sources do not mention it`);
     if (!problems.length && (ctx.geo || []).includes(area) && !marketInText(area, ctx.signalsText)) problems.push(`the sources do not mention ${area}. Use area 0 or the area the event is really about`);
     if (!problems.length && COMMUNITY.test(fact) && effect !== 'Low direct impact') effect = 'Low direct impact';
+    // a point about a country the client does not sell in is low impact for the client
+    const country = COUNTRIES.find((c) => new RegExp(`(^|[^A-Za-z])${c}([^A-Za-z]|$)`).test(why));   // case-sensitive: "US" is not "us"
+    if (!problems.length && country && (ctx.geo || []).length && !(ctx.geo || []).some((g) => marketInText(g, country) || marketInText(country, g) || new RegExp(`\\b${country}\\b`, 'i').test(g))) {
+      problems.push(`"point" is about ${country}, which is not one of the client's markets - say what it means for the client's OWN markets, or leave it out`);
+    }
     if (!problems.length && (SETBACK.test(fact) || SETBACK.test(why)) && MORE_COMPETITION.test(why)) problems.push(`the fact is a setback for ${ctx.competitor}; a setback does not mean more competition for the client. Say what the client can win from it`);
+    if (!problems.length) {
+      const skip = new Set(norm(`${ctx.clientName || ''} ${ctx.competitor} ${(ctx.areas || []).join(' ')}`).match(/[a-z]{5,}/g) || []);
+      const cardWords = specificWords(ctx.signalsText, skip);
+      if (![...specificWords(why, skip)].some((w) => cardWords.has(w) || [...cardWords].some((c) => c.startsWith(w.slice(0, 6)))))
+        problems.push('"point" is general and could fit any card - name what from THIS card changes things for the client (the product, partner, place, channel or number)');
+    }
     if (!problems.length && impact.some((x) => tooAlike(x.why, why))) problems.push('"point" says the same as another point - give a DIFFERENT angle (buyers, price, channels/partners, product plans, markets) or fewer points');
     if (problems.length) { itemProblems.push(`${tag} ${problems.join('; ')}.`); return; }
-    factUse.set(Number(it.fact_number), (factUse.get(Number(it.fact_number)) || 0) + 1);
+    if (fact) factUse.set(Number(it.fact_number), (factUse.get(Number(it.fact_number)) || 0) + 1);
     // the small model sometimes mixes up the direction: the sentence decides
     if (effect === 'Risk' && (/\b(reduc\w*|less|lower|weaker|fewer|weaken\w*)\b[^.]{0,30}\bcompet\w*/i.test(why) || /\bsell into\b|\blarger market\b|\bnew market for\b|\bgap\b/i.test(why))) effect = 'Opportunity';
     else if (effect === 'Opportunity' && /\b(competition|compete|competitors?|threat|lose|loss|pressure|decline|harm|damage|risk|less attention|notice .{0,20}less)\b/i.test(why)) effect = 'Risk';
@@ -283,7 +319,7 @@ function composeCard(ans, ctx, rawSnippet) {
   const bullets = chosen.map((x) => `${x.effect}${x.area !== 'General' ? ` for ${x.area}` : ''}: ${sentence(x.why)}`);
   if (!bullets.length) {
     repairs.push(items.length
-      ? `business impact = standard line (dropped: ${itemProblems.slice(0, 2).join(' ')})`
+      ? `business impact = standard line (dropped: ${itemProblems.join(' ')})`
       : 'business impact = standard line (the AI gave no impact items)');
   }
 
@@ -353,12 +389,14 @@ async function writeCard(changeId) {
       return { ok: false, reason: `AI call failed: ${clean(e.message, 150)}` };
     }
     const ans = parseJson(raw);
-    composed = composeCard(ans, ctx, raw);
-    // one more try only when the AI gave nothing usable for the business impact
-    if (attempt === 1 && (!ans || (composed.impactCount < 2 && composed.itemProblems.length))) {
+    const now = composeCard(ans, ctx, raw);
+    // keep the better of the two answers (more usable points)
+    if (!composed || now.impactCount >= composed.impactCount) composed = now;
+    // one more try when the AI gave fewer than 3 usable points
+    if (attempt === 1 && (!ans || composed.impactCount < 3)) {
       messages.push({ role: 'assistant', content: clean(raw, 3000) });
       messages.push({ role: 'user', content: ans
-        ? `Some impact items cannot be used:\n- ${composed.itemProblems.join('\n- ')}\nAnswer again with the full JSON only (title, summary and 3 to 4 business_impact points). Pick fact_number from the FACTS list.`
+        ? `${now.itemProblems.length ? `Some points cannot be used:\n- ${now.itemProblems.join('\n- ')}\n` : ''}Fill at least 3 of the 4 business_impact angles (buyers, price, channels, products), each naming something from THIS card. Answer again with the full JSON only (title, summary and 3 to 4 business_impact points). Pick fact_number from the FACTS list.`
         : 'Your answer was not valid JSON. Answer again with the JSON only.' });
       continue;
     }

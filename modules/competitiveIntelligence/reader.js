@@ -21,6 +21,8 @@ const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { CI_MODULE_ID, LIMITS, PROMPTS } = require('./constants');
 const { norm, clean } = require('./webTools');
+// a title is never cut in the middle of a word: cut back to the last whole word
+const cutTitle = (t, n = 160) => { const x = clean(t, 2000); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '').replace(/[\s,;:(\-–]+$/, ''); };
 // is a short AI text English? (non-Latin script, or several little words of other languages = not English)
 const OTHER_LANG_WORDS = /\b(el|los|las|con|y|para|del|sobre|una|com|não|em|les|des|et|une|pour|avec|sur|dans|de|du|aux|der|die|das|und|mit|für|zum|von|il|che|per|della|dan|yang|untuk|dengan|của|và|cho|lancia|lanza|resmikan|kehadirannya)\b/gi;
 function aiTextEnglish(text) {
@@ -177,7 +179,7 @@ function checkAnswer(ans, ctx) {
   if (byName && (!signal || byName.n !== signal.n)) signal = byName;
   if (!signal) problems.push(`"signal_number" must be one number from 1 to ${ctx.signals.all.length}.`);
 
-  const title = clean(ans.title, 160);
+  const title = cutTitle(ans.title, 160);
   const summary = clean(ans.summary, 500);
   if (title.length < 10) problems.push('"title" is missing or too short.');
   // a title that is only the name (or the name plus one word) says nothing
@@ -248,10 +250,10 @@ function checkAnswer(ans, ctx) {
       [/advertis|campaign|marketing|sponsor|influencer|social/i, /advert|\bads?\b|campaign|marketing|sponsor|commercial|influencer|social media|brand ambassador|billboard|promotion|promo\b/i, 'an advertising or marketing campaign'],
       [/restructuring|reorgani/i, /restructur|reorgani|spin[- ]?off|split (into|off)|layoffs?|consolidat|cost[- ]cutting|divest|new (unit|division|structure)/i, 'that the company changes how it is organised'],
       [/messaging shift|positioning|thought leadership/i, /messag|tagline|slogan|positioning|repositio|brand (story|platform|purpose|voice)|campaign|manifesto|thought leadership|white ?paper|report|study|survey|research/i, 'a new message, position or published point of view'],
-      [/geographic|market entry|new market|expansion|new segment|vertical/i, /open|enter|expan|launch|debut|arriv|new (store|market|countr|city|region|office|plant|site|segment|category)|first .{0,30}(store|boutique|office|plant|shop|market)/i, 'entering a new place, market or segment'],
+      [/geographic|market entry|new market|expansion|new segment|vertical/i, /\bopen(s|ed|ing)?\b|\benter(s|ed|ing)?\b(?! into)|expan|launch|debut|arriv|new (store|market|countr|city|region|office|plant|site|segment|category)|first .{0,30}(store|boutique|office|plant|shop|market)/i, 'entering a new place, market or segment'],
       [/free trial|freemium/i, /free trial|\btrial\b|freemium|free (plan|tier|version)/i, 'a free trial or free plan'],
       [/hiring surges|layoffs/i, /layoffs?|lay(s|ing)? off|job cuts?|cut(s|ting)? [\d,]+ (jobs|roles|staff)|hiring (spree|surge|drive)|recruit(ing|ment) drive|hir(e|es|ed|ing) [\d,]+|[\d,]+ (new )?(jobs|roles|positions)|workforce/i, 'many jobs being added or cut (not one person hired)'],
-      [/results|publications/i, /results|revenue|net sales|\bsales\b|earnings|profit|net income|\bloss\b|quarter|\bQ[1-4]\b|fiscal|full[- ]year|guidance|outlook|forecast|backlog|EBITDA|per share|\bEPS\b|margin|annual report|sustainability report|impact report|investor presentation|financial/i, 'financial results or a report the company published'],
+      [/results|publications/i, /results|revenue|net sales|\bsales\b|earnings|profit|net income|\bloss\b|quarter|\bQ[1-4]\b|fiscal|full[- ]year|guidance|outlook|forecast|backlog|EBITDA|per share|\bEPS\b|margin|annual report|sustainability report|impact report|investor presentation|financial (results|statements|report)/i, 'financial results or a report the company published'],
     );
     if (/customer wins|customer win/i.test(signal.name) && /attorney general|regulator|regulatory|commission|commissioner|governor|settlement|settles|\bcourt\b|\bfines?\b|\bSCC\b|oversight/i.test(proof)) {
       const fb0 = ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
@@ -264,6 +266,21 @@ function checkAnswer(ans, ctx) {
       const fbS = ctx.signals.all.find((x) => /^new product launch/i.test(x.name)) || ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
       if (ctx.attempt >= 2 && fbS) signal = fbS;
       else problems.push(`The article does not say that a product is stopped (no word like discontinued / descatalogado / arrêté / 販売終了 / 단종 / 停产). If it is a launch, choose "New product launches".`);
+    }
+    // a product that is BROUGHT BACK (relaunch, comeback, re-release) is a launch, not a sunset - even if the article
+    // mentions that it was discontinued years ago. Works in every language for English articles; others keep the rule above.
+    if (/sunset/i.test(signal.name)
+      && /\bbr(ing|ings|ought) back\b|\bc(a|o)me back\b|\bcomeback\b|\bre-?releas\w*|\bre-?launch\w*|\breturns?\b|\breturning\b|\bre-?issu\w*|\brevival\b|\brevive[sd]?\b|\bback in (stock|stores|store)\b|\bis back\b|\bare back\b/i.test(`${title} ${summary} ${proof}`)
+      && !/\b(no longer|will (be )?(stop|discontinu|end)|being (discontinued|phased out)|phas(e|es|ing) out)\b/i.test(`${title} ${proof}`)) {
+      const fbL = ctx.signals.all.find((x) => x.enabled && /^new product launch/i.test(x.name)) || ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
+      if (fbL) signal = fbL;
+    }
+    // an advert / campaign / sampling in a country is marketing, not entering that market (unless a store, office or plant opens)
+    if (/geographic|market entry|new market|expansion/i.test(`${signal.name} ${signal.category}`)
+      && /\b(campaign|advert\w*|ads?|sampling|promotion|influencer|activation|pop-?up)\b/i.test(`${title} ${summary} ${proof}`)
+      && !/\b(store|boutique|office|plant|factory|warehouse|subsidiar\w*|branch|distribut\w*|e-?commerce|website|retailer)\b/i.test(`${summary} ${proof}`)) {
+      const mk = ctx.signals.all.find((x) => x.enabled && /campaign|advertis|marketing/i.test(`${x.name} ${x.category}`));
+      if (mk) signal = mk;
     }
     for (const [nameRe, wordRe, what] of must) {
       if (nameRe.test(signal.name) && !wordRe.test(proof)) {

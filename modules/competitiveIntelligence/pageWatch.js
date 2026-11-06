@@ -476,6 +476,16 @@ async function runPagesForCompetitor(competitorId, opts = {}) {
         continue;
       }
       const old = await lastSnapshot(src.id, src.url, now.via);
+      // the page had product data (name / price) and now has none: the product was removed or the link now opens
+      // another page (e.g. the homepage). Never compared (it would look like a big change); 3 times in a row -> 'broken'.
+      const hasProduct = (lines) => (lines || []).some((l) => /^Product data:/.test(l));
+      if (old && hasProduct(old.lines) && !hasProduct(now.lines)) {
+        const why = 'product data is gone from the page (product removed, or the link now opens another page)';
+        counts.blocked++;
+        result.pages.push({ ...line, outcome: 'gone', reason: why, via: now.via });
+        if (!dryRun) await updateHealth(src, 'failed', why);
+        continue;
+      }
       const refetch = () => readPage(src.url, { firecrawl: now.via === 'firecrawl' ? 1 : 0 }, counter);
       const r = await comparePage(ctx, { url: src.url, name: src.product_name, refetch }, old, now);
       const shown = { ...line, outcome: r.outcome, reason: r.reason, diff: r.diff, trace: r.trace, chars: now.chars, via: now.via, last_copy: old ? String(old.seen_at).slice(0, 10) : null };
@@ -571,6 +581,8 @@ async function runPagesForClient(clientId, opts = {}) {
         out.push({ competitor: c.name, error: e.message });
       }
     }
+    // page changes can add cards too -> update "who is moving where"
+    if (!opts.dryRun) await require('./activity').refreshActivitySafe(clientId);
     return { clientId, client: client.company_name, competitors: out };
   } finally {
     running.delete(clientId);
