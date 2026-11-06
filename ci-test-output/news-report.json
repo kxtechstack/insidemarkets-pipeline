@@ -1,0 +1,1819 @@
+{
+  "clientId": "b61b4d3b-caeb-457b-9971-636c83688ee4",
+  "client": "Lumière Beauty Group",
+  "competitors": [
+    {
+      "competitor": "Estée Lauder",
+      "competitor_id": "35a4b596-acfd-46f9-9e77-efd8d3dca445",
+      "dryRun": false,
+      "sections": {
+        "press": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 5,
+            "after_url_check": 5,
+            "read_by_ai": 2,
+            "saved": 1,
+            "merged": 1,
+            "dropped": 3,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 0,
+            "firecrawl_calls": 0
+          },
+          "notes": [
+            "https://www.elcompanies.com/en/news-and-media: 48 posts on the list, 5 new"
+          ],
+          "items": [
+            {
+              "url": "https://www.elcompanies.com/en/news-and-media/newsroom/press-releases/2026/11-04-2026-050031474",
+              "title": "The Estée Lauder Companies Announces Fiscal 2030 Ambition at Its Capital Markets Experience: China Ecosystem Immersion Event",
+              "date": "2026-11-04T12:00:00.000Z",
+              "mentions": 10,
+              "via": "list+direct",
+              "ai": {
+                "tries": 1,
+                "text_chars": 14472,
+                "signal_number": 11,
+                "importance": "High",
+                "event_date": "2026-11-04",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Results & Publications",
+                "type": "General Updates",
+                "title": "Estée Lauder Announces Fiscal 2030 Ambition",
+                "summary": "Estée Lauder announced its fiscal 2030 ambition, including sustainable mid-single-digit organic net sales growth and double-digit adjusted EPS growth.",
+                "importance": "High",
+                "event_date": "2026-11-04",
+                "event_date_from": "article",
+                "key_facts": [
+                  "Sustainable mid-single-digit organic net sales growth through fiscal 2030",
+                  "Adjusted operating margin of 16.5%-18.5% in fiscal 2030",
+                  "Double-digit adjusted EPS growth through fiscal 2030"
+                ],
+                "also_involves": []
+              },
+              "change_id": "e122b925-5491-49f5-9434-034842b86e65",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.elcompanies.com/en/news-and-media/newsroom/press-releases/2026/11-02-2026-110046663",
+              "title": "The Estée Lauder Companies Reports Fiscal 2027 First Quarter Results",
+              "date": "2026-11-02T12:00:00.000Z",
+              "mentions": 17,
+              "via": "list+direct",
+              "ai": {
+                "tries": 3,
+                "text_chars": 43492,
+                "signal_number": 11,
+                "importance": "High",
+                "event_date": "2026-11-02",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "merged",
+              "change": {
+                "signal": "Results & Publications",
+                "type": "General Updates",
+                "title": "Estée Lauder Reports Fiscal 2027 First Quarter Results",
+                "summary": "Estée Lauder reported its financial results for the first quarter ended September 30, 2026, with net sales increasing 7% to $3.7 billion.",
+                "importance": "High",
+                "event_date": "2026-11-02",
+                "event_date_from": "article",
+                "key_facts": [
+                  "Net Sales $ 3,715 $ 3,481 7 %",
+                  "Organic Net Sales, Non-GAAP1,2 $ 3,696 $ 3,480 6 %",
+                  "Diluted Net Earnings Per Common Share $ .64 $ .13 100+ %"
+                ],
+                "also_involves": []
+              },
+              "change_id": "e122b925-5491-49f5-9434-034842b86e65",
+              "in_chat": true,
+              "merged_by": "same competitor + same type within 15 days (General Updates) (1.00)"
+            },
+            {
+              "url": "https://www.elcompanies.com/en/news-and-media/media-resources/resources-and-reports",
+              "title": "Resources & Reports",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "no date",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.elcompanies.com/en/news-and-media/contact-us",
+              "title": "Contact Us",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "no date",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.elcompanies.com/en/news-and-media/media-resources/executive-profiles",
+              "title": "Executive Leadership",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "no date",
+              "step": "code check"
+            }
+          ]
+        },
+        "blog": {
+          "skipped": "no active source"
+        },
+        "own_site": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 0,
+            "after_url_check": 0,
+            "read_by_ai": 0,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 0,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": []
+        },
+        "news": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 20,
+            "after_url_check": 20,
+            "read_by_ai": 3,
+            "saved": 2,
+            "merged": 1,
+            "dropped": 17,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://www.businesswire.com/news/home/20261102120928/en/The-Este-Lauder-Companies-Reports-Fiscal-2027-First-Quarter-Results",
+              "title": "The Estée Lauder Companies Reports Fiscal 2027 First Quarter Results",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Reports Fiscal 2027 First Quarter Results - elcompanies.com, same title)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.businesswire.com/news/home/20261030616823/en/The-Este-Lauder-Companies-and-Microsoft-Announce-a-New-Strategic-Partnership-to-Power-Enterprise-Efficiency-and-Consumer-Centric-Growth",
+              "title": "The Estée Lauder Companies and Microsoft Announce a New Strategic Partnership to Power Enterprise Efficiency and Consumer-Centric Growth",
+              "date": "2026-10-30T12:00:00.000Z",
+              "mentions": 19,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 6689,
+                "signal_number": 26,
+                "importance": "High",
+                "event_date": "2026-10-30",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Strategic partnerships",
+                "type": "Partnerships & Alliances",
+                "title": "Estée Lauder Companies and Microsoft Announce a New Strategic Partnership",
+                "summary": "Estée Lauder Companies and Microsoft have formed a new strategic partnership to advance cloud, data, and AI capabilities, accelerating innovation and enhancing productivity.",
+                "importance": "High",
+                "event_date": "2026-10-30",
+                "event_date_from": "event",
+                "key_facts": [
+                  "This new partnership is a critical part of The Estée Lauder Companies’ One Operating Ecosystem, which brings together shared platforms, connected data, and best-in-class partners to enable consistent, scalable, and effective execution across the enterprise.",
+                  "The company is investing in its Unified Consumer Data Platform to deepen understanding of consumer needs and preferences, supporting more personalized experiences."
+                ],
+                "also_involves": []
+              },
+              "change_id": "8d408b48-a94c-402e-b7aa-b2448a9120c6",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.elcompanies.com/en-gb/news-and-media/newsroom/press-releases/2026/10-05-2026",
+              "title": "The Estée Lauder Companies Invests €5.7 Million to Advance Next-Generation Manufacturing at its Oevel Campus in Belgium – The Estée Lauder Companies Inc.",
+              "date": "2026-10-08T12:00:00.000Z",
+              "mentions": 20,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7977,
+                "signal_number": 20,
+                "importance": "Medium",
+                "event_date": "2026-10-05",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Investments & divestitures",
+                "type": "M&A, Funding & Investments",
+                "title": "Estée Lauder Invests €5.7 Million to Advance Next-Generation Manufacturing",
+                "summary": "Estée Lauder invests €5.7 million in advanced water infrastructure at its Oevel manufacturing campus in Belgium to improve water efficiency and reduce wastewater discharge.",
+                "importance": "Medium",
+                "event_date": "2026-10-05",
+                "event_date_from": "event",
+                "key_facts": [
+                  "The Estée Lauder Companies today announced a €5.7 Million investment in advanced water infrastructure at its Oevel manufacturing campus in Belgium."
+                ],
+                "also_involves": []
+              },
+              "change_id": "0138226e-8f98-47f9-bedf-6ad5b20595fc",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.sec.gov/Archives/edgar/data/1001250/000100125026000066/exhibit991capitalmarketsex.htm",
+              "title": "Document",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Announces Fiscal 2030 Ambition at Its Capital Markets - elcompanies.com, same named campaign / product \"ambition at its capital markets experience\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.investing.com/news/stock-market-news/estee-lauder-targets-midsingledigit-annual-sales-growth-through-2030-4997364",
+              "title": "Estee Lauder targets mid-single-digit annual sales growth through 2030 By Reuters",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Announces Fiscal 2030 Ambition at Its Capital Markets - elcompanies.com, same figures (16.5%, 18.5%), 0.58)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://companies.einnews.com/news/estee-lauder-ceo",
+              "title": "Estee Lauder CEO News - Estee Lauder News from EIN News",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Reports Fiscal 2027 First Quarter Results - elcompanies.com, same figures (6%, 7%), 0.61)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://financialnewsletter.com/estee-lauder-sets-2030/",
+              "title": "Estee Lauder sets 2030 growth, margin targets as turnaround advances | Financial Newsletter",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Announces Fiscal 2030 Ambition at Its Capital Markets - elcompanies.com, same figures (16.5%, 18.5%), 0.53)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.gurufocus.com/news/9168930/estee-lauder-el-sets-ambitious-fiscal-2030-goals-at-shanghai-capital-markets-event",
+              "title": "Estee Lauder (EL) Sets Ambitious Fiscal 2030 Goals at Shanghai C",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Announces Fiscal 2030 Ambition at Its Capital Markets - elcompanies.com, same figures (16.5%, 18.5%), 0.79)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.investing.com/news/stock-market-news/estee-lauder-raises-annual-forecasts-on-resilient-demand-ahead-of-holiday-season-4990805",
+              "title": "Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holidays By Reuters",
+              "date": "2026-11-02T12:00:00.000Z",
+              "mentions": 11,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 5153,
+                "signal_number": 11,
+                "importance": "High",
+                "event_date": "2026-11-02",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "merged",
+              "change": {
+                "signal": "Results & Publications",
+                "type": "General Updates",
+                "title": "Estée Lauder raises annual forecasts on resilient demand",
+                "summary": "Estée Lauder raises its annual forecasts due to strong demand for luxury fragrances and skincare products, particularly in mainland China.",
+                "importance": "High",
+                "event_date": "2026-11-02",
+                "event_date_from": "article",
+                "key_facts": [
+                  "Estee Lauder is cutting promotions and ramping up brand investment as its turnaround gathers pace, CEO Stephane de La Faverie said on Monday after the cosmetics maker raised annual forecasts.",
+                  "The company expects fiscal 2027 organic sales growth of 4% to 5.5%, compared with its previous forecast of 3% to 5%."
+                ],
+                "also_involves": []
+              },
+              "change_id": "e122b925-5491-49f5-9434-034842b86e65",
+              "in_chat": true,
+              "merged_by": "same competitor + same type within 15 days (General Updates) (1.00)"
+            },
+            {
+              "url": "https://www.businessoffashion.com/news/beauty/estee-lauder-raises-outlook-buoyed-by-perfume-demand/",
+              "title": "Estée Lauder Raises Outlook, Buoyed by Perfume Demand | BoF",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holi - investing.com, same outlook / guidance update, 0.69)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://qz.com/estee-lauder-raises-outlook-fragrance-demand-earnings-110226",
+              "title": "Estée Lauder raises outlook in Q1 earnings on fragrance demand",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (The Estée Lauder Companies Reports Fiscal 2027 First Quarter Results - elcompanies.com, same quarterly results (Q1), 0.58)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.streetinsider.com/Reuters/Estee+Lauder+lifts+annual+targets+as+luxury+fragrance+drives+sales+ahead+of+holidays/27268980.html",
+              "title": "Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holidays",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holi - investing.com, same title)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://financialnewsletter.com/estee-lauder-cuts-promotions/",
+              "title": "Estee Lauder cuts promotions as luxury fragrances help lift outlook | Financial Newsletter",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holi - investing.com, same outlook / guidance update, 0.93)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://wmbdradio.com/2026/11/02/estee-lauder-raises-annual-forecasts-on-resilient-demand-ahead-of-holiday-season/",
+              "title": "Estee Lauder cuts promotions as luxury fragrances help lift outlook | 1470 & 100.3 WMBD",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (Estee Lauder lifts annual targets as luxury fragrance drives sales ahead of holi - investing.com, same outlook / guidance update, 0.86)",
+              "step": "same news check"
+            },
+            {
+              "url": "https://finans.dk/erhverv/ECE19286196/lunarstifter-traeder-tilbage-nu-er-tiden-rigtig-til-at-give-stafetten-videre/",
+              "title": "Lunar-stifter træder tilbage: »Nu er tiden rigtig til at give stafetten videre« - Finans",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://news.europawire.eu/kering-launches-generation-award-in-india-with-reliance-brands-to-advance-circular-fashion-innovation-and-support-sustainability-focused-start-ups/eu-press-release/2026/09/08/12/16/00/180411/",
+              "title": "Kering Launches Generation Award in India With Reliance Brands to Advance Circular Fashion Innovation and Support Sustainability-Focused Start-ups | EuropaWire",
+              "date": "2026-10-13T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "competitor not named",
+              "step": "code check"
+            },
+            {
+              "url": "https://finance.yahoo.com/markets/stocks/articles/est-e-lauder-el-using-051339383.html",
+              "title": "Is Estée Lauder (EL) Using New Bobbi Brown Leadership to Reframe Its Brand-Led Recovery Story?",
+              "date": "2026-10-10T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "share-market talk (stock, analysts) - not an action by the company",
+              "step": "code check"
+            },
+            {
+              "url": "https://mobilelive.traderfox.com/news/dpa-compact/944890-eqs-news-flatexdegiro-mit-veraenderungen-im-aufsichtsrat-deutsch/",
+              "title": "dpa-AFX Compact: EQS-News: flatexDEGIRO mit Veränderungen im Aufsichtsrat (deutsch)",
+              "date": "2026-10-10T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.mtbpro.es/actualidad/evoc-pasara-ser-distribuida-en-espana-portugal-y-andorra-por-team-bike",
+              "title": "EVOC pasará a ser distribuida en España, Portugal y Andorra por Team Bike | MTB Pro",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.clarkhill.com/news-events/news/dow-pauses-cmmc-phase-2-defense-contractors/",
+              "title": "DoW Pauses CMMC Phase 2: What Defense Contractors Need",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "no date",
+              "step": "code check"
+            }
+          ]
+        }
+      },
+      "joined": {
+        "joined": 0,
+        "notes": []
+      },
+      "cards": {
+        "written": 3,
+        "repaired": 1,
+        "failed": 0,
+        "notes": [
+          "Estée Lauder Companies and Microsoft Announce a New Strategic Partnership: title from the source"
+        ]
+      }
+    },
+    {
+      "competitor": "Lancôme",
+      "competitor_id": "dc1e5e78-eb8f-414b-8519-b59ca047d9be",
+      "dryRun": false,
+      "sections": {
+        "press": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 1,
+            "after_url_check": 1,
+            "read_by_ai": 0,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 1,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 0,
+            "firecrawl_calls": 0
+          },
+          "notes": [
+            "https://www.loreal.com/en/press-release/: 49 posts on the list, 1 new"
+          ],
+          "items": [
+            {
+              "url": "https://www.loreal.com/en/press-release/group/paris-saint-germain-and-loreal-groupe-join-forces-to-celebrate-performance-innovation-and-the-power-of-teamwork",
+              "title": "Paris Saint-Germain and L'Oréal Groupe join forces to celebrate performance, innovation and the power of teamwork",
+              "date": "2025-12-03T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "older than this run",
+              "step": "code check"
+            }
+          ]
+        },
+        "blog": {
+          "skipped": "no active source"
+        },
+        "own_site": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 20,
+            "after_url_check": 20,
+            "read_by_ai": 8,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 20,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/what-is-spf-and-why-do-you-need-it.html",
+              "title": "What Is SPF and Why Do You Need It | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/a-guide-to-la-vie-est-belle-fragrance.html",
+              "title": "A Guide to La Vie Est Belle Fragrance Notes | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/how-to-repair-a-damaged-skin-barrier.html",
+              "title": "Microbiome: How to Repair a Damaged Skin Barrier | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/chinese-valentines-day.html",
+              "title": "Your Guide to Chinese Valentine's Day | Discover Lancôme | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 6,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7949,
+                "signal_number": 39,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: passing_mention",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/best-long-lasting-lipstick.html",
+              "title": "Discover the Secret to Long-lasting Lipstick Perfection | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/get-glowing-skin.html",
+              "title": "Step-by-Step Guide on How to Achieve Glowing Skin Easily | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 6,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7733,
+                "signal_number": 32,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/the-gut-health-doctor.html",
+              "title": "Lancôme x The Gut Health Doctor: Microbiome Science | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 10,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 7908,
+                "signal_number": 4,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/makeup-routine-with-amelia-liana.html",
+              "title": "Makeup Routine with Amelia Liana | Discover Lancôme | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/different-mascara-wands-and-what-they-do.html",
+              "title": "Different Mascara Wands And What They Do | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 4,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 6385,
+                "signal_number": 39,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/hydration-heroes-skin-looks-healthier-and-younger.html",
+              "title": "Hydration Heroes: Skin Looks Healthier and Younger | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 5,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7068,
+                "signal_number": 39,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/science-hub-science-skincare-and-beauty-tech.html",
+              "title": "Lancôme's Science Hub - Skincare science & Beauty Tech",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 11,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 2075,
+                "signal_number": 39,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: passing_mention",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/your-morning-skincare-routine.html",
+              "title": "Start Your Day with a Morning Skincare Routine | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/vogue-face-facts.html",
+              "title": "Discover Lancôme with Vogue: Uncover the Facts | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 7,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 5133,
+                "signal_number": 39,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: opinion",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/bridal-beauty-tips-for-your-wedding-day.html",
+              "title": "Bridal Beauty Tips for Your Wedding Day | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/best-brightening-eye-creams.html",
+              "title": "Our Best Brightening Eye Creams for Ultimate Skin Glow | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/how-to-have-healthy-looking-skin.html",
+              "title": "How to have Healthy Looking Skin | Glowing Skin | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/how-to-hydrate-skin.html",
+              "title": "Hydrate Skin with Lancôme | Discover the Best Tips | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/night-time-skincare-routine-get-unready-with-fleur-de-force.html",
+              "title": "Unready with Fleur de Force: Night Time Skincare Routine | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/hydrating-face-creams-for-dry-skin.html",
+              "title": "Hydrating Face Creams for Dry Skin | Skincare Advice | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "mentions": 5,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7697,
+                "signal_number": 32,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.lancome.co.uk/discover-lancome/our-best-foundation-for-combination-skin.html",
+              "title": "Our Best Foundation For Combination Skin | Makeup | Lancôme UK",
+              "date": "2026-10-18T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            }
+          ]
+        },
+        "news": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 20,
+            "after_url_check": 20,
+            "read_by_ai": 4,
+            "saved": 2,
+            "merged": 0,
+            "dropped": 18,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://www.prnewswire.com/news-releases/decorte-announces-partnership-with-ulta-beauty-bringing-its-signature-liposome-skincare-to-select-stores-nationwide-302925877.html",
+              "title": "DECORTÉ Announces Partnership with Ulta Beauty, Bringing Its Signature Liposome Skincare to Select Stores Nationwide",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "competitor not named",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.prnewswire.com/news-releases/im-fine-lancome-launches-a-global-initiative-to-break-the-silence-on-womens-mental-health-302901795.html",
+              "title": "\"I'M FINE\": LANCÔME LAUNCHES A GLOBAL INITIATIVE TO BREAK THE SILENCE ON WOMEN'S MENTAL HEALTH",
+              "date": "2026-10-08T12:00:00.000Z",
+              "mentions": 15,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7964,
+                "signal_number": 32,
+                "importance": "Medium",
+                "event_date": "2026-10-08",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Company Updates",
+                "type": "General Updates",
+                "title": "Lancôme Launches Global Initiative to Break the Silence on Women's Mental Health",
+                "summary": "Lancôme launches a global initiative to break the silence on women's mental health, partnering with nonprofits ADAA and HealthyWomen.",
+                "importance": "Medium",
+                "event_date": "2026-10-08",
+                "event_date_from": "event",
+                "key_facts": [
+                  "In partnership with the nonprofits ADAA and HealthyWomen, Lancôme is on a mission to help women recognize early signs of anxiety and depression.",
+                  "The 'I'm Fine' program focuses on anxiety and depression, two of the most common mental health challenges for women."
+                ],
+                "also_involves": []
+              },
+              "change_id": "527bfb94-7587-43da-935e-c460256404f5",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.prnewswire.com/fr/communiques-de-presse/une-femme-sur-trois-sera-confrontee-a-un-trouble-anxieux-ou-depressif--lancome-ouvre-le-dialogue-avec--im-fine--302902297.html",
+              "title": "UNE FEMME SUR TROIS SERA CONFRONTÉE À UN TROUBLE ANXIEUX OU DÉPRESSIF : LANCÔME OUVRE LE DIALOGUE AVEC « I'M FINE »",
+              "date": "2026-10-08T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://beautynewsdaily.com/beauty-notes-kiko-milano-elf-beauty-balmain-outside-in/",
+              "title": "Beauty Updates: Kiko Milano Teams Up With Stabilo & More",
+              "date": "2026-11-05T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "competitor not named",
+              "step": "code check"
+            },
+            {
+              "url": "https://evoke.ie/2026/11/03/style/beauty/lancome-advent-calendar-2026",
+              "title": "Lancome's Advent Calendar 2026 is a pink palace full of gorgeous beauty treats",
+              "date": "2026-11-03T12:00:00.000Z",
+              "mentions": 7,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 2389,
+                "signal_number": 0,
+                "importance": "Medium",
+                "event_date": "2026-11-03",
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://finans.dk/erhverv/ECE19286196/lunarstifter-traeder-tilbage-nu-er-tiden-rigtig-til-at-give-stafetten-videre/",
+              "title": "Lunar-stifter træder tilbage: »Nu er tiden rigtig til at give stafetten videre« - Finans",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://tokila.jp/en/news-1006756/",
+              "title": "LANCÔME Confirms November 13 Release for Limited Beauty Box; Counter Reservations Start October 29 | tokila",
+              "date": "2026-10-28T12:00:00.000Z",
+              "mentions": 8,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 1865,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": "2026-11-13",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "Lancôme Confirms November 13 Release for Limited Beauty Box",
+                "summary": "Lancôme has set the release date for its Beauty Box, a limited holiday-exclusive box containing six skincare and makeup products.",
+                "importance": "Medium",
+                "event_date": "2026-10-28",
+                "event_date_from": "article",
+                "key_facts": [
+                  "LANCÔME, a brand of Nihon L’Oréal K.K., has set the release date for its Beauty Box",
+                  "The holiday-exclusive box contains a serum, sunscreen emulsion, eyeshadow, lipstick, mascara and hand cream"
+                ],
+                "also_involves": []
+              },
+              "change_id": "baa796d2-c512-4a3a-b72b-f51b9d2140c7",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.warc.com/en/article/lancome-grabads---breaking-the-scent-carrier-c7af6cebd9ef470a89a26eac93803db4",
+              "title": "Lancôme: GrabAds - Breaking the scent carrier",
+              "date": "2026-10-28T12:00:00.000Z",
+              "mentions": 8,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 2111,
+                "signal_number": 32,
+                "importance": "Medium",
+                "event_date": "2026-10-28",
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://valor.globo.com/empresas/marketing/noticia/2026/10/19/exclusivo-lancome-estreia-no-tiktok-shop-segunda-marca-de-luxo-da-loreal-na-plataforma.ghtml",
+              "title": "Lancôme estreia no TikTok Shop, segunda marca de luxo da L’Oréal na plataforma | Marketing | Valor Econômico",
+              "date": "2026-10-19T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.beautynesia.id/beauty/lancome-resmikan-kehadirannya-di-indonesia-melalui-tiktok-shop-hadirkan-berbagai-penawaran-eksklusif-pada-20--22-oktober-2026/b-325799",
+              "title": "Lancome Resmikan Kehadirannya di Indonesia melalui TikTok Shop: Hadirkan Berbagai Penawaran Eksklusif pada 20 - 22 Oktober 2026",
+              "date": "2026-10-19T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.luxe-daily.fr/lancome-i-m-fine/",
+              "title": "Lancôme I'm Fine 2026",
+              "date": "2026-10-12T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.fashionbusinessworld.com/article/lancome-and-rituals-turn-mental-health-into-brand-strategy",
+              "title": "Lancôme and Rituals turn mental health into brand strategy — Fashion Business World",
+              "date": "2026-10-11T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (\"I'M FINE\": LANCÔME LAUNCHES A GLOBAL INITIATIVE TO BREAK THE SILENCE ON WOMEN'S - prnewswire.com, same named campaign / product \"im fine\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.vanityfair.it/article/lancome-lancia-la-campagna-im-fine-per-sensibilizzare-sulla-salute-mentale-delle-donne",
+              "title": "Lancôme lancia la campagna I’m Fine per sensibilizzare sulla salute mentale delle donne | Vanity Fair Italia",
+              "date": "2026-10-10T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.beautypackaging.com/breaking-news/lancomes-new-campaign-helps-people-open-up-about-anxiety-depression/",
+              "title": "Lancôme’s New Campaign Talks About Anxiety & Depression",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (\"I'M FINE\": LANCÔME LAUNCHES A GLOBAL INITIATIVE TO BREAK THE SILENCE ON WOMEN'S - prnewswire.com, same named campaign / product \"im fine\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.merca20.com/lancome-reune-a-demi-moore-zoe-saldana-y-vanessa-kirby-en-campana-sobre-salud-mental-que-llega-a-mexico/",
+              "title": "Lancôme reúne a Demi Moore, Zoë Saldaña y Vanessa Kirby en campaña sobre salud mental que llega a México",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.mtbpro.es/actualidad/evoc-pasara-ser-distribuida-en-espana-portugal-y-andorra-por-team-bike",
+              "title": "EVOC pasará a ser distribuida en España, Portugal y Andorra por Team Bike | MTB Pro",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.marktforschung.de/marktforschung/a/neues-von-der-insight250-agf-und-gik-heute-morgen-und-dem-spiegel-institut/",
+              "title": "Branchennews: Neues von der Insight250, AGF und GIK, Heute & Morgen und dem Spiegel Institut | marktforschung.de",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.elle.com/beauty/makeup-skin-care/a74069864/vanessa-kirby-mental-health-motherhood-lancome-campaign-interview-2026/",
+              "title": "80% of Women Say ‘I’m Fine’ When They Don’t Mean It. Vanessa Kirby Wants That to Change.",
+              "date": "2026-10-08T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (\"I'M FINE\": LANCÔME LAUNCHES A GLOBAL INITIATIVE TO BREAK THE SILENCE ON WOMEN'S - prnewswire.com, same named campaign / product \"im fine\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.vanityteen.com/lancome-im-fine/",
+              "title": "LANCÔME PUTS WOMEN’S MENTAL HEALTH IN FOCUS WITH “I’M FINE” Vanity Teen",
+              "date": "2026-10-08T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (\"I'M FINE\": LANCÔME LAUNCHES A GLOBAL INITIATIVE TO BREAK THE SILENCE ON WOMEN'S - prnewswire.com, same named campaign / product \"im fine\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://www.informador.mx/mexico/operacion-enjambre-suma-14-alcaldes-procesados-cuatro-son-de-morena-20260911-0052.html",
+              "title": "Operación Enjambre suma 14 alcaldes procesados; cuatro son de Morena | El Informador",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            }
+          ]
+        }
+      },
+      "joined": {
+        "joined": 0,
+        "notes": []
+      },
+      "cards": {
+        "written": 2,
+        "repaired": 2,
+        "failed": 0,
+        "notes": [
+          "Lancôme Confirms November 13 Release for Limited Beauty Box: title from the source",
+          "Lancôme Launches Global Initiative to Break the Silence on Women's Mental Health: business impact = standard line (dropped: Impact 1: a donation or community project does not change competition for the client - give one \"low\" item or leave it out. Impact 2: \"fact_number\" must be a number from the FACTS list.)"
+        ]
+      }
+    },
+    {
+      "competitor": "Shiseido",
+      "competitor_id": "3ea627bc-8bb0-4ffc-a6df-f231bf18b283",
+      "dryRun": false,
+      "sections": {
+        "press": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 2,
+            "after_url_check": 1,
+            "read_by_ai": 1,
+            "saved": 1,
+            "merged": 0,
+            "dropped": 0,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 0,
+            "firecrawl_calls": 0
+          },
+          "notes": [
+            "https://corp.shiseido.com/en/news/: 23 posts on the list, 2 new"
+          ],
+          "items": [
+            {
+              "url": "https://corp.shiseido.com/en/news/detail.html?n=00000000004236",
+              "title": "Shiseido Wins Silver and Bronze at PENTAWARDS 2026 Global Packaging Design Competition | NEWS RELEASE | Shiseido Company",
+              "date": "2026-10-19T12:00:00.000Z",
+              "mentions": 12,
+              "via": "list+direct",
+              "ai": {
+                "tries": 1,
+                "text_chars": 4769,
+                "signal_number": 7,
+                "importance": "Medium",
+                "event_date": "2026-10-19",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Awards & certifications",
+                "type": "Customer Wins & Reputation",
+                "title": "Shiseido Wins Silver and Bronze at PENTAWARDS 2026 Global Packaging Design Competition",
+                "summary": "Shiseido won two awards at PENTAWARDS 2026, a prestigious global packaging design competition.",
+                "importance": "Medium",
+                "event_date": "2026-10-19",
+                "event_date_from": "event",
+                "key_facts": [
+                  "Shiseido has won two awards at PENTAWARDS 2026, a prestigious global packaging design competition.",
+                  "Gummy facial cleanser HADAGUMI received a Silver award in the Body, Health & Beauty category, while Bi no Tama (Beads of Beauty), a skincare concept prototype made with algae-derived materials, won a Bronze award in the Professional Concepts category."
+                ],
+                "also_involves": []
+              },
+              "change_id": "3c5067a2-397f-40b8-88b9-2e3d30eb920c",
+              "in_chat": true
+            }
+          ]
+        },
+        "blog": {
+          "skipped": "no active source"
+        },
+        "own_site": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 0,
+            "after_url_check": 0,
+            "read_by_ai": 0,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 0,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": []
+        },
+        "news": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 20,
+            "after_url_check": 18,
+            "read_by_ai": 5,
+            "saved": 2,
+            "merged": 1,
+            "dropped": 15,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://shiseidobeautypark.shiseido.com/en/topics/2431/",
+              "title": "Beauty Products Co-Created by Shiseido Research Center’s \"fibona\" Limited Re-Release of \"Sengan Serum\"—A Rinse-Off Beauty Serum Available starting Tuesday, November 3, 2026, at fibona Lab on the 1st floor of Shiseido Beauty Park | Shiseido Beauty Par",
+              "date": "2026-10-20T12:00:00.000Z",
+              "mentions": 25,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 4900,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": "2026-11-03",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "Shiseido Re-Releases Sengan Serum",
+                "summary": "Shiseido re-releases Sengan Serum, a rinse-off beauty serum, after a sold-out limited release in 2025. The product will be available starting November 3, 2026, at fibona Lab on the 1st floor of Shiseido Beauty Park.",
+                "importance": "Medium",
+                "event_date": "2026-10-20",
+                "event_date_from": "article (event date was after the article)",
+                "key_facts": [
+                  "As part of beauty products co-created through Shiseido Research Center’s open innovation program “fibona”*1 to bring “what does not exist in the world” to life, we are pleased to announce the launch of “Senganserum.”",
+                  "This product will be available in limited quantities starting Tuesday, November 3, 2026, at fibona Lab on the 1st floor of Shiseido Beauty Park."
+                ],
+                "also_involves": []
+              },
+              "change_id": "7562175e-5c46-4242-95d7-aca0a9bcce61",
+              "in_chat": true
+            },
+            {
+              "url": "https://corp.shiseido.com/en/company/talk/20260930.html",
+              "title": "The Art of Lasting Beauty: A Century of Shiseido’s Refill Culture | Shiseido Talks | ABOUT US | Shiseido Company",
+              "date": "2026-10-20T12:00:00.000Z",
+              "mentions": 22,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 7893,
+                "signal_number": 0,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://corp.shiseido.com/jp/news/detail.html?n=00000000004234",
+              "title": "東京都のプロジェクトに参画し、東京都産グリーン水素を活用して出来た原料を活用した化粧品を共同開発 | ニュースリリース詳細 | 資生堂 企業情報",
+              "date": "2026-10-15T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://corp.shiseido.com/en/company/talk/20260914.html",
+              "title": "How Did a “Frozen Serum” Come to Life? Shiseido’s Pursuit of New Value Creation Through Sorbet Serum | Shiseido Talks | ABOUT US | Shiseido Company",
+              "date": "2026-10-14T12:00:00.000Z",
+              "mentions": 19,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 7905,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Company Updates",
+                "type": "General Updates",
+                "title": "Shiseido Launches Sorbet Serum in Japan",
+                "summary": "Shiseido has launched Sorbet Serum in Japan, a product designed to be used frozen.",
+                "importance": "Medium",
+                "event_date": "2026-10-14",
+                "event_date_from": "article",
+                "key_facts": [
+                  "Sorbet Serum *1,” a serum used frozen."
+                ],
+                "also_involves": []
+              },
+              "change_id": "935bc00a-b8f8-49e0-98cc-26c7611e3548",
+              "in_chat": true
+            },
+            {
+              "url": "https://news.mixi.jp/view_news.pl?from=recent_list&id=9014632&media_id=63",
+              "title": "SHISEIDO「アルティミューン」のマルチオイルが再発売 | mixiニュース",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://simplywall.st/stocks/jp/household/tse-4911/shiseido-shares/news/sat-out-shiseidos-rally-here-is-what-holders-saw",
+              "title": "Sat Out Shiseido's Rally? Here Is What Holders Saw - Simply Wall St News",
+              "date": "2026-11-03T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "stock price page, not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.themarketsdaily.com/2026/11/02/shiseido-ssdoy-set-to-announce-quarterly-earnings-on-monday.html",
+              "title": "Shiseido (SSDOY) Set to Announce Quarterly Earnings on Monday - Markets Daily",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "only gives the date of a results release or call - not news",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.skidsolutions.eu/news/mobile-id-and-smart-id-endpoint-change-on-2-november-2026/",
+              "title": "Mobile-ID and Smart-ID endpoint Change on 2 November 2026 - SK ID Solutions | International e-identity solutions since 2001",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "competitor not named",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.shionogi.com/jp/ja/news.html.html",
+              "title": "ニュース | 塩野義製薬",
+              "date": "2026-10-30T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.japanstockintel.com/en/21679/",
+              "title": "2026-10-19 Shiseido Company,Limited “On October 19, 2026, Shiseido announced that two of its products/brands had received awards at the \"PENTAWARDS 2026,\" a global awards ceremony for package design.” – Tokyo Market Pulse",
+              "date": "2026-10-19T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "same news as an article we already have (Shiseido Wins Silver and Bronze at PENTAWARDS 2026 Global Packaging Design Compe - corp.shiseido.com, same named campaign / product \"pentawards 2026\")",
+              "step": "same news check"
+            },
+            {
+              "url": "https://au.marketscreener.com/news/scibase-resolves-on-a-rights-issue-of-shares-of-approximately-sek-58-million-ce7858d3df88f424",
+              "title": "SCIBASE RESOLVES ON A RIGHTS ISSUE OF SHARES OF APPROXIMATELY SEK 58 MILLION | MarketScreener Australia",
+              "date": "2026-10-16T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "competitor not named",
+              "step": "code check"
+            },
+            {
+              "url": "https://hololive-tsuushin.com/holonews/10-1/",
+              "title": "【10/15(木)】ホロライブ9周年×ホロドリ「Blooming Dreams」開催確定 | 埼玉スタジアム2002で花火・ドローンショー、A賞で500名を特別招待 | ホロライブ通信",
+              "date": "2026-10-15T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://mobilelive.traderfox.com/news/dpa-compact/944890-eqs-news-flatexdegiro-mit-veraenderungen-im-aufsichtsrat-deutsch/",
+              "title": "dpa-AFX Compact: EQS-News: flatexDEGIRO mit Veränderungen im Aufsichtsrat (deutsch)",
+              "date": "2026-10-10T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://economia.ig.com.br/2026-09-10/sodimac-fecha-sete-lojas-demite-funcionarios.html",
+              "title": "Sodimac fecha 7 megalojas e demite funcionários",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://negopb.com.br/rio-recebe-base-da-forca-nacional-do-sus-para-enfrentar-el-nino/",
+              "title": "Rio recebe base da Força Nacional do SUS para enfrentar El Niño – Portal NegoPB",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.fluxurymagazine.com/en/shiseido-vital-perfection-sculptdefine-serum/",
+              "title": "Shiseido Vital Perfection Intensive SculptDefine Serum",
+              "date": "2026-10-08T12:00:00.000Z",
+              "mentions": 12,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 2864,
+                "signal_number": 0,
+                "importance": "Low",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.trendhunter.com/trends/vital-perfections",
+              "title": "High-End Firming Serums: Shiseido Boasts the Vital Perfection SculptDefine Serum | Trend Hunter",
+              "date": "2026-10-08T12:00:00.000Z",
+              "mentions": 5,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 2557,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": "2026-10-07",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "merged",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "Shiseido Boasts the Vital Perfection SculptDefine Serum",
+                "summary": "Shiseido introduces the Vital Perfection SculptDefine Serum in Canada, a high-end facial and neck treatment for visible lifting, firming, and contour definition.",
+                "importance": "Medium",
+                "event_date": "2026-10-07",
+                "event_date_from": "event",
+                "key_facts": [
+                  "Shiseido is introducing the Vital Perfection SculptDefine Serum in Canada.",
+                  "This high-end and scientifically enhanced facial and neck treatment is positioned around visible lifting, firming, and contour definition.",
+                  "Its central technology — the proprietary D-AminoLift Complex — combines D-Aspartic Acid, Niacinamide, and SafflowerRED."
+                ],
+                "also_involves": []
+              },
+              "change_id": "7562175e-5c46-4242-95d7-aca0a9bcce61",
+              "in_chat": true,
+              "merged_by": "same competitor + same type within 15 days (Product & Feature Launches) (1.00)"
+            },
+            {
+              "url": "https://hololive-tsuushin.com/holonews/11-12/",
+              "title": "【11/12】星街すいせい福岡公演を全国51館・海外で生中継 ライブビューイング開催決定、重大告知も予告 | ホロライブ通信",
+              "date": null,
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            }
+          ]
+        }
+      },
+      "joined": {
+        "joined": 0,
+        "notes": []
+      },
+      "cards": {
+        "written": 3,
+        "repaired": 0,
+        "failed": 0,
+        "notes": []
+      }
+    },
+    {
+      "competitor": "YSL Beauty",
+      "competitor_id": "9f71f800-728c-453c-a198-090ed802d30b",
+      "dryRun": false,
+      "sections": {
+        "press": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 1,
+            "after_url_check": 1,
+            "read_by_ai": 0,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 1,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 0,
+            "firecrawl_calls": 0
+          },
+          "notes": [
+            "https://www.loreal.com/en/press-release/: 49 posts on the list, 1 new"
+          ],
+          "items": [
+            {
+              "url": "https://www.loreal.com/en/press-release/group/paris-saint-germain-and-loreal-groupe-join-forces-to-celebrate-performance-innovation-and-the-power-of-teamwork",
+              "title": "Paris Saint-Germain and L'Oréal Groupe join forces to celebrate performance, innovation and the power of teamwork",
+              "date": "2020-07-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "older than this run",
+              "step": "code check"
+            }
+          ]
+        },
+        "blog": {
+          "skipped": "no active source"
+        },
+        "own_site": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 1,
+            "after_url_check": 1,
+            "read_by_ai": 0,
+            "saved": 0,
+            "merged": 0,
+            "dropped": 1,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://www.yslbeauty.co.uk/in-the-now/7-tips-on-concealer-application.html",
+              "title": "7 Tips on Concealer Application | In The Now | YSL Beauty UK",
+              "date": "2026-11-05T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "how-to / guide page, not news",
+              "step": "code check"
+            }
+          ]
+        },
+        "news": {
+          "since": "2026-10-07",
+          "counts": {
+            "look_back_days": 30,
+            "fetched": 20,
+            "after_url_check": 20,
+            "read_by_ai": 9,
+            "saved": 5,
+            "merged": 1,
+            "dropped": 14,
+            "failed": 0,
+            "left_for_next_run": 0,
+            "retried": 0,
+            "exa_calls": 1,
+            "firecrawl_calls": 0
+          },
+          "notes": [],
+          "items": [
+            {
+              "url": "https://revistablackcard.com.br/ysl-beauty-tiktok-shop-brasil/",
+              "title": "YSL Beauty chega ao TikTok Shop no Brasil - Revista BlackCard Digital",
+              "date": "2026-11-06T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://tokila.jp/en/news-1006855/",
+              "title": "YSL Limited Cream Blush Trio and Six-Shade Palette Launch Nationwide November 13 | tokila",
+              "date": "2026-11-04T12:00:00.000Z",
+              "mentions": 6,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 1742,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": "2026-11-13",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "YSL Beauty Launches Limited Cream Blush Trio and Six-Shade Palette",
+                "summary": "YSL Beauty launches two new limited-edition products, a cream blush trio and a six-shade palette, in Japan on November 13.",
+                "importance": "Medium",
+                "event_date": "2026-11-04",
+                "event_date_from": "article",
+                "key_facts": [
+                  "Three YSL Make Me Blush cream blush shades and the Couture Face Palette launch nationwide in Japan as limited editions on Friday, November 13, 2026.",
+                  "The Couture Face Palette comes in one limited version, LIGHT TO MEDIUM, priced at ¥19,800 (tax included)."
+                ],
+                "also_involves": []
+              },
+              "change_id": "bd601d81-1bc2-42a5-938a-be5006ad41e0",
+              "in_chat": true
+            },
+            {
+              "url": "https://soubh.uai.com.br/noticias/variedades/ysl-beauty-estreia-no-tiktok-shop-brasil-e-inova-no-mercado-de-luxo/",
+              "title": "YSL Beauty estreia no TikTok Shop Brasil e inova no mercado de luxo - SouBH",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://soubh.uai.com.br/noticias/economia/ysl-beauty-chega-ao-tiktok-shop-veja-como-comprar/",
+              "title": "YSL Beauty chega ao TikTok Shop; veja como comprar - SouBH",
+              "date": "2026-11-04T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://graziadaily.co.uk/beauty-hair/makeup/ysl-make-me-blush-cream-review/",
+              "title": "The viral YSL powder blush is now a cream – but is the new formula even better? I put it to the test",
+              "date": "2026-11-03T12:00:00.000Z",
+              "mentions": 5,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 5008,
+                "signal_number": 32,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "AI answer failed checks: Your \"summary\" uses words that are not in the article (which, replaces, previous). Use only names and facts written in the article.",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.motorradonline.de/enduro/yamaha-tenere-900-november-2026-eicma/",
+              "title": "Yamaha Ténéré 900: Neuer Y-Plane-Triple würde zur neuen Dreizylinder-Enduro passen",
+              "date": "2026-11-02T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://vogueadria.com/ysl-skin-affair-cushion-foundation-beauty-launch/",
+              "title": "The new YSL Skin Affair Cushion foundation has arrived just in time",
+              "date": "2026-10-30T12:00:00.000Z",
+              "mentions": 11,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 5463,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": "2026-10-30",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "merged",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "YSL Beauty launches new Skin Affair Cushion foundation",
+                "summary": "YSL Beauty has launched a new foundation, the Skin Affair Cushion foundation, which promises a flawless complexion and combines advanced Korean cushion technology with rich serum care.",
+                "importance": "Medium",
+                "event_date": "2026-10-30",
+                "event_date_from": "event",
+                "key_facts": [
+                  "The new formula combines advanced Korean cushion technology with rich serum care, delivering up to 24 hours of continuous hydration and a natural, radiant, smooth finish.",
+                  "The foundation offers buildable medium coverage without feeling heavy or looking mask-like, effectively blurring pores and concealing minor imperfections."
+                ],
+                "also_involves": []
+              },
+              "change_id": "bd601d81-1bc2-42a5-938a-be5006ad41e0",
+              "in_chat": true,
+              "merged_by": "same competitor + same type within 15 days (Product & Feature Launches) (1.00)"
+            },
+            {
+              "url": "https://simplyluxury.net/ysl-beauty-channels-1982-couture-codes-in-limited-edition-collection/",
+              "title": "YSL Beauty 1982 Limited Edition Collection | Couture Shades - SIMPLY LUXURY",
+              "date": "2026-10-27T12:00:00.000Z",
+              "mentions": 7,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 3194,
+                "signal_number": 32,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Company Updates",
+                "type": "General Updates",
+                "title": "YSL Beauty launches 1982 Limited Edition Collection",
+                "summary": "YSL Beauty has launched a new limited edition collection of three products, each inspired by the House's defining moment of creative momentum in 1982.",
+                "importance": "Medium",
+                "event_date": "2026-10-27",
+                "event_date_from": "article",
+                "key_facts": [
+                  "YSL Beauty has distilled that precise moment into three limited edition pieces, each conceived around the shade N°1982."
+                ],
+                "also_involves": []
+              },
+              "change_id": "a38e044b-bcc2-47a1-92b6-6d65e1270a81",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.premiumbeautynews.com/en/ysl-beauty-steps-up-its-investment,28403",
+              "title": "YSL Beauty steps up its investment in Brazil with first store in São Paulo - Premium Beauty News",
+              "date": "2026-10-24T12:00:00.000Z",
+              "mentions": 10,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 3830,
+                "signal_number": 32,
+                "importance": "Medium",
+                "event_date": "2026-08-01",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": [],
+                "relabelled": "Company Updates -> New offices & facilities"
+              },
+              "outcome": "dropped",
+              "reason": "old event (2026-08-01) - history, not news",
+              "step": "AI"
+            },
+            {
+              "url": "https://www.premiumbeautynews.com/fr/ysl-beauty-mise-sur-le-bresil-avec,28402",
+              "title": "YSL Beauty mise sur le Brésil, avec une toute première boutique à São Paulo - Premium Beauty News",
+              "date": "2026-10-24T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://cbcglobe.com/en/articles/2026/10/20/video-exo-s-kai-shines-with-bold-and-luxurious-gaze-at-ysl-b-9151e833",
+              "title": "[Video] EXO's Kai Shines with Bold and Luxurious Gaze at YSL Beauty Holiday Event | CBC Globe",
+              "date": "2026-10-20T12:00:00.000Z",
+              "mentions": 8,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 1155,
+                "signal_number": 2,
+                "importance": "Medium",
+                "event_date": "2026-10-20",
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Company Updates",
+                "type": "General Updates",
+                "title": "YSL Beauty Unveils Holiday Show Collection and Holds Podium Event",
+                "summary": "YSL Beauty has unveiled its new 'Holiday Show' collection and is holding a podium event to showcase it.",
+                "importance": "Medium",
+                "event_date": "2026-10-20",
+                "event_date_from": "event",
+                "key_facts": [
+                  "YSL Beauty is unveiling its bold and luxurious new 'Holiday Show' collection for the upcoming year-end season."
+                ],
+                "also_involves": []
+              },
+              "change_id": "2cc7d0f5-627a-43c9-a739-5ee061ff6b1b",
+              "in_chat": true
+            },
+            {
+              "url": "https://nylon.com.sg/more-oct-beauty-announcements-including-the-viral-ysl-heart-shaped-hand-cream/",
+              "title": "More Oct Beauty announcements, including the viral YSL heart-shaped hand cream - NYLON",
+              "date": "2026-10-13T12:00:00.000Z",
+              "mentions": 6,
+              "via": "exa",
+              "ai": {
+                "tries": 2,
+                "text_chars": 2023,
+                "signal_number": 11,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": false,
+                "also_involves": []
+              },
+              "outcome": "dropped",
+              "reason": "not a real action: no_announcement",
+              "step": "AI"
+            },
+            {
+              "url": "https://glowguidemalaysia.com/ysl-beautys-latest-care-crush-blends-body-care-with-a-luxurious-skincare-experience/",
+              "title": "YSL Beauty’s Latest Care Crush Blends Body Care With a Luxurious Skincare Experience - Glow Guide",
+              "date": "2026-10-11T12:00:00.000Z",
+              "mentions": 23,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 7953,
+                "signal_number": 31,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "New product launches",
+                "type": "Product & Feature Launches",
+                "title": "YSL Beauty's Latest Care Crush Blends Body Care With a Luxurious Skincare Experience",
+                "summary": "YSL Beauty launches a new on-the-go body-care product, Care Crush Hand & Body Serum-In-Cream, designed to bring the sensorial experience of facial skincare to the hands and body.",
+                "importance": "Medium",
+                "event_date": "2026-10-11",
+                "event_date_from": "article",
+                "key_facts": [
+                  "YSL Beauty is taking this approach with its latest Care Crush Hand & Body Serum-In-Cream, a new on-the-go body-care product designed to bring the sensorial experience of facial skincare to the hands and body.",
+                  "The product combines the lightweight feel of a serum with the moisturising power of a cream, while its distinctive heart-shaped design turns an everyday skincare essential into a stylish accessory."
+                ],
+                "also_involves": []
+              },
+              "change_id": "f8c5af75-8867-442d-91df-0442f5e68f5f",
+              "in_chat": true
+            },
+            {
+              "url": "https://www.princanada.com/2026/10/09/why-ysl-beautys-brought-its-global-block-party-to-toronto/",
+              "title": "Why YSL BEAUTY’s brought its Global Block Party to Toronto - PR In Canada",
+              "date": "2026-10-09T12:00:00.000Z",
+              "mentions": 9,
+              "via": "exa",
+              "ai": {
+                "tries": 1,
+                "text_chars": 2135,
+                "signal_number": 26,
+                "importance": "Medium",
+                "event_date": null,
+                "about_competitor": true,
+                "real_action": true,
+                "also_involves": []
+              },
+              "outcome": "saved",
+              "change": {
+                "signal": "Strategic partnerships",
+                "type": "Partnerships & Alliances",
+                "title": "YSL Beauty partners with Faulhaber for Toronto Block Party",
+                "summary": "YSL Beauty partnered with public relations agency Faulhaber to execute the Toronto stop of its global Block Party series, blending high-end luxury beauty with local sports culture.",
+                "importance": "Medium",
+                "event_date": "2026-10-09",
+                "event_date_from": "article",
+                "key_facts": [
+                  "To execute the Toronto stop of YSL Beauty's global “Block Party” series, public relations agency Faulhaber helped conceptualize and manage an immersive event that blended high-end luxury beauty with local sports culture.",
+                  "The approach also helped bring the launches of MAKE ME BLUSH CREAM and BLACK OPIUM PINK GLAZE into a broader cultural conversation, moving beyond a traditional product-focused beauty event to create an experience rooted in Canadian nostalgia and designed to resonate across beauty, fashion, music"
+                ],
+                "also_involves": []
+              },
+              "change_id": "2a7bf57e-7ce5-4685-b500-adeaa9f5f6ba",
+              "in_chat": true
+            },
+            {
+              "url": "https://dailystyle.cz/arket-seversky-minimalismus-v-praze/",
+              "title": "ARKET: Severský minimalismus v Praze – DailyStyle.cz",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://dailystyle.cz/27-designblok-oslavuje-odvahu-a-zeny-v-designu-a-architekture/",
+              "title": "27. Designblok oslavuje odvahu a ženy v designu a architektuře – DailyStyle.cz",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://propmark.com.br/anunciantes/demi-lovato-e-a-protagonista-de-acao-de-moca-para-o-dia-do-brigadeiro/",
+              "title": "Demi Lovato é a protagonista de ação de Moça para o Dia do Brigadeiro – propmark",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://dailystyle.cz/vasky-predstavuji-novinky-spoluprace-s-tonakem-kolekce-obleceni-ci-podcast/",
+              "title": "Vasky představují novinky: Spolupráce s Tonakem, kolekce oblečení či podcast – DailyStyle.cz",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://www.marktforschung.de/marktforschung/a/neues-von-der-insight250-agf-und-gik-heute-morgen-und-dem-spiegel-institut/",
+              "title": "Branchennews: Neues von der Insight250, AGF und GIK, Heute & Morgen und dem Spiegel Institut | marktforschung.de",
+              "date": "2026-10-09T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            },
+            {
+              "url": "https://panele.lt/grozis/ysl-beauty-grozio-ir-parfumerijos-naujienos-nuo-geidziamiausiu-skaistalu-iki-gundanciu-aromatu",
+              "title": "„YSL Beauty“ grožio ir parfumerijos naujienos",
+              "date": "2026-10-07T12:00:00.000Z",
+              "outcome": "dropped",
+              "reason": "not in English",
+              "step": "code check"
+            }
+          ]
+        }
+      },
+      "joined": {
+        "joined": 0,
+        "notes": []
+      },
+      "cards": {
+        "written": 5,
+        "repaired": 0,
+        "failed": 0,
+        "notes": []
+      }
+    }
+  ]
+}

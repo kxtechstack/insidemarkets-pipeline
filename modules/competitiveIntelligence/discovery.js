@@ -765,7 +765,7 @@ async function findSources(comp, profile, { resetDomains = false, counter = make
   for (const p of products.good) {
     found.push({
       source_type: 'product', url: p.url, product_name: p.name, status: 'active', found_via: 'sitemap_or_search',
-      fetch_method: p.via, check_frequency: 'weekly',
+      fetch_method: p.via, check_frequency: 'daily', // page watch compares the content every day
     });
   }
   const needsCheck = !shopHost || !press || companyGuessed || notes.some((n) => /please (add|check|confirm)/i.test(n));

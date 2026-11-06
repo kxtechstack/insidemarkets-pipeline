@@ -1640,8 +1640,9 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
   return { attempted: failedArticles.length, succeeded, stoppedEarly };
 };
 
-module.exports = {
-  processArticlesForRelevance,
+   module.exports = {
+     embedText,
+     processArticlesForRelevance,
   processQueueInBatches,
   RateLimitAbortError, // NEW: so processQueueInBatches and callers can identify it
   setupPolicyCollection, // CHANGED: exported so ragChat.js can also ensure indexes exist

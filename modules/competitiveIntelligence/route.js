@@ -13,6 +13,16 @@
  *  PATCH /competitive-radar/competitors/:competitorId          admin fixes website / parent site / aliases
  *  POST  /competitive-radar/sources                            admin adds a source by hand
  *  PATCH /competitive-radar/sources/:sourceId                  admin approves / rejects / edits a source
+ *  POST  /competitive-radar/pages/:clientId                     check watched pages now  body {competitorId?, dryRun?, force?}
+ *
+ *  Daily news run (news / own website / press -> competitor changes):
+ *  POST  /competitive-radar/news/:clientId          "Run now"   body {competitorId?, sections?, days?, dryRun?}
+ *  GET   /competitive-radar/activity/:clientId      FRONTEND bottom section: live cards + their signals  ?competitorId=&category=&importance=&days=&limit=
+ *  GET   /competitive-radar/changes/:clientId       saved changes (all statuses, newest first)  ?competitorId=&status=&limit=
+ *  GET   /competitive-radar/log/:clientId           every article looked at + why    ?competitorId=&runId=&outcome=&limit=
+ *  Daily run: at the client's schedule time from the admin console (modules/scheduler.js).
+ *  Backup timer: CI_NEWS_TIME (India time, default 06:30), only for CI clients with no schedule time. CI_NEWS_TIME=off turns it off.
+ *  Timer: every CI_REPAIR_MINUTES (default 30) re-sends changes that did not reach the chat database.
  *
  * Finding sources takes 1-3 minutes per competitor, so those calls answer 202
  * straight away and the screen re-loads GET .../competitors/:clientId every few seconds.
@@ -22,6 +32,10 @@ const { createClient } = require('@supabase/supabase-js');
 const { syncCompetitorsForClient, listCiClients } = require('./competitorSync');
 const { discoverCompetitor, discoverClient } = require('./discovery');
 const { hostOf, rootDomain, clean } = require('./webTools');
+const cron = require('node-cron');
+const { runNewsForClient, closeStuckRuns, isRunning: newsIsRunning, summarise } = require('./newsRun');
+const { repairPendingChanges } = require('./changeStore');
+const { runPagesForClient, detectPageType } = require('./pageWatch');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const admin = () => supabase.schema('admin');
@@ -231,9 +245,18 @@ function registerCompetitiveRadarRoute(app) {
   // Admin adds a source by hand
   // -------------------------------------------------------------------
   app.post('/competitive-radar/sources', async (req, res) => {
-    const b = req.body || {};
+    const b = { ...(req.body || {}) };
     if (!UUID.test(b.competitor_id || '')) return bad(res, 'competitor_id is required');
-    if (!SOURCE_TYPES.includes(b.source_type)) return bad(res, `source_type must be one of ${SOURCE_TYPES.join(', ')}`);
+    // admin only pastes a link: we decide if it is a LIST page (blog / news category -> new posts are read)
+    // or a SINGLE page (product / pricing -> its content is compared every day)
+    let detected = null;
+    if ((!b.source_type || b.source_type === 'auto') && b.url) {
+      const u = cleanUrl(b.url);
+      if (!u) return bad(res, 'a valid link is required');
+      detected = await detectPageType(u);
+      b.source_type = detected.type;
+    }
+    if (!SOURCE_TYPES.includes(b.source_type)) return bad(res, `source_type must be one of ${SOURCE_TYPES.join(', ')} (or 'auto' with a url)`);
 
     const { data: comp, error: cErr } = await admin().from('competitors')
       .select('id, client_id').eq('id', b.competitor_id).maybeSingle();
@@ -247,7 +270,7 @@ function registerCompetitiveRadarRoute(app) {
       origin: 'admin',
       status: 'active',
       found_via: 'admin',
-      check_frequency: FREQUENCIES.includes(b.check_frequency) ? b.check_frequency : (b.source_type === 'product' ? 'weekly' : 'daily'),
+      check_frequency: FREQUENCIES.includes(b.check_frequency) ? b.check_frequency : 'daily',
     };
     if (URL_TYPES.includes(b.source_type)) {
       row.url = cleanUrl(b.url);
@@ -268,7 +291,7 @@ function registerCompetitiveRadarRoute(app) {
       if (/duplicate key/i.test(error.message)) return bad(res, 'this source is already added', 409);
       return bad(res, error.message, 500);
     }
-    return res.status(201).json({ ok: true, source: data });
+    return res.status(201).json({ ok: true, source: data, detected: detected ? detected.note : undefined });
   });
 
   // -------------------------------------------------------------------
@@ -343,6 +366,222 @@ function registerCompetitiveRadarRoute(app) {
     };
     setTimeout(tick, 60 * 1000);                       // first run 1 minute after start
     setInterval(tick, everyMin * 60 * 1000).unref();
+  }
+
+  // -------------------------------------------------------------------
+  // Daily news run: "Run now"
+  // dryRun = read everything, save nothing, answer with the full report (takes minutes)
+  // -------------------------------------------------------------------
+  app.post('/competitive-radar/news/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    const b = req.body || {};
+    if (b.competitorId && !UUID.test(b.competitorId)) return bad(res, 'bad competitorId');
+    const sections = Array.isArray(b.sections) ? b.sections.filter((x) => ['press', 'blog', 'own_site', 'news'].includes(x)) : undefined;
+    const days = b.days !== undefined ? Number(b.days) : undefined;
+    if (days !== undefined && !(days >= 1 && days <= 60)) return bad(res, 'days must be 1 to 60');
+    const opts = { competitorId: b.competitorId, sections, days, dryRun: !!b.dryRun, triggeredBy: 'manual' };
+
+    if (newsIsRunning(clientId)) return res.status(409).json({ ok: false, error: 'News run already going for this client. Please wait.' });
+    if (opts.dryRun) {
+      try {
+        return res.json({ ok: true, dryRun: true, result: await runNewsForClient(clientId, opts) });
+      } catch (e) {
+        return bad(res, e.message, 500);
+      }
+    }
+    setImmediate(async () => {
+      try {
+        const r = await runNewsForClient(clientId, opts);
+        console.log(`[CI news] manual run done ${clientId}`, JSON.stringify(summarise(r)));
+      } catch (e) {
+        console.error(`[CI news] manual run failed ${clientId}: ${e.message}`);
+      }
+    });
+    return res.status(202).json({ ok: true, message: 'News run started. Check GET /competitive-radar/competitors/:clientId (last_run per section) or the log.' });
+  });
+
+  // -------------------------------------------------------------------
+  // Page watch: "Check pages now" (product / pricing pages compared with the last copy)
+  // body {competitorId?, dryRun?, force?}  force = check even pages not due today
+  // -------------------------------------------------------------------
+  app.post('/competitive-radar/pages/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    const b = req.body || {};
+    if (b.competitorId && !UUID.test(b.competitorId)) return bad(res, 'bad competitorId');
+    const opts = { competitorId: b.competitorId, dryRun: !!b.dryRun, force: !!b.force, triggeredBy: 'manual' };
+    if (opts.dryRun) {
+      try {
+        return res.json({ ok: true, dryRun: true, result: await runPagesForClient(clientId, opts) });
+      } catch (e) {
+        return bad(res, e.message, 500);
+      }
+    }
+    setImmediate(async () => {
+      try {
+        const r = await runPagesForClient(clientId, opts);
+        console.log(`[CI pages] manual run done ${clientId}`, JSON.stringify((r.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped }))));
+      } catch (e) {
+        console.error(`[CI pages] manual run failed ${clientId}: ${e.message}`);
+      }
+    });
+    return res.status(202).json({ ok: true, message: 'Page check started. See GET /competitive-radar/log/:clientId for each page.' });
+  });
+
+  // -------------------------------------------------------------------
+  // Saved changes (for checking; the CI tab itself reads competitor_changes_live)
+  // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // FRONTEND: bottom section "Competitor activity"
+  // GET /competitive-radar/activity/:clientId   ?competitorId=&category=&importance=High,Critical&days=90&limit=100
+  // One CARD per event (title, summary, business impact, category, importance, signal count, updated date)
+  // with its SIGNALS (each source: title, summary, main + sub category, date, link, source type).
+  // Only live cards: saved, checked and in the chat (competitor_changes_live / competitor_signals_live).
+  // -------------------------------------------------------------------
+  const SOURCE_LABEL = { news: 'News', press: 'Press release', blog: 'Blog', own_site: 'Company website', product: 'Product page' };
+  app.get('/competitive-radar/activity/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    const limit = Math.min(Number(req.query.limit) || 100, 300);
+    const days = Math.min(Number(req.query.days) || 90, 365);
+    const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+    let q = supabase.from('competitor_changes_live')
+      .select('id, competitor_id, organization, category, signal_name, signal_title, summary, business_impact, importance, signal_count, last_signal_at, event_date, country')
+      .eq('client_id', clientId).gte('event_date', since)
+      .order('last_signal_at', { ascending: false, nullsFirst: false }).order('event_date', { ascending: false }).limit(limit);
+    if (req.query.competitorId && UUID.test(req.query.competitorId)) q = q.eq('competitor_id', req.query.competitorId);
+    if (req.query.category) q = q.eq('category', String(req.query.category));
+    if (req.query.importance) q = q.in('importance', String(req.query.importance).split(',').map((x) => x.trim()));
+    const { data: cards, error } = await q;
+    if (error) return bad(res, error.message, 500);
+    const ids = (cards || []).map((c) => c.id);
+    let sigs = [];
+    if (ids.length) {
+      const { data, error: e2 } = await supabase.from('competitor_signals_live')
+        .select('id, change_id, signal_title, summary, category, signal_name, event_date, published_date, url, source_domain, source_kind, key_facts')
+        .in('change_id', ids).order('event_date', { ascending: false });
+      if (e2) return bad(res, e2.message, 500);
+      sigs = data || [];
+    }
+    const out = (cards || []).map((c) => {
+      const signals = sigs.filter((s) => s.change_id === c.id).map((s) => ({
+        id: s.id,
+        title: s.signal_title,
+        summary: s.summary || '',
+        category: s.category,              // main category
+        sub_category: s.signal_name,       // sub category
+        date: s.event_date || s.published_date,
+        url: s.url,
+        source: s.source_domain,
+        source_type: SOURCE_LABEL[s.source_kind] || s.source_kind,
+        key_facts: Array.isArray(s.key_facts) ? s.key_facts : [],
+      }));
+      return {
+        id: c.id,
+        competitor_id: c.competitor_id,
+        competitor: c.organization,
+        category: c.category,              // main category (the group on the screen)
+        sub_category: c.signal_name,
+        title: c.signal_title,
+        summary: c.summary,
+        business_impact: Array.isArray(c.business_impact) ? c.business_impact : [],
+        importance: c.importance,
+        signal_count: signals.length || c.signal_count || 1,
+        updated: c.last_signal_at || c.event_date,
+        country: c.country,
+        signals,
+      };
+    });
+    const categories = Object.entries(out.reduce((m, c) => ({ ...m, [c.category]: (m[c.category] || 0) + 1 }), {}))
+      .map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+    res.json({ client_id: clientId, total: out.length, categories, cards: out });
+  });
+
+  app.get('/competitive-radar/changes/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    let q = supabase.from('competitor_changes')
+      .select('id, organization, category, signal_name, signal_title, summary, importance, confidence, event_date, source_kind, status, status_reason, qdrant_synced_at, related_change_ids, found_at, competitor_change_evidence(url, source_kind, published_date)')
+      .eq('client_id', clientId).order('event_date', { ascending: false }).limit(limit);
+    if (req.query.competitorId && UUID.test(req.query.competitorId)) q = q.eq('competitor_id', req.query.competitorId);
+    if (req.query.status) q = q.eq('status', String(req.query.status));
+    const { data, error } = await q;
+    if (error) return bad(res, error.message, 500);
+    const rows = (data || []).map(({ competitor_change_evidence: ev, ...c }) => ({ ...c, sources: ev || [], source_count: (ev || []).length }));
+    const byStatus = rows.reduce((m, r) => ({ ...m, [r.status]: (m[r.status] || 0) + 1 }), {});
+    return res.json({ ok: true, total: rows.length, by_status: byStatus, changes: rows });
+  });
+
+  // -------------------------------------------------------------------
+  // Every article looked at, and what happened to it ("why is X not shown?")
+  // -------------------------------------------------------------------
+  app.get('/competitive-radar/log/:clientId', async (req, res) => {
+    const { clientId } = req.params;
+    if (!UUID.test(clientId)) return bad(res, 'bad clientId');
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    let q = supabase.from('competitor_ingestion_log')
+      .select('created_at, competitor_id, source_kind, outcome, reason, title, url, change_id, details, run_id')
+      .eq('client_id', clientId).order('created_at', { ascending: false }).limit(limit);
+    if (req.query.competitorId && UUID.test(req.query.competitorId)) q = q.eq('competitor_id', req.query.competitorId);
+    if (req.query.runId && UUID.test(req.query.runId)) q = q.eq('run_id', req.query.runId);
+    if (req.query.outcome) q = q.eq('outcome', String(req.query.outcome));
+    const { data, error } = await q;
+    if (error) return bad(res, error.message, 500);
+    const byOutcome = (data || []).reduce((m, r) => ({ ...m, [r.outcome]: (m[r.outcome] || 0) + 1 }), {});
+    return res.json({ ok: true, total: (data || []).length, by_outcome: byOutcome, log: data || [] });
+  });
+
+  // -------------------------------------------------------------------
+  // Backup timer: daily CI run for CI clients WITHOUT a schedule time in the admin console
+  // (clients with a schedule time are run by the admin scheduler, modules/scheduler.js)
+  // -------------------------------------------------------------------
+  const newsTime = String(process.env.CI_NEWS_TIME || '06:30').trim();
+  const m = newsTime.match(/^(\d{1,2}):(\d{2})$/);
+  if (newsTime.toLowerCase() !== 'off' && m) {
+    cron.schedule(`${Number(m[2])} ${Number(m[1])} * * *`, async () => {
+      console.log('[CI news] daily run starting');
+      try {
+        await closeStuckRuns();
+        // clients with a schedule time in the admin console are run by the admin scheduler (modules/scheduler.js);
+        // this timer is only the backup for CI clients that have NO schedule time set
+        const { data: scheduled } = await admin().from('prompts').select('client_id')
+          .eq('is_active', true).eq('status', 'Running').not('schedule_time', 'is', null);
+        const hasSchedule = new Set((scheduled || []).map((x) => x.client_id));
+        for (const clientId of await listCiClients()) {
+          if (hasSchedule.has(clientId)) continue;
+          const r = await runNewsForClient(clientId, { triggeredBy: 'schedule' });
+          console.log(`[CI news] daily run ${clientId}`, JSON.stringify(summarise(r)));
+          // then the watched pages (product / pricing pages): compare with the last copy
+          try {
+            const p = await runPagesForClient(clientId, { triggeredBy: 'schedule' });
+            console.log(`[CI pages] daily run ${clientId}`, JSON.stringify((p.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped, error: c.error }))));
+          } catch (e) {
+            console.error(`[CI pages] daily run ${clientId} failed: ${e.message}`);
+          }
+        }
+      } catch (e) {
+        console.error(`[CI news] daily run failed: ${e.message}`);
+      }
+    }, { timezone: 'Asia/Kolkata' });
+    console.log(`[CI] daily news run set for ${newsTime} India time`);
+  } else {
+    console.log(`[CI] daily news run is OFF (CI_NEWS_TIME=${newsTime})`);
+  }
+
+  // Timer: changes that did not reach the chat database yet -> try again; old 'running' runs -> failed
+  const repairMin = Number(process.env.CI_REPAIR_MINUTES ?? 30);
+  if (repairMin > 0) {
+    setInterval(async () => {
+      try {
+        const r = await repairPendingChanges();
+        const stuck = await closeStuckRuns();
+        if (r.checked || stuck) console.log(`[CI repair] chat copies fixed ${r.fixed}/${r.checked}, stuck runs closed ${stuck}`);
+      } catch (e) {
+        console.error(`[CI repair] ${e.message}`);
+      }
+    }, repairMin * 60 * 1000).unref();
   }
 
   console.log('[CI] Competitive Radar routes registered');

@@ -16,7 +16,43 @@ const LIMITS = {
   PAUSE_BETWEEN_PAGES_MS: 300, // be polite to websites
   COPY_FROM_OTHER_CLIENT_DAYS: 30, // reuse another client's discovery if newer than this
   STUCK_FINDING_MINUTES: 15,   // a 'finding' status older than this is treated as stuck
+
+  // ---- daily news run (news / own website / press) ----
+  NEWS_FIRST_RUN_DAYS: 30,     // first run for a competitor looks back 30 days, so the tab is not empty
+  NEWS_MIN_DAYS: 2,            // normal daily run looks back at least 2 days (overlap is safe: links are checked)
+  NEWS_MAX_DAYS: 7,            // ...and at most 7 days, even if the server was off for longer
+  NEWS_RESULTS_PER_SEARCH: 20, // links asked from Exa per search
+  MAX_AI_READS_PER_SECTION: 15,      // articles the AI reads per competitor per section per run
+  MAX_AI_READS_FIRST_RUN: 25,        // ...on the first (30 day) run
+  MAX_FIRECRAWL_PER_NEWS_RUN: 3,     // press pages that block us
+  ARTICLE_CHARS_FOR_AI: 6000,        // article text sent to the AI (start of the article)
+  MIN_ARTICLE_CHARS: 400,            // less text than this = nothing to read
+  MAX_EVENT_AGE_DAYS: 60,            // event older than this (vs article date) = history story, dropped
+  MERGE_WINDOW_DAYS: 7,              // same competitor + same event within 7 days = one change
+  MERGE_SIMILARITY_SAME_TYPE: 0.8,   // how alike two titles must be to join them (same change type)
+  MERGE_SIMILARITY_ANY_TYPE: 0.9,    // ...or very alike, even if the AI picked another type
+  RETRY_FAILED_DAYS: 7,              // articles that failed (AI down etc.) are tried again for 7 days
+  QDRANT_MAX_ATTEMPTS: 3,            // after 3 failed writes to the chat database -> 'failed'
+  RUN_STUCK_HOURS: 2,                // a 'running' run older than this is marked failed
 };
+
+// Prompts (rows in public.prompts). The text lives in the database, never in code.
+const PROMPTS = {
+  CHANGE_READER: 'ci_change_reader_v1',
+};
+
+// Qdrant: CI changes go into the same collection the DI chat searches
+const QDRANT = {
+  COLLECTION: process.env.POLICY_QDRANT_COLLECTION || 'policy_articles',
+  INDEX_FIELDS: ['article_id', 'client_id', 'industry', 'module_id', 'change_id', 'submodule_id', 'signal_id',
+    'competitor', 'competitor_id', 'category', 'importance', 'kind'],
+};
+
+// Never read as news (social media, shops, video)
+const NEWS_SKIP_HOSTS = [
+  'linkedin.com', 'facebook.com', 'instagram.com', 'x.com', 'twitter.com', 'youtube.com', 'tiktok.com',
+  'pinterest.com', 'reddit.com', 'quora.com', 'amazon.com', 'amazon.co.uk', 'amazon.in', 'ebay.com', 'ebay.co.uk',
+];
 
 // Never the competitor's own website (shops, social, media, wire services)
 const SKIP_HOSTS = [
@@ -58,4 +94,4 @@ const COUNTRY_CODES = new Set(('us uk gb au in ca sg my ae sa eu de fr es it pt 
 // 2-letter endings used as normal brand websites, not countries
 const GENERIC_TLDS = new Set(['io', 'co', 'ai', 'me', 'tv', 'app', 'xyz', 'gg', 'ly', 'to', 'fm']);
 
-module.exports = { CI_MODULE_ID, LIMITS, SKIP_HOSTS, PRESS_PATHS, COUNTRY_PROFILES, DEFAULT_COUNTRY, COUNTRY_CODES, GENERIC_TLDS };
+module.exports = { CI_MODULE_ID, LIMITS, PROMPTS, QDRANT, NEWS_SKIP_HOSTS, SKIP_HOSTS, PRESS_PATHS, COUNTRY_PROFILES, DEFAULT_COUNTRY, COUNTRY_CODES, GENERIC_TLDS };

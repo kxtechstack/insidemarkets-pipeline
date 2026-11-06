@@ -74,8 +74,20 @@ async function exaSearch(query, opts = {}, counter) {
   if (opts.startPublishedDate) body.startPublishedDate = opts.startPublishedDate;
   if (opts.category) body.category = opts.category;
   if (opts.highlights) body.contents = { highlights: true };
+  if (opts.text) body.contents = { text: { maxCharacters: opts.text === true ? 8000 : opts.text } };
   const r = await exaPost('/search', body, counter);
   return r.results || [];
+}
+
+// Read one page through Exa (for pages that block us). Gives text + date when Exa knows it.
+async function exaContents(url, counter) {
+  try {
+    const r = await exaPost('/contents', { urls: [url], text: { maxCharacters: 8000 } }, counter);
+    const x = (r.results && r.results[0]) || {};
+    return { text: x.text || '', title: x.title || '', publishedDate: x.publishedDate || null };
+  } catch (e) {
+    return { text: '', title: '', publishedDate: null };
+  }
 }
 
 async function exaRead(url, counter) {
@@ -287,7 +299,7 @@ function readPriceFromHtml(html) {
 module.exports = {
   norm, nameKey, nameWords, hostOf, rootDomain, sameSite, isSkippedHost, clean, sleep, daysAgoIso,
   countryProfileFor, makeCounter,
-  exaSearch, exaRead,
+  exaSearch, exaRead, exaContents,
   fetchDirect, fetchFirecrawl, fetchPage, looksBlocked,
   DATE_RE, countDates, looksSingleProduct, readPriceFromHtml,
 };
