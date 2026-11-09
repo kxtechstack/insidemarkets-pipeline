@@ -1,0 +1,116 @@
+{
+  "_how_it_works": "One entry per category (the category name as in Monitoring Scope). Each search sentence is sent to Exa news search; {competitor} is replaced by the competitor name. Only categories ticked for the client are searched. A ticked category that is not in this file uses the old automatic search. Later these move to the admin console.",
+
+  "General Updates": {
+    "about": "Financial results, annual / sustainability reports, outlook, big company announcements",
+    "searches": [
+      "{competitor} reports quarterly results net sales and profit",
+      "{competitor} raises or cuts its full-year outlook guidance",
+      "{competitor} publishes annual report or sustainability report"
+    ]
+  },
+  "Product & Feature Launches": {
+    "about": "New products, new ranges, new features, relaunches, discontinued products",
+    "searches": [
+      "{competitor} launches new product",
+      "{competitor} unveils new collection range or line",
+      "{competitor} introduces new feature or formula",
+      "{competitor} discontinues product line"
+    ]
+  },
+  "Bundles & Packaging": {
+    "about": "New packaging, refills, gift sets, bundles, limited editions, sustainable packaging",
+    "searches": [
+      "{competitor} new packaging design or refillable packaging",
+      "{competitor} limited edition gift set or bundle",
+      "{competitor} sustainable packaging recycled materials"
+    ]
+  },
+  "Pricing & Promotions": {
+    "about": "Price rises or cuts, discounts, promotions, loyalty programmes, subscription plans",
+    "searches": [
+      "{competitor} raises prices",
+      "{competitor} cuts prices or launches discount promotion",
+      "{competitor} launches loyalty programme or membership offer"
+    ]
+  },
+  "Marketing & Social Campaigns": {
+    "about": "Ad campaigns, brand ambassadors, influencer and social media campaigns, events, sponsorships",
+    "searches": [
+      "{competitor} launches new advertising campaign",
+      "{competitor} names new brand ambassador or face of the brand",
+      "{competitor} social media campaign influencer partnership",
+      "{competitor} sponsorship or pop-up event"
+    ]
+  },
+  "Brand & Positioning": {
+    "about": "Rebranding, new logo or identity, repositioning, new brand purpose or target customer",
+    "searches": [
+      "{competitor} rebrand new logo or brand identity",
+      "{competitor} repositions brand new strategy target customers",
+      "{competitor} brand relaunch premium or mass market shift"
+    ]
+  },
+  "Partnerships & Alliances": {
+    "about": "Partnerships with companies, retailers, tech firms, collaborations, licensing deals",
+    "searches": [
+      "{competitor} announces strategic partnership",
+      "{competitor} collaboration with brand or designer",
+      "{competitor} signs licensing or distribution agreement with retailer"
+    ]
+  },
+  "M&A, Funding & Investments": {
+    "about": "Acquisitions, mergers, sale of brands, stakes, investments in plants, funds or start-ups",
+    "searches": [
+      "{competitor} acquires company or brand",
+      "{competitor} sells brand or business divestiture",
+      "{competitor} invests million in new plant facility or start-up",
+      "{competitor} takes stake in company venture fund"
+    ]
+  },
+  "Leadership & Org Changes": {
+    "about": "New CEO or executives, leaders leaving, restructuring, layoffs, big hiring plans",
+    "searches": [
+      "{competitor} appoints new CEO or chief executive",
+      "{competitor} executive leaves or steps down",
+      "{competitor} restructuring job cuts layoffs",
+      "{competitor} reorganisation new leadership team"
+    ]
+  },
+  "Geographic & Segment Expansion": {
+    "about": "Entering new countries or cities, new stores, new channels (e-commerce, marketplaces), new customer segments",
+    "searches": [
+      "{competitor} enters new market country launch",
+      "{competitor} opens first store in new city or country",
+      "{competitor} launches on new e-commerce platform or marketplace",
+      "{competitor} expands into new category or customer segment"
+    ]
+  },
+  "Technology & AI Adoption": {
+    "about": "AI tools, new technology, digital platforms, apps, data platforms, tech partnerships",
+    "searches": [
+      "{competitor} launches AI tool or generative AI feature",
+      "{competitor} adopts new technology digital platform",
+      "{competitor} partners with technology company on AI data cloud",
+      "{competitor} launches new app or virtual try-on"
+    ]
+  },
+  "Customer Wins & Reputation": {
+    "about": "Awards, rankings, certifications, major customer or retailer wins, recalls and complaints, public criticism",
+    "searches": [
+      "{competitor} wins award",
+      "{competitor} named in ranking or certification",
+      "{competitor} product recall or customer complaints",
+      "{competitor} faces criticism backlash"
+    ]
+  },
+  "Regulatory, Legal & Compliance": {
+    "about": "Lawsuits, fines, regulator actions, investigations, settlements, new rules affecting the company",
+    "searches": [
+      "{competitor} lawsuit court case",
+      "{competitor} fined by regulator investigation",
+      "{competitor} settlement legal dispute",
+      "{competitor} data breach or compliance issue"
+    ]
+  }
+}

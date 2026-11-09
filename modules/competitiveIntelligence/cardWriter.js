@@ -207,6 +207,92 @@ function fallbackSummary(ctx) {
   return clean(parts.join(' ') || (ctx.card && ctx.card.summary) || '', 1200);
 }
 
+// ---------------------------------------------------------------------
+// A card with SEVERAL signals: the title and summary must be about ALL of them, not one.
+// Each signal has its own key words (from its title, not the competitor's name, not common words).
+// ---------------------------------------------------------------------
+const COVER_STOP = new Set(('the a an and or of for to in on at by with from into over its their this that these those new '
+  + 'launch launches launched launching announce announces announced unveils unveiled introduces introduced reveals revealed '
+  + 'company group brand brands beauty news update updates report reports says said will has have more than after year years '
+  + 'first latest global official how why what about').split(' '));
+const tokens = (t) => norm(t).replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+function keyWords(text, competitor) {
+  const comp = new Set(tokens(competitor));
+  return [...new Set(tokens(text).filter((w) => w.length >= 4 && !COVER_STOP.has(w) && !comp.has(w) && !/^\d+$/.test(w)))];
+}
+// distinct signals of the card (same headline twice counts once)
+function distinctSignals(ctx) {
+  const out = [];
+  for (const s of ctx.signals || []) {
+    const words = keyWords(s.signal_title || s.title, ctx.competitor);
+    if (!words.length) continue;
+    if (out.some((o) => words.filter((w) => o.words.includes(w)).length >= Math.min(3, words.length))) continue;
+    out.push({ s, words, sumWords: keyWords(splitSentences(s.summary)[0] || '', ctx.competitor).slice(0, 12) });
+  }
+  return out;
+}
+// a signal is "covered" when the text has 2 of its key words (from its title OR its summary's first sentence)
+const covers = (text, sig, need = 2) => {
+  const t = new Set(tokens(text));
+  const hit = (words) => words.filter((w) => t.has(w)).length >= Math.min(need, words.length);
+  return hit(sig.words) || (sig.sumWords && sig.sumWords.length && hit(sig.sumWords));
+};
+// short name of one signal for a combined title: its title without the competitor name, max 7 words
+function shortMove(s, competitor) {
+  const comp = new Set(tokens(competitor).concat(['the', 'companies', 'company', 'group', 's']));
+  const words = cleanSourceTitle(s.signal_title || s.title).split(/\s+/).filter(Boolean);
+  // drop the competitor's name at the start ("The Estée Lauder Companies", "Lancôme's", "YSL Beauty:")
+  while (words.length > 2 && tokens(words[0]).every((w) => comp.has(w))) words.shift();
+  // max 7 words, and never end on a small word ("faster than", "uses fake to")
+  let cut = words.slice(0, 7);
+  const SMALL = /^(than|to|with|for|of|and|or|the|a|an|in|on|at|by|from|as|its|their|more|new|fake|after|before|into)$/i;
+  while (cut.length > 3 && SMALL.test(cut[cut.length - 1].replace(/[^\w]/g, ''))) cut.pop();
+  return cut.join(' ').replace(/[,.;:]$/, '');
+}
+/** checks one composed card; returns what is missing */
+function coverage(title, summary, ctx) {
+  const sigs = distinctSignals(ctx);
+  if (sigs.length < 2) return { sigs, titleOk: true, missing: [] };
+  // title: names at least 2 of the moves (1 key word each is enough in a short title), or says how many
+  const inTitle = sigs.filter((x) => covers(title, x, 1)).length;
+  const countWord = new RegExp(`\\b(${sigs.length}|two|three|four|five|six|several|multiple)\\b`, 'i').test(title);
+  // summary: every move must be in it - for a big card the 5 newest are enough (a summary is not a list of all)
+  const missing = sigs.slice(0, 5).filter((x) => !covers(summary, x));
+  return { sigs, titleOk: inTitle >= 2 || countWord, missing };
+}
+// cut a summary at a sentence end (never in the middle of a word) and drop repeated sentences
+function tidySummary(text, maxSentences = 6) {
+  const out = [];
+  for (const sen of splitSentences(text)) {
+    const w = new Set(tokens(sen));
+    const dup = out.some((o) => { const ow = tokens(o); return ow.filter((x) => w.has(x)).length >= Math.max(4, Math.ceil(ow.length * 0.6)); });
+    if (!dup) out.push(sen);
+    if (out.length >= maxSentences) break;
+  }
+  return out.join(' ');
+}
+/** last repair: a combined title and a summary sentence for every signal that was left out */
+function coverAll(composed, ctx) {
+  const cov = coverage(composed.title, composed.summary, ctx);
+  const out = { ...composed, repairs: [...composed.repairs] };
+  if (cov.sigs.length >= 2 && !cov.titleOk) {
+    const moves = cov.sigs.slice(0, 2).map((x) => shortMove(x.s, ctx.competitor)).filter(Boolean);
+    const more = cov.sigs.length > 2 ? ` and ${cov.sigs.length - 2} more` : '';
+    out.title = cutTitle(`${ctx.competitor}: ${moves.join('; ')}${more}`, 160);
+    out.repairs.push('title made from all signals');
+  }
+  let summary = out.summary;
+  if (cov.sigs.length >= 2 && cov.missing.length) {
+    const add = cov.missing.map((x) => splitSentences(x.s.summary)[0]).filter((x) => x && isEnglish(x));
+    if (add.length) {
+      summary = `${summary} ${add.join(' ')}`;
+      out.repairs.push(`summary: added ${add.length} signal(s) it left out`);
+    }
+  }
+  out.summary = clean(tidySummary(summary, Math.max(4, Math.min(8, cov.sigs.length + 1))), 1400);
+  return out;
+}
+
 /**
  * Build the final card text from the AI answer. NEVER throws away the whole card.
  * @param ans  parsed AI answer (or null if the AI gave no valid JSON)
@@ -323,7 +409,11 @@ function composeCard(ans, ctx, rawSnippet) {
       : 'business impact = standard line (the AI gave no impact items)');
   }
 
-  return { title, summary, impact: bullets, impactCount: bullets.length, repairs, itemProblems };
+  const cov = coverage(title, summary, ctx);
+  const coverProblems = [];
+  if (!cov.titleOk) coverProblems.push(`The "title" is about only one of the ${cov.sigs.length} signals. Write ONE title that names all the moves together (e.g. "${ctx.competitor} launches X and discontinues Y"), not one source headline.`);
+  if (cov.missing.length) coverProblems.push(`The "summary" leaves out these signals: ${cov.missing.map((x) => `"${clean(x.s.signal_title || x.s.title, 90)}"`).join(', ')}. Write one short sentence for EVERY signal.`);
+  return { title, summary, impact: bullets, impactCount: bullets.length, repairs, itemProblems, coverProblems };
 }
 
 /** numbered FACTS list: the reader's checked key facts; a signal with none gives its first summary sentences */
@@ -370,7 +460,7 @@ async function writeCard(changeId) {
     category: card.category,
     signal_name: card.signal_name,
     signal_count: signals.length,
-    signals: sigLines.join('\n'),
+    signals: `${sigLines.join('\n')}\n\nTODAY IS ${new Date().toISOString().slice(0, 10)}. If a signal gives a date AFTER today, it has not happened yet: write it as a plan ("will launch on ...", "plans to open ..."), never as done ("launched on ...").`,
     facts: factLines.join('\n') || '(no facts - use only the sources above)',
   };
   const ctx = {
@@ -390,20 +480,23 @@ async function writeCard(changeId) {
     }
     const ans = parseJson(raw);
     const now = composeCard(ans, ctx, raw);
-    // keep the better of the two answers (more usable points)
-    if (!composed || now.impactCount >= composed.impactCount) composed = now;
-    // one more try when the AI gave fewer than 3 usable points
-    if (attempt === 1 && (!ans || composed.impactCount < 3)) {
+    // keep the better of the two answers (covers all signals first, then more usable points)
+    const score = (c) => (c.coverProblems.length ? 0 : 100) + c.impactCount;
+    if (!composed || score(now) >= score(composed)) composed = now;
+    // one more try when the AI gave fewer than 3 usable points, or the title / summary is about one signal only
+    if (attempt === 1 && (!ans || composed.impactCount < 3 || composed.coverProblems.length)) {
       messages.push({ role: 'assistant', content: clean(raw, 3000) });
       messages.push({ role: 'user', content: ans
-        ? `${now.itemProblems.length ? `Some points cannot be used:\n- ${now.itemProblems.join('\n- ')}\n` : ''}Fill at least 3 of the 4 business_impact angles (buyers, price, channels, products), each naming something from THIS card. Answer again with the full JSON only (title, summary and 3 to 4 business_impact points). Pick fact_number from the FACTS list.`
+        ? `${now.coverProblems.length ? `${now.coverProblems.join('\n')}\n` : ''}${now.itemProblems.length ? `Some points cannot be used:\n- ${now.itemProblems.join('\n- ')}\n` : ''}Fill at least 3 of the 4 business_impact angles (buyers, price, channels, products), each naming something from THIS card. Answer again with the full JSON only (title, summary and 3 to 4 business_impact points). Pick fact_number from the FACTS list.`
         : 'Your answer was not valid JSON. Answer again with the JSON only.' });
       continue;
     }
     break;
   }
 
-  const impact = composed.impact.length ? composed.impact : fallbackImpact(card);
+  composed = coverAll(composed, ctx);   // still about one signal only -> combined title / missing sentences added
+  const noRefs = (x) => String(x).replace(/[,;]?\s*\(?\b(see )?facts?\s*(#|no\.?|number)?\s*\d+\)?/gi, '').replace(/\s+([.,])/g, '$1').trim();
+  const impact = (composed.impact.length ? composed.impact : fallbackImpact(card)).map(noRefs);
   const chatText = store.buildChatText({ name: card.organization }, {
     title: composed.title, summary: composed.summary, event_date: card.event_date, importance: card.importance,
     signal: { category: card.category, name: card.signal_name },
@@ -439,4 +532,4 @@ async function writeDueCards(clientId, { competitorId, limit = 50 } = {}) {
   return out;
 }
 
-module.exports = { writeCard, writeDueCards, composeCard, buildFacts };
+module.exports = { writeCard, writeDueCards, composeCard, buildFacts, clientProfile };

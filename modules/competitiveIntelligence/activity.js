@@ -21,6 +21,7 @@
  *                         0 -> 'none', up to 1/3 -> 'low' (green), up to 2/3 -> 'medium' (orange), above -> 'high' (red)
  *   competitor_activity_type_totals one row per type (the Total column)
  *       total_30d, total_prev_30d, trend, sort_order (biggest total first, then A-Z)
+ *   competitor_strategic_shifts     the top section: top 3 types (no General Updates), see shifts.js
  *
  * Works for every client. Nothing is hardcoded.
  */
@@ -81,7 +82,8 @@ async function refreshActivity(clientId, opts = {}) {
 
   // 2. live cards -> their type (category)
   const cards = await readAll(() => supabase.from('competitor_changes_live')
-    .select('id, category').eq('client_id', clientId).order('id'));
+    .select('id, competitor_id, category, signal_name, signal_title, summary, importance, last_signal_at, event_date')
+    .eq('client_id', clientId).order('id'));
   const typeOf = new Map(cards.map((c) => [c.id, c.category || 'General Updates']));
 
   // 3. live signals -> count per competitor + type
@@ -165,8 +167,14 @@ async function refreshActivity(clientId, opts = {}) {
   await supabase.from('competitor_activity_live').delete().eq('client_id', clientId).lt('updated_at', stamp);
   await supabase.from('competitor_activity_type_totals').delete().eq('client_id', clientId).lt('updated_at', stamp);
 
+  // 7. STRATEGIC SHIFTS (top section): the top 3 types without General Updates, written by the AI.
+  //    Saved apart: if this fails, the counts above are still saved.
+  let shifts = null;
+  try { shifts = await require('./shifts').refreshShifts(clientId, { day, from, typeRows, compName }); } catch (e) { console.log(`[CI shifts] ${clientId}: ${e.message} (run sql/ci_017_strategic_shifts.sql)`); }
+
   return {
     day,
+    shifts,
     window: { from, to: day },
     compared_with: { from: prevFrom, to: prevTo },
     cells: cellRows.length,

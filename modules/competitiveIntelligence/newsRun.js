@@ -185,7 +185,11 @@ async function runNewsForCompetitor(competitorId, opts = {}) {
 
     const lb = opts.days ? { days: Number(opts.days), first: false } : await lookbackDays(comp.id, section);
     const since = new Date(Date.now() - lb.days * 864e5).toISOString();
-    const maxReads = lb.first || lb.days > LIMITS.NEWS_MAX_DAYS ? LIMITS.MAX_AI_READS_FIRST_RUN : LIMITS.MAX_AI_READS_PER_SECTION;
+    // how many articles the AI may read in this section: long look-back (first run / --days 60, 90) reads more
+    const longLookBack = lb.days > LIMITS.NEWS_FIRST_RUN_DAYS;
+    const maxReads = longLookBack ? Math.max(LIMITS.MAX_AI_READS_FIRST_RUN, Number(process.env.CI_BACKFILL_READS) || 60)
+      : lb.first || lb.days > LIMITS.NEWS_MAX_DAYS ? LIMITS.MAX_AI_READS_FIRST_RUN
+      : Math.max(LIMITS.MAX_AI_READS_PER_SECTION, Number(process.env.CI_DAILY_READS) || 30);
     const counter = makeCounter();
     const counts = { look_back_days: lb.days, fetched: 0, after_url_check: 0, read_by_ai: 0, saved: 0, merged: 0, dropped: 0, failed: 0, left_for_next_run: 0, retried: 0 };
     const report = { since: since.slice(0, 10), counts, notes: [], items: [] };
@@ -197,7 +201,13 @@ async function runNewsForCompetitor(competitorId, opts = {}) {
       let items = [];
       for (const src of mySources) {
         try {
-          if (section === 'news') items.push(...await collector.collectNews(src, since, counter));
+          if (section === 'news') {
+            items.push(...await collector.collectNews(src, since, counter));
+            // + one search per ticked category of this client, so every category gets news
+            const t = await collector.collectTopicNews(src, comp, signals, since, counter);
+            items.push(...t.items);
+            if (t.topics) report.notes.push(`category searches: ${t.topics} categories, ${t.searches} searches (${t.items.length} links)`);
+          }
           else if (section === 'own_site') items.push(...await collector.collectOwnSite(src, comp, since, counter));
           else {
             const r = await collector.collectPress(src, comp, since, maxReads, budget, counter);

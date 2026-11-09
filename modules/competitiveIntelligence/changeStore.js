@@ -594,11 +594,13 @@ async function joinSplitCards(clientId, comp) {
       // both cards together must still cover at most CARD_WINDOW_DAYS (first signal to last signal)
       const all = [...A.days, ...B.days];
       const span = all.length ? Math.max(...all) - Math.min(...all) : 999;
-      let why = A.c.category === B.c.category && span <= CARD_WINDOW_DAYS ? `same competitor + same type within ${CARD_WINDOW_DAYS} days (${A.c.category})` : null;
+      let why = A.c.category === B.c.category && span <= CARD_WINDOW_DAYS ? `same competitor + same sub-type within ${CARD_WINDOW_DAYS} days (${A.c.signal_name})` : null;
       // catch-all cards ("Company Updates" / "Others") join only when it is really the same event
       if (why && (isCatchAll(A.c.signal_name) || isCatchAll(B.c.signal_name))) {
         const strong = strongSameEvent(A, B);
         why = strong ? `same event (${strong})` : null;
+      } else if (why && A.c.signal_name !== B.c.signal_name) {
+        why = null;   // different sub-type (launch vs sunset) -> stay 2 cards
       }
       if (!why) continue;
       await supabase.from('competitor_change_evidence').update({ change_id: A.c.id }).eq('change_id', B.c.id);
@@ -701,7 +703,9 @@ async function findCategoryCard(clientId, comp, c) {
       if (hit.match) return { row: r, score: hit.score, by: `same event (${hit.by})` };
       continue;
     }
-    return { row: r, score: 1, by: `same competitor + same type within ${CARD_WINDOW_DAYS} days (${c.signal.category})` };
+    // different sub-type (e.g. "New product launches" vs "Product sunsets") -> its own card
+    if (r.signal_name !== c.signal.name) continue;
+    return { row: r, score: 1, by: `same competitor + same sub-type within ${CARD_WINDOW_DAYS} days (${c.signal.name})` };
   }
   return null;
 }

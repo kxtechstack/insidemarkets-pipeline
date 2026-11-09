@@ -235,7 +235,7 @@ function checkAnswer(ans, ctx) {
   if (signal && (factsFound.length || !ctx.isEnglish)) {
     const proof = ctx.proofAll ? `${factsFound.join(' ')} ${title} ${summary}` : (ctx.isEnglish ? factsFound.join(' ') : `${title} ${summary}`);
     const must = [
-      [/sunset/i, /discontinu|withdraw|phase[ds]? out|no longer (be )?(sold|available|produced|made)|end(s|ed)? (the )?(sale|production)|stop(s|ped)? (selling|production|making)|retir/i, 'that a product is stopped or withdrawn'],
+      [/sunset/i, /discontinu|withdr[ae]w\w*\s+(\S+\s+){0,3}(products?|ranges?|lines?|shades?|items?|from (sale|the market|market|shelves))|pulled from (shelves|sale)|phase[ds]? out|no longer (be )?(sold|available|produced|made)|end(s|ed)? (the )?(sale|production)|stop(s|ped)? (selling|production|making)|retir/i, 'that a product is stopped or withdrawn'],
       [/new product launch|feature release/i, /launch|introduc|unveil|release|debut|rolls? out|now available|available (from|in|at|starting|now)|goes? on sale|new /i, 'that a product is launched'],
     ];
     must.push(
@@ -247,14 +247,15 @@ function checkAnswer(ans, ctx) {
       [/award|certification/i, /award|won\b|wins?\b|recogni[sz]|certif|ranked|named|honou?r|prize|accredit/i, 'an award or certification'],
       // "Results & Publications" is only for the company's own numbers or reports (not a fine, a record, a project)
       [/rebrand/i, /rebrand|new (name|logo|identity|brand identity|visual identity)|renam|brand refresh|new look for the brand|redesign(s|ed)? (its|the) (logo|brand|packaging)/i, 'a new name, logo or brand identity'],
-      [/advertis|campaign|marketing|sponsor|influencer|social/i, /advert|\bads?\b|campaign|marketing|sponsor|commercial|influencer|social media|brand ambassador|billboard|promotion|promo\b/i, 'an advertising or marketing campaign'],
+      [/advertis|campaign|marketing|sponsor|influencer|social/i, /advert|\bads?\b|campaign|marketing|sponsor|commercial|influencer|social media|ambassador|face of|\bmuses?\b|pop-?up|activation|\bfilm\b|billboard|promotion|promo\b/i, 'an advertising or marketing campaign'],
       [/restructuring|reorgani/i, /restructur|reorgani|spin[- ]?off|split (into|off)|layoffs?|consolidat|cost[- ]cutting|divest|new (unit|division|structure)/i, 'that the company changes how it is organised'],
       [/messaging shift|positioning|thought leadership/i, /messag|tagline|slogan|positioning|repositio|brand (story|platform|purpose|voice)|campaign|manifesto|thought leadership|white ?paper|report|study|survey|research/i, 'a new message, position or published point of view'],
-      [/geographic|market entry|new market|expansion|new segment|vertical/i, /\bopen(s|ed|ing)?\b|\benter(s|ed|ing)?\b(?! into)|expan|launch|debut|arriv|new (store|market|countr|city|region|office|plant|site|segment|category)|first .{0,30}(store|boutique|office|plant|shop|market)/i, 'entering a new place, market or segment'],
+      [/geographic|market entry|new market|expansion|new segment|vertical/i, /\bopen(s|ed|ing)?\b|\benter(s|ed|ing)?\b(?! into)|expan|\b(launch|debut|arriv)\w*\s+(in|into|across|throughout)\b|new (store|market|countr|city|region|office|plant|site|segment|category)|first .{0,30}(store|boutique|office|plant|shop|market)/i, 'entering a new place, market or segment'],
       [/free trial|freemium/i, /free trial|\btrial\b|freemium|free (plan|tier|version)/i, 'a free trial or free plan'],
       [/hiring surges|layoffs/i, /layoffs?|lay(s|ing)? off|job cuts?|cut(s|ting)? [\d,]+ (jobs|roles|staff)|hiring (spree|surge|drive)|recruit(ing|ment) drive|hir(e|es|ed|ing) [\d,]+|[\d,]+ (new )?(jobs|roles|positions)|workforce/i, 'many jobs being added or cut (not one person hired)'],
       [/results|publications/i, /results|revenue|net sales|\bsales\b|earnings|profit|net income|\bloss\b|quarter|\bQ[1-4]\b|fiscal|full[- ]year|guidance|outlook|forecast|backlog|EBITDA|per share|\bEPS\b|margin|annual report|sustainability report|impact report|investor presentation|financial (results|statements|report)/i, 'financial results or a report the company published'],
     );
+    let movedByRule = false;   // a code rule chose the signal from the headline -> the headline is part of the proof
     if (/customer wins|customer win/i.test(signal.name) && /attorney general|regulator|regulatory|commission|commissioner|governor|settlement|settles|\bcourt\b|\bfines?\b|\bSCC\b|oversight/i.test(proof)) {
       const fb0 = ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
       if (ctx.attempt >= 2 && fb0) signal = fb0;
@@ -275,15 +276,54 @@ function checkAnswer(ans, ctx) {
       const fbL = ctx.signals.all.find((x) => x.enabled && /^new product launch/i.test(x.name)) || ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
       if (fbL) signal = fbL;
     }
+    // general bucket, but the headline clearly names the type -> that type (only types ticked for the client)
+    if (isCatchAll(signal.name)) {
+      const pickType = (catRe, nameRe) => ctx.signals.all.find((x) => x.enabled && catRe.test(x.category) && (!nameRe || nameRe.test(x.name)))
+        || ctx.signals.all.find((x) => x.enabled && catRe.test(x.category) && !isCatchAll(x.name));
+      const rules = [
+        [/\b(wins?|won|awarded|receives?|named)\b.{0,60}\bawards?\b|\bawards? 20\d\d\b|\bbest of the best\b|\bcertifi(ed|cation)\b/i, /customer wins|reputation/i, /award|certif/i],
+        [/\b(lawsuits?|sued|sues|suing|settlements?|court|fined|fines?|class action|litigation)\b/i, /regulatory|legal|compliance/i, /lawsuit|dispute|regulatory action/i],
+        [/\b(loyalty|reward(s)? (program|programme|points)|double points|\d+x points|points with purchase|gift[s]?[- ]with[- ]purchase|\d{1,2}% (off|savings)|discounts?)\b/i, /pricing|promotion/i, /limited|promotion|loyalty|price/i],
+      ];
+      for (const [titleRe, catRe, nameRe] of rules) {
+        if (!titleRe.test(title)) continue;
+        const t = pickType(catRe, nameRe);
+        if (t) { signal = t; movedByRule = true; }
+        break;
+      }
+    }
+    // general / partnership item whose headline is a campaign, ambassador, muse or pop-up -> marketing
+    if ((isCatchAll(signal.name) || /partnership|alliance|tie-?up/i.test(`${signal.name} ${signal.category}`))
+      && /\b(campaigns?|ambassadors?|face of|muses?|pop-?ups?|activations?|to promote|spokes(person|model|woman|man)|brand (film|mission film)|commercials?)\b/i.test(title)) {
+      const mkC = ctx.signals.all.find((x) => x.enabled && /campaign|advertis|marketing/i.test(`${x.name} ${x.category}`));
+      if (mkC) { signal = mkC; movedByRule = true; }
+    }
+    // "M&A" when a fund / investor only buys SHARES of the company -> not a deal by the company
+    if (/acquisition|merger|m&a|funding|investment/i.test(`${signal.name} ${signal.category}`)
+      && /\b(shares?|stocks?|investors?|portfolio|hedge fund|fund manager|equity research|holding(s)? in)\b/i.test(`${title} ${summary} ${proof}`)
+      && !/\b(acquir\w*|merg\w*|takeover|buy(s|ing)? out|stake in (a|an|the)\b|invest\w* \S*\s*(million|billion|bn|m)\b)/i.test(`${summary} ${proof}`)) {
+      problems.push('This is about investors buying or selling SHARES of the company, not about the company buying, selling or investing in something. Set real_action to false with drop_reason "share-market talk".');
+    }
+    // a title that says what did NOT happen is not news
+    if (/\b(not mentioned|no (new )?product|does not|did not|do not|is not a|are not)\b/i.test(title)) {
+      problems.push('Your "title" says what did not happen. Write what the company DID, or set real_action to false if the article has no action by the company.');
+    }
+    // a "launch" that is really an advert, campaign, ambassador or event (no new product named) -> marketing
+    if (/product launch|feature launch/i.test(signal.name)
+      && /\b(campaigns?|ambassadors?|face of|night ?club|pop-?ups?|activations?|events?|festive campaign|film|short film|commercial)\b/i.test(title)
+      && !/\b(new|launch\w*|introduc\w*|unveil\w*|debut\w*)\s+(\S+\s+){0,3}(fragrances?|perfumes?|scents?|serums?|creams?|collections?|ranges?|lines?|products?|shades?|lipsticks?|foundations?|palettes?|formulas?|kits?|sets?|models?|versions?|features?|apps?|services?)\b/i.test(`${title} ${summary}`)) {
+      const mkL = ctx.signals.all.find((x) => x.enabled && /campaign|advertis|marketing/i.test(`${x.name} ${x.category}`));
+      if (mkL) { signal = mkL; movedByRule = true; }
+    }
     // an advert / campaign / sampling in a country is marketing, not entering that market (unless a store, office or plant opens)
     if (/geographic|market entry|new market|expansion/i.test(`${signal.name} ${signal.category}`)
       && /\b(campaign|advert\w*|ads?|sampling|promotion|influencer|activation|pop-?up)\b/i.test(`${title} ${summary} ${proof}`)
       && !/\b(store|boutique|office|plant|factory|warehouse|subsidiar\w*|branch|distribut\w*|e-?commerce|website|retailer)\b/i.test(`${summary} ${proof}`)) {
       const mk = ctx.signals.all.find((x) => x.enabled && /campaign|advertis|marketing/i.test(`${x.name} ${x.category}`));
-      if (mk) signal = mk;
+      if (mk) { signal = mk; movedByRule = true; }
     }
     for (const [nameRe, wordRe, what] of must) {
-      if (nameRe.test(signal.name) && !wordRe.test(proof)) {
+      if (nameRe.test(signal.name) && !wordRe.test(movedByRule ? `${proof} ${title} ${summary}` : proof)) {
         const fb = ctx.signals.all.find((x) => /^company updates$/i.test(x.name));
         if (ctx.attempt >= 2 && fb && signal !== fb) { signal = fb; continue; }
         problems.push(`The signal "${signal.name}" needs a quote that says ${what} in plain words. None of your quotes say it. If the article does not say it, choose a better signal (for example Company Updates) or set real_action to false.`);
@@ -460,9 +500,10 @@ async function recheckCatchAll(read, ctx, ans, checkCtx) {
   // the same proof rules as the first read. The proof is the quotes PLUS the checked title and summary
   // (the quotes were picked for the first type, so they often lack the word, e.g. "a serum used frozen" for a launch)
   const again = checkAnswer({ ...ans, signal_number: pick.n, signal_name: pick.name }, { ...checkCtx, attempt: 2, proofAll: true });
-  const ok = again.ok && again.signal && again.signal.n === pick.n;
-  console.log(`${tag}: ${ok ? `-> ${pick.name}` : `AI picked "${pick.name}" but the text does not prove it - stays general`}`);
-  return ok ? pick : null;
+  // the checks may move it to a better type (e.g. a "launch" that is only a campaign -> marketing): keep that, unless it is general again
+  const final = again.ok && again.signal && !isCatchAll(again.signal.name) && again.signal.enabled !== false ? again.signal : null;
+  console.log(`${tag}: ${final ? `-> ${final.name}${final.n !== pick.n ? ` (AI said "${pick.name}")` : ''}` : `AI picked "${pick.name}" but the text does not prove it - stays general`}`);
+  return final;
 }
 
 module.exports = { recheckCatchAll, dateWritten, loadSignals, readArticle, checkAnswer, quoteInText, numbersIn, pickEventDate, getReaderPrompt };

@@ -152,7 +152,7 @@ const LAUNCH_WORDS = /\b(new|launch|launches|launched|introduc|unveil|just (in|l
 // a notice that only gives the date / time of results or a call, or says results are "on the website": not news
 const DATE_NOTICE = /\b(announces?|sets?|schedules?|confirms?)\s+(the\s+)?(dates?|times?)\b|\bto (announce|report|release|host|discuss)\b[^.]{0,70}\b(results|earnings)\b[^.]{0,40}\b(on|in|at)\b|\b(conference call|webcast)\b|\b(declares?|announces?)\s+(a\s+)?(regular\s+|quarterly\s+|cash\s+)*dividend\b|\bresults available (on|at)\b|available on (the )?company'?s website|\bresults?\s+dates?\b|\b(earnings|results)\s+(release\s+)?(date|time|schedule)\b/i;
 // share-market chatter: stock moves, analyst views, short interest. Never an action by the company.
-const MARKET_CHATTER = /\bstocks?\b|\banalysts?\b|price targets?|short interest|52-week|\bnarratives?\b|\bETF\b|\b(call|put) options\b|\boptions (data|volume|activity|trading)\b|\binvestors? (buy|bought|purchase|sell|sold)\b|\bhedge funds?\b|\bshort sellers?\b/i;
+const MARKET_CHATTER = /\bstocks?\b|\banalysts?\b|price targets?|short interest|52-week|\bnarratives?\b|\bETF\b|\b(call|put) options\b|\boptions (data|volume|activity|trading)\b|\binvestors? (buy|bought|purchase|sell|sold)\b|\bhedge funds?\b|\bshort sellers?\b|\binitiat\w* coverage\b|\bbrokerage\b|\b(up|down)grade[sd]?\b|\bshares? (surge|jump|fall|rise|soar|slump|drop|climb)\w*|\bsurges? against (the )?market\b/i;
 // a headline that is a question ("Is X using Y to reframe its brand?") is commentary, not an announcement
 // "Enphase Surges 9%, Sunrun Climbs 7%, SolarEdge Rallies 6% ..." = share-price round-up
 const PRICE_MOVE = /\b(surges?|climbs?|rall(?:y|ies)|jumps?|spikes?|soars?|gains?|slips?|slides?|tumbles?|sinks?|plunges?|drops?|falls?)\s+\d+(?:\.\d+)?%/gi;
@@ -218,6 +218,8 @@ function oldYearInUrl(url, publishedDate) {
 const LIST_TITLE = /^(the )?\d+ (best|top|must|favou?rite|great|cheapest)\b|\bbest\b.{0,50}\b(to buy|for 20\d\d|of 20\d\d|right now|out now|on sale|money can buy)\b|\bgift (guide|ideas?)\b|\bhottest buys\b|\bhere are the\b|\b(deals?|discounts?) (on|of) the (day|week)\b|\bbuyer'?s guide\b/i;
 const REVIEW_TITLE = /\b(I|we) (tried|tested|used|swapped)\b|\bput (it|them) to the test\b|\b(honest|full|in-depth) review\b|\breview\s*[:|]|\bworth the (hype|money)\b|\bis it (worth|any good)\b/i;
 const CELEB_TITLE = /\b(makeup|beauty|skincare|hair) (look|behind|secrets?|routine)\b|\bget the look\b|\b(wore|wears|wearing)\b.{0,60}\b(show|carpet|gala|awards?|premiere|wedding|concert)\b/i;
+// shopping-deal posts by news sites ("30% off for Prime Day", "deal alert"): a shop's discount, not the company's price decision
+const DEAL_TITLE = /\b\d{1,2}% off\b|\bprime day\b|\bblack friday deals?\b|\bcyber monday deals?\b|\bdeal alert\b|\bon sale (now|at)\b|\bbest deals?\b/i;
 const isListOrReview = (title) => { const t = String(title || ''); return LIST_TITLE.test(t) || REVIEW_TITLE.test(t) || CELEB_TITLE.test(t); };
 
 /**
@@ -239,6 +241,7 @@ function precheck(item, comp, terms, since, opts = {}) {
   if (oy) return `old page (the link says ${oy}) - history, not news`;
   if (isDateNotice(item.title)) return 'only gives the date of a results release or call - not news';
   if (isMarketChatter(item.title)) return 'share-market talk (stock, analysts) - not an action by the company';
+  if (!opts.press && !opts.ownSite && !opts.ownBlog && DEAL_TITLE.test(String(item.title || ''))) return 'shopping deal post (a shop\'s discount) - not the company\'s own price decision';
   if (!opts.press && isListOrReview(item.title)) return 'shopping list, review or "how someone used it" story - not an action by the company';
   if (LIST_PAGE_TITLE.test(String(item.title || '').trim())) return 'a page that lists many articles, not one article';
   const mentions = brandMentions(`${item.title} ${item.text}`, terms);
@@ -271,6 +274,67 @@ async function collectNews(source, since, counter) {
     startPublishedDate: since, numResults: LIMITS.NEWS_RESULTS_PER_SEARCH, category: 'news', text: true,
   }, counter);
   return res.map((r) => fromExa(r, 'news', source.id));
+}
+
+/**
+ * Extra news searches, one set per TICKED category of this client (Monitoring Scope), so every category gets news,
+ * not only what the plain "<competitor>" search happens to find.
+ *
+ * The search sentences per category come from the instructions file ci-topic-searches.json (next to this file,
+ * or the path in CI_TOPIC_FILE). {competitor} is replaced by the competitor name. Later this moves to the admin console.
+ * A ticked category that is NOT in the file -> automatic search: competitor + category + up to 3 ticked signal names.
+ * Catch-all categories (General / Others / Company updates) are only searched when the file has them.
+ * Off with CI_TOPIC_SEARCH=off. Links per search: CI_TOPIC_RESULTS (default 10).
+ */
+const CATCH_ALL_CAT = /^(general|others?|company updates?|general updates?)$/i;
+const catKey = (s) => String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+function loadTopicFile() {
+  const fs = require('fs');
+  const path = require('path');
+  const file = process.env.CI_TOPIC_FILE || path.join(__dirname, 'ci-topic-searches.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));   // read every run, so edits work without a restart
+    const out = new Map();
+    for (const [cat, v] of Object.entries(raw)) {
+      if (cat.startsWith('_')) continue;
+      const searches = (Array.isArray(v) ? v : (v && v.searches) || []).map((x) => String(x).trim()).filter(Boolean);
+      if (searches.length) out.set(catKey(cat), searches);
+    }
+    return out;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.log(`[CI topics] could not read ${file}: ${e.message}`);
+    return new Map();
+  }
+}
+
+async function collectTopicNews(source, comp, signals, since, counter) {
+  if (String(process.env.CI_TOPIC_SEARCH || 'on').toLowerCase() === 'off') return { items: [], topics: 0, searches: 0 };
+  const perSearch = Math.max(1, Number(process.env.CI_TOPIC_RESULTS) || 10);
+  const fileSearches = loadTopicFile();
+  const byCat = new Map();
+  for (const sg of (signals && signals.all) || []) {
+    if (!sg.enabled || !sg.category || /^others?$/i.test(sg.name)) continue;
+    if (CATCH_ALL_CAT.test(sg.category.trim()) && !fileSearches.has(catKey(sg.category))) continue;
+    if (!byCat.has(sg.category)) byCat.set(sg.category, []);
+    byCat.get(sg.category).push(sg.name);
+  }
+  const name = comp.search_name || comp.name;
+  const items = [];
+  let searches = 0;
+  for (const [cat, names] of byCat) {
+    const fromFile = fileSearches.get(catKey(cat));
+    const queries = fromFile
+      ? fromFile.map((q) => q.replace(/\{competitor\}/gi, name))
+      : [`${comp.name} ${cat}: ${names.slice(0, 3).join(', ')}`];
+    for (const query of queries) {
+      searches++;
+      try {
+        const res = await exaSearch(query, { startPublishedDate: since, numResults: perSearch, category: 'news', text: true }, counter);
+        items.push(...res.map((r) => ({ ...fromExa(r, 'news', source.id), via: `topic: ${cat}` })));
+      } catch (e) { /* one search failing must not stop the others */ }
+    }
+  }
+  return { items, topics: byCat.size, searches };
 }
 
 async function collectOwnSite(source, comp, since, counter) {
@@ -377,7 +441,7 @@ async function collectPress(source, comp, since, maxItems, budget, counter) {
   return { items, health: 'ok', note: 'site search' };
 }
 
-module.exports = { isEnglishArticle, isEvergreen, isListOrReview,
+module.exports = { collectTopicNews, isEnglishArticle, isEvergreen, isListOrReview,
   parseLooseDate, isDateNotice, isMarketChatter, articleFromHtml, readArticle, brandTerms, brandMentions, precheck,
   collectNews, collectOwnSite, collectPress, postLinksFromList,
 };
