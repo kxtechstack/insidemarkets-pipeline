@@ -280,8 +280,9 @@ async function collectNews(source, since, counter) {
  * Extra news searches, one set per TICKED category of this client (Monitoring Scope), so every category gets news,
  * not only what the plain "<competitor>" search happens to find.
  *
- * The search sentences per category come from the instructions file ci-topic-searches.json (next to this file,
- * or the path in CI_TOPIC_FILE). {competitor} is replaced by the competitor name. Later this moves to the admin console.
+ * The search sentences per category come from (first found wins):
+ *   1. the admin console: Data Collection -> Competitive Intelligence -> Submodule Prompts (admin.prompts, one sentence per line)
+ *   2. the instructions file ci-topic-searches.json (next to this file, or the path in CI_TOPIC_FILE) {competitor} is replaced by the competitor name. Later this moves to the admin console.
  * A ticked category that is NOT in the file -> automatic search: competitor + category + up to 3 ticked signal names.
  * Catch-all categories (General / Others / Company updates) are only searched when the file has them.
  * Off with CI_TOPIC_SEARCH=off. Links per search: CI_TOPIC_RESULTS (default 10).
@@ -307,22 +308,58 @@ function loadTopicFile() {
   }
 }
 
+/**
+ * The admin's own search sentences per category, from the admin console
+ * (Data Collection -> Competitive Intelligence -> Submodule Prompts) = admin.prompts rows of this client + CI module.
+ * prompt_text = one search sentence per line, {competitor} = the competitor name.
+ * Returns Map(submodule_id -> [sentences]). Kept 5 minutes (one run reads it once per client).
+ */
+const adminPromptCache = new Map();
+async function loadAdminTopicPrompts(clientId) {
+  if (!clientId) return new Map();
+  const hit = adminPromptCache.get(clientId);
+  if (hit && Date.now() - hit.at < 5 * 60e3) return hit.map;
+  const map = new Map();
+  try {
+    const { createClient } = require('@supabase/supabase-js');
+    const { CI_MODULE_ID } = require('./constants');
+    const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY).schema('admin');
+    const { data, error } = await db.from('prompts').select('submodule_id, prompt_text, is_active, status')
+      .eq('client_id', clientId).eq('module_id', CI_MODULE_ID);
+    if (error) throw new Error(error.message);
+    for (const r of data || []) {
+      if (!r.submodule_id || r.is_active === false || /paused/i.test(String(r.status || ''))) continue;
+      const lines = String(r.prompt_text || '').split(/\r?\n|;/).map((x) => x.replace(/^\s*[-*\d.)]+\s*/, '').trim()).filter((x) => x.length >= 3);
+      if (!lines.length) continue;
+      map.set(r.submodule_id, [...(map.get(r.submodule_id) || []), ...lines].slice(0, 10));
+    }
+  } catch (e) {
+    console.log(`[CI topics] admin prompts not read: ${e.message}`);
+  }
+  adminPromptCache.set(clientId, { at: Date.now(), map });
+  return map;
+}
+
 async function collectTopicNews(source, comp, signals, since, counter) {
   if (String(process.env.CI_TOPIC_SEARCH || 'on').toLowerCase() === 'off') return { items: [], topics: 0, searches: 0 };
   const perSearch = Math.max(1, Number(process.env.CI_TOPIC_RESULTS) || 10);
   const fileSearches = loadTopicFile();
+  const adminSearches = await loadAdminTopicPrompts(comp.client_id);
   const byCat = new Map();
+  const subOf = new Map();
   for (const sg of (signals && signals.all) || []) {
     if (!sg.enabled || !sg.category || /^others?$/i.test(sg.name)) continue;
-    if (CATCH_ALL_CAT.test(sg.category.trim()) && !fileSearches.has(catKey(sg.category))) continue;
+    if (CATCH_ALL_CAT.test(sg.category.trim()) && !fileSearches.has(catKey(sg.category)) && !adminSearches.has(sg.submodule_id)) continue;
     if (!byCat.has(sg.category)) byCat.set(sg.category, []);
     byCat.get(sg.category).push(sg.name);
+    if (sg.submodule_id) subOf.set(sg.category, sg.submodule_id);
   }
   const name = comp.search_name || comp.name;
   const items = [];
   let searches = 0;
   for (const [cat, names] of byCat) {
-    const fromFile = fileSearches.get(catKey(cat));
+    // 1. the admin's prompt for this category (admin console)  2. the test file  3. automatic
+    const fromFile = adminSearches.get(subOf.get(cat)) || fileSearches.get(catKey(cat));
     const queries = fromFile
       ? fromFile.map((q) => q.replace(/\{competitor\}/gi, name))
       : [`${comp.name} ${cat}: ${names.slice(0, 3).join(', ')}`];
