@@ -107,6 +107,7 @@ function registerCompetitiveRadarRoute(app) {
         reactivated: result.reactivated,
         deactivated: result.deactivated,
         website_changed: result.changed,
+        extra_links: result.extra_links,
         active: result.active.length,
         finding_sources: !ciOn ? 'not started - Competitive Intelligence module is off for this client' : (started ? 'started' : 'already running'),
       });

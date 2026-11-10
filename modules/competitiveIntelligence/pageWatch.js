@@ -599,6 +599,18 @@ async function detectPageType(url) {
   try { path = new URL(url).pathname.replace(/\/$/, ''); } catch (e) { /* bad link */ }
   const under = links.filter((l) => path && new URL(l.url).pathname.startsWith(`${path}/`)).length;
   if (dated >= 3 || under >= 5) return { type: 'blog', note: `list page: ${links.length} post links (${dated} with dates)` };
+  // the list may be loaded by the page's script (few links visible): a link that ENDS in a list word is a list page
+  // e.g. /en/topics/  /blog/  /news/  /press-releases/  /insights/  /stories/
+  const last = (path.split('/').filter(Boolean).pop() || '').toLowerCase();
+  const LIST_WORD = /^(blogs?|news|newsroom|topics?|articles?|stories|press|press-?releases?|insights?|journal|magazine|updates?|talks?|media|announcements?|whats-?new|latest)$/;
+  if (LIST_WORD.test(last)) {
+    return { type: 'blog', note: `list page (the link ends in "/${last}/"): new posts are read daily` };
+  }
+  // a short category under a list word, e.g. /blog/cloudcomputing or /news/sustainability (not a long post title, not a .html file)
+  const segs = path.split('/').filter(Boolean).map((x) => x.toLowerCase());
+  if (segs.slice(0, -1).some((x) => LIST_WORD.test(x)) && !/\.\w{2,5}$/.test(last) && last.split('-').length <= 2 && !/\d{3,}/.test(last)) {
+    return { type: 'blog', note: `list page (category "/${last}/" under "/${segs.find((x) => LIST_WORD.test(x))}/"): new posts are read daily` };
+  }
   return { type: 'product', note: 'single page: its content is compared on every check' };
 }
 
