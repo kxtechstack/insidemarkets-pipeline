@@ -320,6 +320,7 @@ async function loadAdminTopicPrompts(clientId) {
   const hit = adminPromptCache.get(clientId);
   if (hit && Date.now() - hit.at < 5 * 60e3) return hit.map;
   const map = new Map();
+  map.competitorNames = [];
   try {
     const { createClient } = require('@supabase/supabase-js');
     const { CI_MODULE_ID } = require('./constants');
@@ -327,6 +328,8 @@ async function loadAdminTopicPrompts(clientId) {
     const { data, error } = await db.from('prompts').select('submodule_id, prompt_text, is_active, status')
       .eq('client_id', clientId).eq('module_id', CI_MODULE_ID);
     if (error) throw new Error(error.message);
+    const { data: comps } = await db.from('competitors').select('name').eq('client_id', clientId);
+    map.competitorNames = (comps || []).map((c) => c.name).filter(Boolean);
     for (const r of data || []) {
       if (!r.submodule_id || r.is_active === false || /paused/i.test(String(r.status || ''))) continue;
       const lines = String(r.prompt_text || '').split(/\r?\n|;/).map((x) => x.replace(/^\s*[-*\d.)]+\s*/, '').trim()).filter((x) => x.length >= 3);
@@ -338,6 +341,60 @@ async function loadAdminTopicPrompts(clientId) {
   }
   adminPromptCache.set(clientId, { at: Date.now(), map });
   return map;
+}
+
+
+/**
+ * The admin writes plain sentences ("este aluder launches ai tool", "news about AI adoption").
+ * Make one search for THIS competitor: remove any competitor name in the line (also with typos),
+ * remove filler words, then put this competitor's name in front. {competitor} also works.
+ */
+const plainWords = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return d[a.length][b.length];
+}
+const FILLER = /^(news|latest|recent|new|updates?|articles?|information|info|details?)( (news|updates?|articles?))?( (about|on|of|for|regarding|related to))?\s+/i;
+/**
+ * One admin line -> the search for THIS competitor, or null when the line is not for this competitor.
+ *   "{competitor} launches AI tool"      -> every competitor ("Lancôme launches AI tool", ...)
+ *   "Lancôme launches Génifique refill"  -> ONLY Lancôme (a real competitor name is written; small typos are fine,
+ *                                           e.g. "este aluder" = Estée Lauder)
+ *   "launches AI skin analysis app"      -> every competitor (no name: the name is put in front)
+ */
+function nameAt(words, nm) {
+  const nw = plainWords(nm).split(' ').filter(Boolean);
+  if (!nw.length) return -1;
+  for (let i = 0; i + nw.length <= words.length; i++) {
+    const same = nw.every((w, k) => {
+      const x = words[i + k];
+      return x === w || (w.length >= 4 && editDistance(x, w) <= (w.length >= 5 ? 2 : 1));
+    });
+    if (same) return i;
+  }
+  return -1;
+}
+function searchForCompetitor(line, compName, allNames) {
+  if (/\{competitor\}/i.test(line)) return line.replace(/\{competitor\}/gi, compName);
+  const words = plainWords(line).split(' ').filter(Boolean);
+  const others = (allNames || []).filter((n) => plainWords(n) !== plainWords(compName));
+  const namesMe = nameAt(words, compName) >= 0;
+  const namesOther = others.some((n) => nameAt(words, n) >= 0);
+  if (!namesMe && namesOther) return null;                 // written for another competitor -> not searched for this one
+  // remove the written name (maybe misspelt) and put the correct name in front
+  let rest = words.slice();
+  for (const nm of [compName, ...others]) {
+    let i;
+    while ((i = nameAt(rest, nm)) >= 0) rest.splice(i, plainWords(nm).split(' ').filter(Boolean).length);
+  }
+  let txt = rest.join(' ');
+  for (let k = 0; k < 3; k++) txt = txt.replace(FILLER, '');
+  txt = txt.replace(/^(the|a|an|from|by)\s+/, '').trim();
+  return txt ? `${compName} ${txt}` : compName;
 }
 
 async function collectTopicNews(source, comp, signals, since, counter) {
@@ -359,8 +416,14 @@ async function collectTopicNews(source, comp, signals, since, counter) {
   let searches = 0;
   for (const [cat, names] of byCat) {
     // 1. the admin's prompt for this category (admin console)  2. the test file  3. automatic
-    const fromFile = adminSearches.get(subOf.get(cat)) || fileSearches.get(catKey(cat));
-    const queries = fromFile
+    // the admin's lines that are for THIS competitor; none (e.g. all lines name another competitor) -> file / automatic
+    const adminLines = adminSearches.get(subOf.get(cat));
+    const mineFromAdmin = adminLines ? [...new Map(adminLines.map((q) => searchForCompetitor(q, name, adminSearches.competitorNames)).filter(Boolean).map((q) => [q.toLowerCase(), q])).values()] : [];
+    const fromAdmin = mineFromAdmin.length ? mineFromAdmin : null;
+    const fromFile = fileSearches.get(catKey(cat));
+    const queries = fromAdmin
+      ? fromAdmin
+      : fromFile
       ? fromFile.map((q) => q.replace(/\{competitor\}/gi, name))
       : [`${comp.name} ${cat}: ${names.slice(0, 3).join(', ')}`];
     for (const query of queries) {
