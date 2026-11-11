@@ -175,15 +175,7 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
       return; // do NOT markFullyCompleted
     }
 
-    // Unified daily snapshot — runs for ALL 3 modules
-    try {
-      const { buildDailySnapshot } = require('./dailySnapshotBuilder');
-      await buildDailySnapshot(clientId, moduleId, industry);
-    } catch (snapErr) {
-      console.error(`[Pipeline] Daily snapshot generation failed (non-fatal): ${snapErr.message}`);
-    }
-
-           // Daily highlight text for the landing page — runs for ALL 3 modules
+    // Daily highlight text for the landing page — runs for ALL 3 modules
     try {
       const { generateHighlight, generateBriefingFrame } = require('./highlightGenerator');
       await generateHighlight(clientId, moduleId, industry);
@@ -255,15 +247,61 @@ const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleI
   return jobId;
 };
 
-// NEW: "Run now" on a Competitive Intelligence prompt runs the FULL CI run for this client
+/**
+ * The numbers of one CI run, in the same shape the other modules save (so the admin card and the Daily Report
+ * show them the same way):
+ *   fetched            every link found (all competitors, all sections) + pages checked
+ *   afterUrlCheck      links not seen before
+ *   afterTopicDedup    ...minus "same news from another site"
+ *   afterQualityFilter ...minus what the code checks dropped (old, no date, not English, shopping page...) = read by the AI
+ *   storedFinal        saved as a new card or added to an existing card  (= "Completed")
+ */
+function ciRunCounts(news, pages) {
+  const t = { fetched: 0, afterUrl: 0, sameNews: 0, toAi: 0, stored: 0, failed: 0 };
+  for (const c of (news && news.competitors) || []) {
+    for (const sec of Object.values(c.sections || {})) {
+      if (!sec || !sec.counts) continue;
+      t.fetched += sec.counts.fetched || 0;
+      t.afterUrl += sec.counts.after_url_check || 0;
+      t.toAi += (sec.counts.read_by_ai || 0) + (sec.counts.left_for_next_run || 0);
+      t.stored += (sec.counts.saved || 0) + (sec.counts.merged || 0);
+      t.failed += sec.counts.failed || 0;
+      t.sameNews += (sec.items || []).filter((it) => it.step === 'same news check').length;
+    }
+  }
+  for (const c of (pages && pages.competitors) || []) {
+    const k = c.counts || {};
+    const read = Math.max(0, (k.pages || 0) - (k.blocked || 0));
+    t.fetched += k.pages || 0;
+    t.afterUrl += read;
+    t.toAi += k.changed || 0;
+    t.stored += k.saved || 0;
+    t.failed += k.failed || 0;
+    t.pagesSame = (t.pagesSame || 0) + Math.max(0, read - (k.changed || 0));
+  }
+  const afterTopicDedup = Math.max(t.toAi, t.afterUrl - t.sameNews - (t.pagesSame || 0));
+  return {
+    fetched: t.fetched,
+    afterUrlCheck: t.afterUrl,
+    afterTopicDedup,
+    afterQualityFilter: t.toAi,
+    pushedToQueue: t.toAi,
+    afterLlm: t.stored,
+    storedFinal: t.stored,
+    failed: t.failed,
+  };
+}
+
+// NEW: "Run now" on a Competitive Intelligence prompt (and the daily schedule) runs the FULL CI run for this client
 // (news for every competitor with all CI search lines -> watched pages -> who is where -> strategic shifts).
-// Same work as the daily schedule, but it does not skip competitors that already ran today.
-// The job status is kept up to date so the admin console card shows Running -> Completed / Failed.
-const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, industry, moduleId, submoduleId) => {
+// triggeredBy 'manual' (Run now): every competitor is read. 'schedule': a competitor already done in the last 20 hours is skipped.
+// The job status + counts are saved like the other modules, so the admin card shows Running -> Completed / Failed and the numbers.
+const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, industry, moduleId, submoduleId, triggeredBy = 'manual') => {
   // the CI run takes many minutes: tell the job table "still alive" every 4 minutes,
-  // otherwise the stale-job watcher (jobRecovery.js, 10 minutes without an update) marks it failed while it is still running
-  let stage = 'competitive_intelligence';
+  // otherwise the stale-job watcher (jobRecovery.js) marks it failed while it is still running
+  let stage = 'fetching';
   const heartbeat = setInterval(() => { updateJobStage(jobId, stage).catch(() => {}); }, 4 * 60 * 1000);
+  const tag = triggeredBy === 'schedule' ? '[CI schedule]' : '[CI Run now]';
   try {
     await startJobTracking(jobId, clientId, promptText, submoduleId);
     const { recordJobContext } = require('./jobStatusTracker');
@@ -273,26 +311,45 @@ const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, indust
     const { runNewsForClient, summarise } = require('./competitiveIntelligence/newsRun');
     const { runPagesForClient } = require('./competitiveIntelligence/pageWatch');
 
-    const news = await runNewsForClient(clientId, { triggeredBy: 'manual' });
+    const news = await runNewsForClient(clientId, { triggeredBy });
     if (news.skipped) throw new Error(news.skipped);
-    console.log(`[CI Run now] news done - client: ${clientId}`, JSON.stringify(summarise(news)));
+    console.log(`${tag} news done - client: ${clientId}`, JSON.stringify(summarise(news)));
+    await updateJobStage(jobId, 'llm_processing', ciRunCounts(news, null));   // numbers so far (shown while the pages are checked)
 
-    stage = 'competitive_intelligence_pages';
+    stage = 'llm_processing';
     await setStatus(jobId, { status: 'llm_processing', message: 'Competitive Intelligence: checking watched pages...' });
-    const pages = await runPagesForClient(clientId, { triggeredBy: 'manual' });
-    console.log(`[CI Run now] pages done - client: ${clientId}`, JSON.stringify((pages.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped, error: c.error }))));
+    const pages = await runPagesForClient(clientId, { triggeredBy });
+    console.log(`${tag} pages done - client: ${clientId}`, JSON.stringify((pages.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped, error: c.error }))));
 
-    const done = (news.competitors || []).filter((c) => !c.skipped && !c.error).length;
-    const failed = (news.competitors || []).filter((c) => c.error).length;
-    await setStatus(jobId, { status: 'completed', message: `Competitive Intelligence done: ${done} competitors updated${failed ? `, ${failed} failed` : ''}.` });
+    const n = ciRunCounts(news, pages);
+    await updateJobStage(jobId, 'llm_processing', n);
+    const errors = (news.competitors || []).filter((c) => c.error).length;
+    await setStatus(jobId, {
+      status: 'completed',
+      total: n.fetched,
+      afterUrlCheck: n.afterUrlCheck,
+      afterTopicDedup: n.afterTopicDedup,
+      afterQualityFilter: n.afterQualityFilter,
+      afterLlmRelevant: n.storedFinal,
+      afterLlmIrrelevant: Math.max(0, n.afterQualityFilter - n.storedFinal - n.failed),
+      message: `Done! ${n.storedFinal} competitor updates saved (of ${n.fetched} links found).${errors ? ` ${errors} competitor(s) had an error.` : ''}`,
+    });
     await markFullyCompleted(jobId);
+    console.log(`${tag} counts - client: ${clientId}`, JSON.stringify(n));
   } catch (e) {
-    console.error(`[CI Run now] failed - client: ${clientId}: ${e.message}`);
+    console.error(`${tag} failed - client: ${clientId}: ${e.message}`);
     await setStatus(jobId, { status: 'failed', error: e.message });
     await failJobTracking(jobId, stage, e.message);
   } finally {
     clearInterval(heartbeat);
   }
+};
+
+// NEW: the daily schedule uses the same job (so the card shows the numbers of the scheduled run too).
+// Returns a promise that ends when the run ends (the scheduler waits for it to free its "running" flag).
+const runCompetitiveIntelligenceScheduled = (clientId, promptText, industry, submoduleId) => {
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return runCompetitiveIntelligenceJob(jobId, clientId, promptText, industry, CI_MODULE_ID, submoduleId, 'schedule');
 };
 
 // NEW (Stage 4): resume a paused_rate_limited job. Skips fetch/dedup/quality
@@ -437,4 +494,4 @@ const resumePipelineRun = async (jobId) => {
   }
 };
 
-module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun };
+module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun, runCompetitiveIntelligenceScheduled, ciRunCounts };

@@ -736,7 +736,7 @@ const synthesizeContent = async (article, classification) => {
 // Uses ONLY the client's industry (admin console) - strictly about that industry, nothing hardcoded.
 // Prompt: prompts.id = 'industry_gate_v1' (editable); the text below is used if that row is missing.
 // Switch off with INDUSTRY_GATE=off. If the check itself fails (AI error), the article is NOT blocked.
-const INDUSTRY_GATE_DEFAULT = `You check if a news article belongs to one industry. Answer with JSON only.
+const INDUSTRY_GATE_DEFAULT = `You check which industry a news article is about. Answer with JSON only.
 
 INDUSTRY: {industry}
 
@@ -746,10 +746,16 @@ ARTICLE TEXT (start):
 
 Question: Is this article mainly about the {industry} industry?
 
+The SUBJECT of the article does not matter (a law, a regulation, funding, technology, results, a recall, a trend).
+Only ask: WHOSE companies, products or customers is it about?
+- A law, rule, guidance or recall FOR {industry} products or businesses is YES (it is about the {industry} industry).
+- "main_industry" must be an industry (for example Cosmetics, Banking, Food, Pharma), never a subject like
+  "Regulation", "Law", "Technology" or "Finance".
+
 Answer YES only if the article is mainly about at least one of these:
 - companies, brands, retailers or start-ups that make or sell {industry} products
 - {industry} products, ingredients, materials, packaging or technology made for {industry}
-- rules, bans, recalls or safety alerts for {industry} products or businesses
+- rules, laws, guidance, bans, recalls or safety alerts for {industry} products or businesses
 - consumers, demand or trends for {industry} products
 
 Answer NO when the article is mainly about another industry, even if it mentions money, funding, AI,
@@ -790,8 +796,22 @@ const checkIndustry = async (article, industry, clientId) => {
     const m = String(raw || '').match(/\{[\s\S]*\}/);
     const parsed = m ? JSON.parse(m[0].replace(/[\u0000-\u001F]+/g, ' ')) : null;
     if (!parsed || typeof parsed.about_industry === 'undefined') return { pass: true, reason: 'industry check gave no answer' };
-    const yes = parsed.about_industry === true || /^(true|yes)$/i.test(String(parsed.about_industry));
-    return { pass: yes, reason: String(parsed.reason || '').slice(0, 300), main_industry: parsed.main_industry };
+    let yes = parsed.about_industry === true || /^(true|yes)$/i.test(String(parsed.about_industry));
+    const reason = String(parsed.reason || '').slice(0, 300);
+    // SAFETY NET: the AI sometimes says NO while its own answer says the article IS about this industry
+    // ("it is about: Regulation - the regulation of the cosmetics industry"). A subject (regulation, law, technology)
+    // is not an industry. If the AI's own words name this industry and do not say "not", the article passes.
+    if (!yes) {
+      const stem = String(industry).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim().replace(/(ies|s)$/, '');
+      const said = (t) => stem.length >= 3 && String(t || '').toLowerCase().includes(stem);
+      const negated = /\b(not|no|isn't|rather than|instead of|unrelated|nothing|only (briefly|in passing|once)|in passing)\b/i.test(reason);
+      const mainIsSubject = /^(regulat\w*|law|legal|polic\w*|compliance|government|legislation|technology|tech|ai|finance|financial|business|economy|general|news|trade|safety|health and safety)$/i.test(String(parsed.main_industry || '').trim());
+      if (said(parsed.main_industry) || (mainIsSubject && said(reason) && !negated)) {
+        yes = true;
+        console.log(`  [IndustryCheck] AI said NO but its own answer names the ${industry} industry - kept ("${reason.slice(0, 120)}")`);
+      }
+    }
+    return { pass: yes, reason, main_industry: parsed.main_industry };
   } catch (e) {
     return { pass: true, reason: `industry check failed (${e.message}) - not blocked` };
   }

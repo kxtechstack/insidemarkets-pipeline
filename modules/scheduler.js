@@ -52,7 +52,7 @@ const isSubmoduleEnabledForClient = async (clientId, moduleId, submoduleId) => {
 // Runs in the background (takes minutes) so the other schedules of this minute are not held up.
 // Safe against double runs: one run per client at a time here, and the CI code itself skips
 // a competitor already done in the last 20 hours and a page already checked today.
-const runCompetitiveIntelligence = (clientId, currentTime) => {
+const runCompetitiveIntelligence = (clientId, currentTime, ciRow = null) => {
   if (ciRunning.has(clientId)) {
     console.log(`[Scheduler] CI already running for client ${clientId} - skipped`);
     return;
@@ -61,6 +61,12 @@ const runCompetitiveIntelligence = (clientId, currentTime) => {
   console.log(`[Scheduler] Triggering Competitive Intelligence — client: ${clientId}, time: ${currentTime} IST`);
   setImmediate(async () => {
     try {
+      // the client has its own CI schedule row -> run it as a tracked job (the admin card shows status + numbers, like the other modules)
+      if (ciRow && ciRow.submodule_id) {
+        const { runCompetitiveIntelligenceScheduled } = require('./pipelineRunner');
+        await runCompetitiveIntelligenceScheduled(clientId, ciRow.prompt_text || 'Competitive Intelligence daily run', ciRow.industry || 'Unknown', ciRow.submodule_id);
+        return;
+      }
       const { runNewsForClient, summarise } = require('./competitiveIntelligence/newsRun');
       const { runPagesForClient } = require('./competitiveIntelligence/pageWatch');
       const news = await runNewsForClient(clientId, { triggeredBy: 'schedule' });
@@ -117,7 +123,13 @@ const checkAndRunSchedules = async () => {
 
     // Competitive Intelligence run (once per client): at its own CI time, or - if it has none - at its other schedule time
     if ((s.clients?.enabled_modules || []).includes(CI_MODULE_ID)
-      && (s.module_id === CI_MODULE_ID || !hasOwnCiTime.has(s.client_id))) ciClients.set(s.client_id, true);
+      && (s.module_id === CI_MODULE_ID || !hasOwnCiTime.has(s.client_id))) {
+      // keep the first CI row of this minute (its card gets the run's status + numbers)
+      if (!ciClients.get(s.client_id)) {
+        ciClients.set(s.client_id, s.module_id === CI_MODULE_ID
+          ? { submodule_id: s.submodule_id, prompt_text: s.prompt_text, industry: s.clients?.industry || 'Unknown' } : null);
+      }
+    }
 
     // CI rows (if any) are never sent to the article pipeline - CI has its own job above
     if (s.module_id === CI_MODULE_ID) continue;
@@ -133,7 +145,7 @@ const checkAndRunSchedules = async () => {
     triggerPipelineRun(s.client_id, s.prompt_text, industry, s.module_id, s.submodule_id, s.source, 1);
   }
 
-  for (const clientId of ciClients.keys()) runCompetitiveIntelligence(clientId, currentTime);
+  for (const [clientId, ciRow] of ciClients) runCompetitiveIntelligence(clientId, currentTime, ciRow);
 };
 
 const startScheduler = () => {
