@@ -405,15 +405,18 @@ async function saveSnapshot(row) {
   return data.id;
 }
 
+// no credits / wrong key / too many calls at Firecrawl or Exa = the service's problem, not the page's: never counts towards "broken"
+const SERVICE_PROBLEM = /NO_MORE_CREDITS|insufficient credits|credits? limit|exceeded your credits|payment required|\b(Exa|Firecrawl)\b[^:]*HTTP (401|402|403|429|5\d\d)\b|rate.?limit/i;
 async function updateHealth(source, health, note) {
   const failed = health === 'failed' || health === 'blocked';
+  const service = failed && SERVICE_PROBLEM.test(String(note || ''));
   const patch = {
     last_checked_at: new Date().toISOString(),
     last_status: health === 'blocked' ? 'blocked' : health,
     last_error: health === 'ok' ? null : clean(note, 300),
-    consecutive_failures: failed ? (source.consecutive_failures || 0) + 1 : 0,
+    consecutive_failures: service ? (source.consecutive_failures || 0) : failed ? (source.consecutive_failures || 0) + 1 : 0,
   };
-  if (failed && patch.consecutive_failures >= 3 && source.status === 'active') patch.status = 'broken';
+  if (failed && !service && patch.consecutive_failures >= 3 && source.status === 'active') patch.status = 'broken';
   await admin().from('competitor_sources').update(patch).eq('id', source.id);
 }
 

@@ -104,15 +104,22 @@ async function lookbackDays(competitorId, section) {
   return { days: Math.min(LIMITS.NEWS_MAX_DAYS, Math.max(LIMITS.NEWS_MIN_DAYS, days)), first: false, lastRun: data.started_at };
 }
 
+// a problem of the SEARCH SERVICE (no credits, wrong key, too many calls, service down) is not the source's fault:
+// it is shown on the source, but never counts towards "broken" (otherwise every source switches off when credits run out)
+const SERVICE_PROBLEM = /NO_MORE_CREDITS|credits? limit|exceeded your credits|\b(Exa|Firecrawl|Tavily)\b[^:]*HTTP (401|402|403|429|5\d\d)\b|rate.?limit/i;
+const isServiceProblem = (note) => SERVICE_PROBLEM.test(String(note || ''));
+
 async function updateSourceHealth(source, health, note) {
   const failed = health === 'failed';
+  const service = failed && isServiceProblem(note);
   const patch = {
     last_checked_at: new Date().toISOString(),
     last_status: health,
     last_error: health === 'ok' ? null : clean(note, 300),
-    consecutive_failures: failed ? (source.consecutive_failures || 0) + 1 : 0,
+    consecutive_failures: service ? (source.consecutive_failures || 0) : failed ? (source.consecutive_failures || 0) + 1 : 0,
   };
-  if (failed && patch.consecutive_failures >= 3 && source.status === 'active') patch.status = 'broken';
+  if (failed && !service && patch.consecutive_failures >= 3 && source.status === 'active') patch.status = 'broken';
+  if (service) console.log(`[CI news] SEARCH SERVICE PROBLEM (not the source's fault): ${clean(note, 160)}`);
   await admin().from('competitor_sources').update(patch).eq('id', source.id);
 }
 
