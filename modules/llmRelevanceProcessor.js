@@ -228,6 +228,9 @@ const MODULES_NEEDING_CLIENT_CONTEXT = new Set([
 
 // CHANGED: getRelevancePromptTemplate now takes moduleId and looks up the
 // correct prompt for that module, instead of always using policy_risk_relevance_v1.
+// NEW: true when this module has its own AI check prompt (the generic pipeline can run for it)
+const hasRelevancePrompt = (moduleId) => Boolean(MODULE_RELEVANCE_PROMPTS[moduleId]);
+
 const getRelevancePromptTemplate = async (moduleId) => {
   const promptId = MODULE_RELEVANCE_PROMPTS[moduleId];
 
@@ -722,6 +725,75 @@ const synthesizeContent = async (article, classification) => {
   } catch (err) {
     console.log(`  [Synthesize] Failed, falling back to summary: ${err.message}`);
     return { title: null, body: classification.summary || '' };
+  }
+};
+
+// ── INDUSTRY CHECK (runs BEFORE the module prompt) ───────────────────────────
+// The module prompts ask many questions at once, and the small model often lets an article through
+// because it is about funding / AI / a regulation in general, even when it has nothing to do with the
+// client's industry. This is ONE short, separate question: "is this article about the client's industry?"
+// "No" -> the article is rejected here and never reaches the module prompt.
+// Uses ONLY the client's industry (admin console) - strictly about that industry, nothing hardcoded.
+// Prompt: prompts.id = 'industry_gate_v1' (editable); the text below is used if that row is missing.
+// Switch off with INDUSTRY_GATE=off. If the check itself fails (AI error), the article is NOT blocked.
+const INDUSTRY_GATE_DEFAULT = `You check if a news article belongs to one industry. Answer with JSON only.
+
+INDUSTRY: {industry}
+
+ARTICLE TITLE: {title}
+ARTICLE TEXT (start):
+{text}
+
+Question: Is this article mainly about the {industry} industry?
+
+Answer YES only if the article is mainly about at least one of these:
+- companies, brands, retailers or start-ups that make or sell {industry} products
+- {industry} products, ingredients, materials, packaging or technology made for {industry}
+- rules, bans, recalls or safety alerts for {industry} products or businesses
+- consumers, demand or trends for {industry} products
+
+Answer NO when the article is mainly about another industry, even if it mentions money, funding, AI,
+technology, a regulation or a big company. Example: when the industry is not banking, "a bank starts using AI"
+is NO; when it is not pharma, "a new drug for Alzheimer's" is NO; when it is not food, "food labelling rules" is NO.
+A company that owns many businesses counts only when the article is about its {industry} business.
+When the article only names the industry once in passing, answer NO.
+
+JSON: {"about_industry": true or false, "main_industry": "the industry the article is mainly about", "reason": "one short sentence"}`;
+
+let industryGatePromptCache = null;
+const getIndustryGatePrompt = async () => {
+  if (industryGatePromptCache && Date.now() - industryGatePromptCache.at < 10 * 60e3) return industryGatePromptCache.text;
+  let text = INDUSTRY_GATE_DEFAULT;
+  try {
+    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'industry_gate_v1').eq('is_active', true).maybeSingle();
+    if (data && data.prompt_template) text = data.prompt_template;
+  } catch (e) { /* use the default */ }
+  industryGatePromptCache = { at: Date.now(), text };
+  return text;
+};
+
+/** @returns {Promise<{pass: boolean, reason: string, main_industry?: string}>} */
+const checkIndustry = async (article, industry, clientId) => {
+  if (String(process.env.INDUSTRY_GATE || 'on').toLowerCase() === 'off' || !industry || /^general$/i.test(industry)) {
+    return { pass: true, reason: 'industry check off' };
+  }
+  try {
+    const tpl = await getIndustryGatePrompt();
+    const prompt = tpl
+      .replace(/{industry}/g, industry)
+      .replace(/{title}/g, article.title || '')
+      .replace(/{text}/g, cleanArticleText(article.text || '').slice(0, 2500));
+    const raw = await callLLM([
+      { role: 'system', content: 'You are a strict classifier. You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0, max_tokens: 150, timeout: 60000 });
+    const m = String(raw || '').match(/\{[\s\S]*\}/);
+    const parsed = m ? JSON.parse(m[0].replace(/[\u0000-\u001F]+/g, ' ')) : null;
+    if (!parsed || typeof parsed.about_industry === 'undefined') return { pass: true, reason: 'industry check gave no answer' };
+    const yes = parsed.about_industry === true || /^(true|yes)$/i.test(String(parsed.about_industry));
+    return { pass: yes, reason: String(parsed.reason || '').slice(0, 300), main_industry: parsed.main_industry };
+  } catch (e) {
+    return { pass: true, reason: `industry check failed (${e.message}) - not blocked` };
   }
 };
 
@@ -1255,6 +1327,23 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       console.log(`  [!] Failed to mark retrying (non-fatal): ${markErr.message}`);
     }
 
+    // INDUSTRY CHECK first: an article that is not about the client's industry stops here
+    const gate = await checkIndustry(article, industry, clientId);
+    if (!gate.pass) {
+      const why = `Not about the ${industry} industry${gate.main_industry ? ` (it is about: ${gate.main_industry})` : ''}: ${gate.reason}`;
+      try {
+        await logArticle(jobId, clientId, article, 'skipped', why, submoduleId, existingLogId);
+        await commitUrlSeen(article, clientId, moduleId);
+        await commitTopicSeen(article, clientId, moduleId);
+      } catch (gateLogErr) {
+        console.log(`  [!] Failed to log industry rejection (non-fatal): ${gateLogErr.message}`);
+      }
+      irrelevantCount++;
+      consecutiveTechnicalFailures = 0;
+      console.log(`  [✗] NOT ${industry.toUpperCase()} | ${why}`);
+      continue;
+    }
+
     try {
       let classification = await withTimeout(
         classifyArticle(
@@ -1408,6 +1497,13 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
 async function processQueueInBatches(queueKey, clientId, industry, jobId, moduleId, submoduleId, batchSize = LLM_BATCH_SIZE) {
   const processingKey = queueKey.replace(/^processed:/, 'processing:');
 
+  // NEW: a module with no AI check prompt can never finish -> stop now (no endless retry)
+  if (!hasRelevancePrompt(moduleId)) {
+    throw new Error(`Module ${moduleId} has no AI check prompt (MODULE_RELEVANCE_PROMPTS) - this pipeline cannot run for it.`);
+  }
+  const MAX_FAILED_BATCHES_IN_A_ROW = 3; // NEW: stop instead of re-trying the same batch forever
+  let failedBatchesInARow = 0;
+
   // NEW: recover anything left stranded by a previous crashed/stalled run
   // of THIS job before pulling any new work.
   await recoverProcessingList(queueKey, processingKey);
@@ -1466,11 +1562,16 @@ async function processQueueInBatches(queueKey, clientId, industry, jobId, module
         await clearFromProcessing(processingKey, p.raw);
         await redis.rpush(queueKey, p.raw);
       }
+      failedBatchesInARow++;
+      if (failedBatchesInARow >= MAX_FAILED_BATCHES_IN_A_ROW) {
+        throw new Error(`Stopped after ${failedBatchesInARow} failed batches in a row: ${batchErr.message}`);
+      }
       remaining = await getProcessedQueueLength(queueKey);
       batchNumber++;
       continue;
     }
 
+    failedBatchesInARow = 0;
     totalRelevant += result.relevant;
     totalIrrelevant += result.irrelevant;
 
@@ -1649,6 +1750,7 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
   classifyArticle,       // TEMP: exported for manual testing
   getClientContext,      // TEMP: exported for manual testing
   getRelevancePromptTemplate, // TEMP: exported for manual testing
+  hasRelevancePrompt,         // NEW: pipelineRunner checks this before fetching
   fillPromptTemplate,        // TEMP: exported for Gemini comparison script
   getSectorsToAvoid,         // TEMP: exported for Gemini comparison script
   getCompetitorsList,        // TEMP: exported for Gemini comparison script

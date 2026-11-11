@@ -6,7 +6,10 @@ const { removeSameTopicArticles } = require('./topicDedup');
 const { filterLowQualityArticles } = require('./qualityFilter');
 const { pushToProcessedQueue } = require('./processedQueue');
 const { startJobTracking, updateJobStage, markFullyCompleted, failJobTracking } = require('./jobStatusTracker');
-const { processQueueInBatches, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./llmRelevanceProcessor');
+const { processQueueInBatches, hasRelevancePrompt, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./llmRelevanceProcessor');
+
+// NEW: Competitive Intelligence has its own pipeline (modules/competitiveIntelligence), not this one
+const CI_MODULE_ID = '5e953748-931d-4212-99e9-08c9a050cfef';
 const { acquireLLMSlot, releaseLLMSlot } = require('./concurrencyLimiter');
 
 // CHANGED: runPipeline now takes moduleId, threads it through dedup calls
@@ -21,6 +24,10 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
     await startJobTracking(jobId, clientId, promptText, submoduleId);
     const { recordJobContext } = require('./jobStatusTracker');
     await recordJobContext(jobId, industry, moduleId);
+    // NEW: no AI check prompt for this module -> stop BEFORE fetching (no wasted search credits, no endless loop)
+    if (!hasRelevancePrompt(moduleId)) {
+      throw new Error(`Module ${moduleId} has no AI check prompt (MODULE_RELEVANCE_PROMPTS) - this pipeline cannot run for it.`);
+    }
     await setStatus(jobId, { status: 'fetching', message: `Calling ${source} API...` });
     currentStage = 'fetching'; // CHANGED
 
@@ -240,8 +247,52 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
 // runPipeline in the background, exactly like /run used to do inline.
 const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleId, source, lookbackDays = 90) => {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  if (moduleId === CI_MODULE_ID) {          // NEW: "Run now" on a Competitive Intelligence prompt
+    runCompetitiveIntelligenceJob(jobId, clientId, promptText, industry, moduleId, submoduleId);
+    return jobId;
+  }
   runPipeline(jobId, clientId, promptText, industry, moduleId, submoduleId, source || 'Exa', lookbackDays);
   return jobId;
+};
+
+// NEW: "Run now" on a Competitive Intelligence prompt runs the FULL CI run for this client
+// (news for every competitor with all CI search lines -> watched pages -> who is where -> strategic shifts).
+// Same work as the daily schedule, but it does not skip competitors that already ran today.
+// The job status is kept up to date so the admin console card shows Running -> Completed / Failed.
+const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, industry, moduleId, submoduleId) => {
+  // the CI run takes many minutes: tell the job table "still alive" every 4 minutes,
+  // otherwise the stale-job watcher (jobRecovery.js, 10 minutes without an update) marks it failed while it is still running
+  let stage = 'competitive_intelligence';
+  const heartbeat = setInterval(() => { updateJobStage(jobId, stage).catch(() => {}); }, 4 * 60 * 1000);
+  try {
+    await startJobTracking(jobId, clientId, promptText, submoduleId);
+    const { recordJobContext } = require('./jobStatusTracker');
+    await recordJobContext(jobId, industry, moduleId);
+    await setStatus(jobId, { status: 'fetching', message: 'Competitive Intelligence: reading news for every competitor...' });
+
+    const { runNewsForClient, summarise } = require('./competitiveIntelligence/newsRun');
+    const { runPagesForClient } = require('./competitiveIntelligence/pageWatch');
+
+    const news = await runNewsForClient(clientId, { triggeredBy: 'manual' });
+    if (news.skipped) throw new Error(news.skipped);
+    console.log(`[CI Run now] news done - client: ${clientId}`, JSON.stringify(summarise(news)));
+
+    stage = 'competitive_intelligence_pages';
+    await setStatus(jobId, { status: 'llm_processing', message: 'Competitive Intelligence: checking watched pages...' });
+    const pages = await runPagesForClient(clientId, { triggeredBy: 'manual' });
+    console.log(`[CI Run now] pages done - client: ${clientId}`, JSON.stringify((pages.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped, error: c.error }))));
+
+    const done = (news.competitors || []).filter((c) => !c.skipped && !c.error).length;
+    const failed = (news.competitors || []).filter((c) => c.error).length;
+    await setStatus(jobId, { status: 'completed', message: `Competitive Intelligence done: ${done} competitors updated${failed ? `, ${failed} failed` : ''}.` });
+    await markFullyCompleted(jobId);
+  } catch (e) {
+    console.error(`[CI Run now] failed - client: ${clientId}: ${e.message}`);
+    await setStatus(jobId, { status: 'failed', error: e.message });
+    await failJobTracking(jobId, stage, e.message);
+  } finally {
+    clearInterval(heartbeat);
+  }
 };
 
 // NEW (Stage 4): resume a paused_rate_limited job. Skips fetch/dedup/quality

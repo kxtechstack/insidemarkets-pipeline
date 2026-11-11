@@ -118,7 +118,7 @@ const extractDateFromHtml = async (url) => {
 const fetchFromExa = async (promptText, lookbackDays = 90) => {
   console.log(`[TEST] fetchFromExa called with lookbackDays = ${lookbackDays}`);
   const response = await exa.searchAndContents(promptText, {
-    numResults:100,
+    numResults:25,
     type: 'auto',
     category: 'news',
     startPublishedDate: daysAgoISO(lookbackDays)
@@ -143,7 +143,7 @@ const fetchFromTavily = async (promptText, lookbackDays = 90) => {
       api_key: process.env.TAVILY_API_KEY,
       query: promptText,
       topic: 'news',
-      max_results: 100,
+      max_results: 25,
       days: lookbackDays,
       include_answer: false,
       include_raw_content: false

@@ -304,6 +304,10 @@ function checkAnswer(ans, ctx) {
       && !/\b(acquir\w*|merg\w*|takeover|buy(s|ing)? out|stake in (a|an|the)\b|invest\w* \S*\s*(million|billion|bn|m)\b)/i.test(`${summary} ${proof}`)) {
       problems.push('This is about investors buying or selling SHARES of the company, not about the company buying, selling or investing in something. Set real_action to false with drop_reason "share-market talk".');
     }
+    // the summary must describe the action, not the article ("but there is no mention of a launch")
+    if (/\b(no mention of|not mentioned|does not mention|doesn't mention|the article (does not|doesn't))\b/i.test(summary)) {
+      problems.push('Your "summary" talks about what the article does not say. Write only what the company did.');
+    }
     // a title that says what did NOT happen is not news
     if (/\b(not mentioned|no (new )?product|does not|did not|do not|is not a|are not)\b/i.test(title)) {
       problems.push('Your "title" says what did not happen. Write what the company DID, or set real_action to false if the article has no action by the company.');
