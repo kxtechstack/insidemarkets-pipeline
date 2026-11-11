@@ -1259,7 +1259,8 @@ registerDecisionIntelligenceRoute(app);
 registerDecisionIntelligenceV2Route(app);
 registerCompetitiveRadarRoute(app);
 registerEmailAlertsRoute(app);
-
+const { registerUserAccessRoute } = require('./modules/userAccess/route');
+registerUserAccessRoute(app);
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
   startStaleJobWatcher(5);
