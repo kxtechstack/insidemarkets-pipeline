@@ -671,7 +671,7 @@ app.get('/report/:clientId', async (req, res) => {
     // ── Fetch all jobs started that day ──────────────────────────────────
     const { data: jobs, error: jobsErr } = await supabaseClient
       .from('pipeline_job_status')
-      .select('job_id, submodule_id, module_id, count_fetched, count_after_url_check, count_after_topic_dedup, count_after_quality_filter, count_stored_final')
+      .select('job_id, submodule_id, module_id, count_fetched, count_after_url_check, count_after_topic_dedup, count_after_quality_filter')
       .eq('client_id', clientId)
       .gte('started_at', startIso)
       .lte('started_at', endIso);
@@ -732,20 +732,10 @@ app.get('/report/:clientId', async (req, res) => {
       (subs || []).forEach(s => { submoduleMap[s.id] = s; });
     }
 
-    // NEW: Competitive Intelligence jobs keep their articles in their own log (competitor_ingestion_log),
-    // not in article_processing_log. Their "stored" and "skipped" numbers come from the job row itself:
-    //   stored  = count_stored_final (saved as a card or added to a card)
-    //   skipped = read by the AI but not kept
-    const CI_MODULE_ID = '5e953748-931d-4212-99e9-08c9a050cfef';
-    const isCiJob = (job) => (job.module_id || submoduleMap[job.submodule_id]?.module_id) === CI_MODULE_ID;
-    const ciStoredOf = (job) => job.count_stored_final || 0;
-    const ciSkippedOf = (job) => Math.max(0, (job.count_after_quality_filter || 0) - (job.count_stored_final || 0));
-    const ciJobs = (jobs || []).filter(isCiJob);
-
     // ── Aggregate: totals ────────────────────────────────────────────────
     const totalFetched = (jobs || []).reduce((sum, j) => sum + (j.count_fetched || 0), 0);
-    const totalStored = (completedLogs || []).length + ciJobs.reduce((sum, j) => sum + ciStoredOf(j), 0);
-    const totalSkipped = (nonCompletedLogs || []).filter(l => l.status === 'skipped').length + ciJobs.reduce((sum, j) => sum + ciSkippedOf(j), 0);
+    const totalStored = (completedLogs || []).length;
+    const totalSkipped = (nonCompletedLogs || []).filter(l => l.status === 'skipped').length;
     // totalFailed is computed further down, AFTER submoduleAgg's attributable
     // failed counts are calculated -- so it matches the per-module breakdown
     // instead of only counting explicit 'failed' log rows.
@@ -758,7 +748,6 @@ app.get('/report/:clientId', async (req, res) => {
       const modId = job.module_id || sub?.module_id || 'unknown';
       if (!moduleAgg[modId]) moduleAgg[modId] = { fetched: 0, stored: 0, failed: 0, skipped: 0 };
       moduleAgg[modId].fetched += job.count_fetched || 0;
-      if (isCiJob(job)) { moduleAgg[modId].stored += ciStoredOf(job); moduleAgg[modId].skipped += ciSkippedOf(job); }
     }
 
     for (const log of completedLogs || []) {
@@ -803,7 +792,6 @@ app.get('/report/:clientId', async (req, res) => {
       submoduleAgg[job.submodule_id].afterUrlCheck += job.count_after_url_check || 0;
       submoduleAgg[job.submodule_id].afterTopicDedup += job.count_after_topic_dedup || 0;
       submoduleAgg[job.submodule_id].afterQualityFilter += job.count_after_quality_filter || 0;
-      if (isCiJob(job)) { submoduleAgg[job.submodule_id].stored += ciStoredOf(job); submoduleAgg[job.submodule_id].skipped += ciSkippedOf(job); }
     }
 
     for (const log of completedLogs || []) {

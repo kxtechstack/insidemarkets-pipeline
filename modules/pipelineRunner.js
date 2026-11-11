@@ -248,48 +248,79 @@ const triggerPipelineRun = (clientId, promptText, industry, moduleId, submoduleI
 };
 
 /**
- * The numbers of one CI run, in the same shape the other modules save (so the admin card and the Daily Report
- * show them the same way):
- *   fetched            every link found (all competitors, all sections) + pages checked
- *   afterUrlCheck      links not seen before
- *   afterTopicDedup    ...minus "same news from another site"
- *   afterQualityFilter ...minus what the code checks dropped (old, no date, not English, shopping page...) = read by the AI
- *   storedFinal        saved as a new card or added to an existing card  (= "Completed")
+ * The result of one CI run, in the same shape the other modules use, so the admin card, its Article Log
+ * and the Daily Report show it the same way:
+ *   counts   -> pipeline_job_status (fetched, after URL check, after same-news check, read by the AI, saved)
+ *   logRows  -> article_processing_log: one row per article the AI READ (and per page change it looked at)
+ *                 'completed' = saved as a new card or added to a card
+ *                 'skipped'   = the AI read it but it was not kept (reason written)
+ *               Never 'failed': failed rows are retried by the article pipeline, which does not handle CI.
+ *               A CI article that failed is retried by the next CI run itself.
  */
-function ciRunCounts(news, pages) {
-  const t = { fetched: 0, afterUrl: 0, sameNews: 0, toAi: 0, stored: 0, failed: 0 };
+function ciRunReport(news, pages) {
+  const t = { fetched: 0, afterUrl: 0, sameNews: 0 };
+  const logRows = [];
+  const add = (url, title, status, reason) => {
+    if (!url || logRows.some((r) => r.url === url)) return;
+    logRows.push({ url, title: String(title || '').slice(0, 300) || null, status, reason: reason ? String(reason).slice(0, 500) : null });
+  };
   for (const c of (news && news.competitors) || []) {
     for (const sec of Object.values(c.sections || {})) {
       if (!sec || !sec.counts) continue;
       t.fetched += sec.counts.fetched || 0;
       t.afterUrl += sec.counts.after_url_check || 0;
-      t.toAi += (sec.counts.read_by_ai || 0) + (sec.counts.left_for_next_run || 0);
-      t.stored += (sec.counts.saved || 0) + (sec.counts.merged || 0);
-      t.failed += sec.counts.failed || 0;
-      t.sameNews += (sec.items || []).filter((it) => it.step === 'same news check').length;
+      for (const it of sec.items || []) {
+        if (it.step === 'same news check') { t.sameNews++; continue; }
+        if (it.step === 'code check') continue;                    // dropped by the code checks, before the AI
+        if (it.outcome === 'saved' || it.outcome === 'merged') {
+          add(it.url, it.title, 'completed', it.outcome === 'merged' ? `added to an existing card (${c.competitor})` : `new card (${c.competitor})`);
+        } else if (it.step === 'AI' || it.step === 'save') {
+          add(it.url, it.title, 'skipped', `${c.competitor}: ${it.outcome === 'failed' ? 'not read this time (tried again next run) - ' : ''}${it.reason || 'not kept'}`);
+        }
+      }
     }
   }
   for (const c of (pages && pages.competitors) || []) {
     const k = c.counts || {};
-    const read = Math.max(0, (k.pages || 0) - (k.blocked || 0));
     t.fetched += k.pages || 0;
-    t.afterUrl += read;
-    t.toAi += k.changed || 0;
-    t.stored += k.saved || 0;
-    t.failed += k.failed || 0;
-    t.pagesSame = (t.pagesSame || 0) + Math.max(0, read - (k.changed || 0));
+    t.afterUrl += Math.max(0, (k.pages || 0) - (k.blocked || 0));
+    for (const p of c.pages || []) {
+      if (p.outcome === 'saved') add(p.url, p.name, 'completed', `page change saved (${c.competitor})`);
+      else if (p.outcome === 'dropped' || p.outcome === 'failed') add(p.url, p.name, 'skipped', `${c.competitor} page: ${p.reason || 'no real change'}`);
+      else t.sameNews++;                                            // page the same as last time
+    }
   }
-  const afterTopicDedup = Math.max(t.toAi, t.afterUrl - t.sameNews - (t.pagesSame || 0));
-  return {
+  const read = logRows.length;
+  const stored = logRows.filter((r) => r.status === 'completed').length;
+  const counts = {
     fetched: t.fetched,
     afterUrlCheck: t.afterUrl,
-    afterTopicDedup,
-    afterQualityFilter: t.toAi,
-    pushedToQueue: t.toAi,
-    afterLlm: t.stored,
-    storedFinal: t.stored,
-    failed: t.failed,
+    afterTopicDedup: Math.max(read, t.afterUrl - t.sameNews),
+    afterQualityFilter: read,
+    pushedToQueue: read,
+    afterLlm: stored,
+    storedFinal: stored,
   };
+  return { counts, logRows };
+}
+// kept for older callers / tests
+const ciRunCounts = (news, pages) => ciRunReport(news, pages).counts;
+
+/** write the Article Log rows of one CI job (article_processing_log), in small batches */
+async function writeCiArticleLog(jobId, clientId, submoduleId, logRows) {
+  if (!logRows.length) return;
+  const { createClient } = require('@supabase/supabase-js');
+  const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+  const now = new Date().toISOString();
+  const rows = logRows.map((r) => ({
+    job_id: jobId, client_id: clientId, submodule_id: submoduleId,
+    article_url: r.url, article_title: r.title, status: r.status, error_message: r.reason,
+    processed_at: now, ...(r.status === 'completed' ? { completed_at: now } : {}),
+  }));
+  for (let i = 0; i < rows.length; i += 100) {
+    const { error } = await db.from('article_processing_log').insert(rows.slice(i, i + 100));
+    if (error) { console.log(`[CI job] article log write failed (non-fatal): ${error.message}`); return; }
+  }
 }
 
 // NEW: "Run now" on a Competitive Intelligence prompt (and the daily schedule) runs the FULL CI run for this client
@@ -314,15 +345,16 @@ const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, indust
     const news = await runNewsForClient(clientId, { triggeredBy });
     if (news.skipped) throw new Error(news.skipped);
     console.log(`${tag} news done - client: ${clientId}`, JSON.stringify(summarise(news)));
-    await updateJobStage(jobId, 'llm_processing', ciRunCounts(news, null));   // numbers so far (shown while the pages are checked)
+    await updateJobStage(jobId, 'llm_processing', ciRunReport(news, null).counts);   // numbers so far (shown while the pages are checked)
 
     stage = 'llm_processing';
     await setStatus(jobId, { status: 'llm_processing', message: 'Competitive Intelligence: checking watched pages...' });
     const pages = await runPagesForClient(clientId, { triggeredBy });
     console.log(`${tag} pages done - client: ${clientId}`, JSON.stringify((pages.competitors || []).map((c) => ({ competitor: c.competitor, ...(c.counts || {}), skipped: c.skipped, error: c.error }))));
 
-    const n = ciRunCounts(news, pages);
+    const { counts: n, logRows } = ciRunReport(news, pages);
     await updateJobStage(jobId, 'llm_processing', n);
+    await writeCiArticleLog(jobId, clientId, submoduleId, logRows);   // the card's Article Log (Total | Completed | Skipped)
     const errors = (news.competitors || []).filter((c) => c.error).length;
     await setStatus(jobId, {
       status: 'completed',
@@ -331,7 +363,7 @@ const runCompetitiveIntelligenceJob = async (jobId, clientId, promptText, indust
       afterTopicDedup: n.afterTopicDedup,
       afterQualityFilter: n.afterQualityFilter,
       afterLlmRelevant: n.storedFinal,
-      afterLlmIrrelevant: Math.max(0, n.afterQualityFilter - n.storedFinal - n.failed),
+      afterLlmIrrelevant: Math.max(0, n.afterQualityFilter - n.storedFinal),
       message: `Done! ${n.storedFinal} competitor updates saved (of ${n.fetched} links found).${errors ? ` ${errors} competitor(s) had an error.` : ''}`,
     });
     await markFullyCompleted(jobId);
@@ -494,4 +526,4 @@ const resumePipelineRun = async (jobId) => {
   }
 };
 
-module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun, runCompetitiveIntelligenceScheduled, ciRunCounts };
+module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun, runCompetitiveIntelligenceScheduled, ciRunCounts, ciRunReport };
