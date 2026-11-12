@@ -37,6 +37,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { ChatError } = require('./chatError');
+const { preprocessText } = require('./preprocessQuery');   // only to spot date words
 const {
   UNDERSTAND_PROMPT_ID,
   PROMPT_REFRESH_MS,
@@ -306,7 +307,11 @@ function sameCompany(asked, key) {
   // with the same word ("Estee Lauder" ~ "The Estée Lauder Companies",
   // but "Beauty" is NOT "Northwind Beauty Group")
   const [short, long] = a.length <= k.length ? [a, k] : [k, a];
-  if (short.join('').length < 4) return false;
+  const shortLen = short.join('').length;
+  if (shortLen < 3) return false;
+  // a 3-letter name only counts when it is exactly the first word of the
+  // longer name: "YSL" ~ "YSL Beauty" (typos are not allowed this short)
+  if (shortLen === 3) return short.length === 1 && short[0] === long[0];
   if (!sameWord(short[0], long[0])) return false;
   return short.every((sw) => long.some((lw) => sameWord(sw, lw)));
 }
@@ -567,11 +572,40 @@ function checkForm(form, question, names) {
   // "we / our / my / I" in an English question = about the client's own
   // business, even if the AI missed it.
   const ownWords = /\b(we|us|our|ours|my|mine|i)\b/i.test(String(question).replace(/\bI\.?\s?e\b/gi, ''));
+  // "competitors" / "rivals" with no company named = the client's own
+  // competitors ("Competitor activity since March"). With a company named
+  // ("Nike's competitors") it is about that company instead.
+  const ownCompetitors = /\b(competitors?|rivals?)\b/i.test(String(question)) && companiesOut.length === 0;
+  // Dates are worked out by code (resolveTime), so date words the AI put in
+  // topics or metrics are taken out: metrics ["last 3 months"] -> [],
+  // topics ["sales since 2020"] -> ["sales"]. (Product names are left alone:
+  // some have years in them.)
+  const withoutDates = (field) => form[field].flatMap((item) => {
+    const p = preprocessText(item);
+    if (p.time_expressions.length === 0) return [item];
+    let rest = p.preprocessed_query;
+    for (const t of p.time_expressions) rest = rest.split(t.text).join(' ');
+    rest = rest.replace(/\s+/g, ' ').trim();
+    // drop little words left hanging at either end: "revenue in" -> "revenue"
+    const EDGE = /^(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)\s+|\s+(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)$/i;
+    while (EDGE.test(rest)) rest = rest.replace(EDGE, '').trim();
+    rest = rest.replace(/^[\s,.;-]+|[\s,.;-]+$/g, '').trim();
+    const keep = meaningfulWords(rest).some((w) => w.length >= 3);
+    removed.push({
+      field,
+      value: item,
+      why: keep ? `date words taken out (dates are worked out separately), kept "${rest}"` : 'a date (dates are worked out separately)',
+    });
+    return keep ? [rest] : [];
+  });
+
   const checked = {
     ...form,
     companies: companiesOut,
     places,
-    about_own_business: form.about_own_business || ownWords ||
+    topics: withoutDates('topics'),
+    metrics: withoutDates('metrics'),
+    about_own_business: form.about_own_business || ownWords || ownCompetitors ||
       companiesOut.some((c) => c.matched && c.matched.type === 'own_company'),
   };
   return { checked, removed, checks_skipped: skipChecks ? 'question is mostly not in Latin letters' : null };
@@ -593,7 +627,7 @@ function checkForm(form, question, names) {
  *   about_own_business, dashboard_request,
  *   time: { ranges, from, to } | null,
  *   constraints, implied, answer_format,
- *   client: { company_name, industry },
+ *   client: { company_name, industry, competitors: [names on the client's list] },
  *   removed_by_check, checks_skipped, attempts
  * }
  * @throws ChatError 503 if the AI could not give a usable reply
@@ -653,7 +687,7 @@ async function understandQuery(request, cleaned, options = {}) {
     message: null,
     ...checked,
     time: resolveTime(cleaned.time_expressions, today),
-    client: names.client,
+    client: { ...names.client, competitors: (names.competitors || []).map((c) => c.name) },
     removed_by_check: removed,
     checks_skipped,
     attempts,

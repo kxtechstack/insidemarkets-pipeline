@@ -58,4 +58,11 @@ module.exports = {
   NO_TOPIC_MESSAGE:
     'What should I look at? Tell me a company, market, product or topic, for example ' +
     '"competitor launches this month" or "skincare trends in the UAE".',
+
+  // ── Test tools ─────────────────────────────────────────────────────────
+  // The chat playground page (/dynamic-rag/playground) shows what every
+  // step did with a question. Only for testing on our own laptop: it opens
+  // only when the .env file has DR_PLAYGROUND=on. Keep it OFF on the live
+  // server.
+  PLAYGROUND_ON: process.env.DR_PLAYGROUND === 'on',
 };

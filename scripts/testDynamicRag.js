@@ -18,6 +18,11 @@
  *        node scripts/testDynamicRag.js big5   the BIG Step 5 test: ~150 questions
  *                                              from understandQueryQuestions.json
  *                                              (no server needed, takes ~4 min)
+ *        node scripts/testDynamicRag.js show   ~50 questions through the real chat,
+ *                                              printing what EVERY step did, with
+ *                                              what was expected (server needed, ~3 min).
+ *                                              The log is saved in scripts/logs/.
+ *        node scripts/testDynamicRag.js show all   the same for ~500 questions (~25 min)
  *
  * Every line must say PASS. A FAIL line shows what came back.
  * Steps 1 and 2 use no AI. Steps 3 and 5 ask the real AI (about 60 and
@@ -648,6 +653,7 @@ async function testStep5() {
       { id: 'c1', name: "L'Oréal", name_key: 'loreal', search_name: "L'Oreal", aliases: ['LOreal Paris'] },
       { id: 'c2', name: 'The Estée Lauder Companies', name_key: 'esteelauder', aliases: ['Estee Lauder'] },
       { id: 'c3', name: 'Shiseido', name_key: 'shiseido', aliases: [] },
+      { id: 'c4', name: 'YSL Beauty', search_name: 'YSL Beauty', aliases: [] },
     ],
   };
   const list = understand.buildCompanyList(names);
@@ -662,6 +668,9 @@ async function testStep5() {
   await matches('own company without accent', 'Northwind', 'own');
   await matches('a company not in the list -> no match', 'Apple', null);
   await matches('a short word does not match a long name', 'Beauty', null);
+  await matches('3-letter short name "YSL" -> YSL Beauty', 'YSL', 'c4');
+  await matches('3-letter typo "YSB" -> no match', 'YSB', null);
+  await matches('3-letter piece "Est" -> no match', 'Est', null);
 
   // ---- the code checks the AI's form ----
   const form = (extra) => ({
@@ -698,6 +707,24 @@ async function testStep5() {
   await check('Check: a question not in Latin letters is not checked word by word', async () => {
     const r = understand.checkForm(form({ places: ['Saudi Arabia'] }), 'ما هي اتجاهات سوق التجزئة في السعودية؟', names);
     return (r.checked.places.join() === 'Saudi Arabia' && Boolean(r.checks_skipped)) || r;
+  });
+  await check('Check: "competitors" with no company named = own business', async () => {
+    const r = understand.checkForm(form({ companies: [] }), 'Competitor activity since March 2026', names);
+    return r.checked.about_own_business === true || r.checked;
+  });
+  await check('Check: "Nike competitors" (company named) is NOT own business', async () => {
+    const r = understand.checkForm(form({ companies: ['Nike'] }), 'Who are the main Nike competitors?', names);
+    return r.checked.about_own_business === false || r.checked;
+  });
+  await check('Check: date words in topics / numbers are taken out (dates are done by code)', async () => {
+    const r = understand.checkForm(form({
+      metrics: ['last 3 months', 'revenue in 2023', 'market share'],
+      topics: ['sales since 2020', 'Q3 2025', 'market activity'],
+      products: ['2020 Collection'],
+    }), 'what is loreal doing in Saudi Arabia last 3 months', names);
+    return (r.checked.metrics.join() === 'revenue,market share' &&
+      r.checked.topics.join() === 'sales,market activity' &&
+      r.checked.products.join() === '2020 Collection') || r.checked;
   });
 
   // ---- is there anything to work on? ----
@@ -1138,11 +1165,244 @@ async function testBig5() {
   await check(`Big test 5: every question got an answer (${noAnswer.length} without)`, async () => noAnswer.length === 0 || noAnswer.length);
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// SHOW — send questions through the real chat and print what EVERY step did
+// (like the playground page, but for many questions at once, saved to a log)
+// ═════════════════════════════════════════════════════════════════════════
+//   node scripts/testDynamicRag.js show       ~50 questions from showStepsQuestions.json
+//   node scripts/testDynamicRag.js show all   those + understandQueryQuestions.json
+//                                             + validateQueryQuestions.json (~500, ~25 min)
+// The server must be running. The log is also saved in scripts/logs/.
+async function testShow(includeAll) {
+  const fs = require('fs');
+  const path = require('path');
+  const logLines = [];
+  const out = (line = '') => { console.log(line); logLines.push(line); };
+  const list = (arr) => (arr && arr.length ? arr.join(', ') : '-');
+
+  // ---- the client's real names, for the {placeholders} ----
+  const { data: comps } = await supabase.schema('admin').from('competitors')
+    .select('id, name').eq('client_id', CLIENT_ID).eq('is_active', true).order('name');
+  const { data: client } = await supabase.schema('admin').from('clients')
+    .select('company_name').eq('id', CLIENT_ID).maybeSingle();
+  const c1 = (comps || [])[0];
+  const c2 = (comps || [])[1];
+  const own = client && client.company_name;
+
+  const fill = (text, ids) => {
+    let t = String(text);
+    const put = (tag, value, id) => {
+      if (!t.includes(tag)) return true;
+      if (!value) return false;
+      t = t.split(tag).join(value);
+      if (id && ids) ids.add(id);
+      return true;
+    };
+    const ok = put('{competitor_lower}', c1 && c1.name.toLowerCase(), c1 && c1.id) &&
+      put('{competitor2}', c2 && c2.name, c2 && c2.id) &&
+      put('{competitor}', c1 && c1.name, c1 && c1.id) &&
+      put('{own}', own, null);
+    return ok ? t : null;
+  };
+
+  // ---- the questions ----
+  const items = [];
+  const seen = new Set();
+  let skipped = 0;
+  const add = (t, source) => {
+    const ids = new Set();
+    const q = fill(t.q, ids);
+    if (q === null) { skipped += 1; return; }
+    if (seen.has(q)) return;
+    seen.add(q);
+    const fillList = (arr) => (arr ? arr.map((x) => fill(x)).filter(Boolean) : arr);
+    items.push({
+      ...t, q, source, expectIds: [...ids],
+      companies: fillList(t.companies), notListed: fillList(t.notListed),
+    });
+  };
+  for (const t of require('./showStepsQuestions.json').questions) add(t, 'show');
+  if (includeAll) {
+    for (const t of require('./understandQueryQuestions.json').questions) {
+      add({
+        group: 'understand (big5 list)', q: t.q, step3: t.clarify ? ['accept', 'clarification'] : ['accept'],
+        askBack: Boolean(t.clarify), goals: t.goals, companies: t.companies, onlyCompanies: t.onlyCompanies,
+        places: t.places, onlyPlaces: t.onlyPlaces, own: t.ownBusiness, ownOrDashboard: t.ownOrDashboard,
+      }, 'big5');
+    }
+    const v = require('./validateQueryQuestions.json');
+    for (const label of ['accept', 'reject', 'greeting', 'clarification']) {
+      for (const q of v[label]) add({ group: `step 3 (${label})`, q, step3: [label] }, 'big');
+    }
+    for (const e of v.either) add({ group: 'step 3 (either)', q: e.question, step3: e.allowed }, 'big');
+  }
+
+  // ---- what is wrong with one result ----
+  // An expected value may list alternatives: "USA|United States".
+  const has = (got, expected) => String(expected).split('|').some((e) => listHas(got, e));
+  function judge(t, json) {
+    const serious = [];
+    const minor = [];
+    if (!json || !json.ok) {
+      serious.push(`error: ${json && json.error ? `${json.error.code} at ${json.failed_step}` : 'no reply'}`);
+      return { serious, minor };
+    }
+    const v = json.debug && json.debug.validateQuery;
+    const u = json.debug && json.debug.understandQuery;
+    // Step 3 let a no-topic question through, but Step 5 still asked the
+    // user back: the user sees the right thing, so this is only minor.
+    const caughtByStep5 = v && v.ai_label === 'accept' && json.status === 'clarification' &&
+      t.step3 && t.step3.length === 1 && t.step3[0] === 'clarification';
+    if (caughtByStep5) minor.push('Step 3 let it through, Step 5 asked the user back');
+    else if (t.step3 && v && !t.step3.includes(v.ai_label)) serious.push(`Step 3 said "${v.ai_label}" (expected ${t.step3.join(' or ')})`);
+    if (t.askBack && json.status !== 'clarification') serious.push('should ask the user back, but did not');
+    const mustAnswer = !t.askBack && t.step3 && t.step3.length === 1 && t.step3[0] === 'accept';
+    if (mustAnswer && v && v.status === 'accept' && json.status === 'clarification') serious.push('Step 5 asked the user back, but the question has a topic');
+    if (!u || u.status !== 'understood') return { serious, minor };
+
+    const names = u.companies.map((c) => c.name);
+    for (const c of t.companies || []) if (!has(names, c)) serious.push(`missing company ${c}`);
+    for (const p of t.places || []) if (!has(u.places, p)) serious.push(`missing place ${p}`);
+    if (t.onlyPlaces) {
+      const extra = u.places.filter((p) => !(t.places || []).some((e) => has([p], e)));
+      if (extra.length) serious.push(`added place ${extra.join(', ')}`);
+    }
+    if (t.onlyCompanies) {
+      const extra = names.filter((n) => !(t.companies || []).some((e) => has([n], e)));
+      if (extra.length) serious.push(`added company ${extra.join(', ')}`);
+    }
+    for (const id of t.expectIds || []) {
+      if (!u.companies.some((c) => c.matched && c.matched.id === id)) serious.push('a competitor on the client\'s list was not matched');
+    }
+    for (const n of t.notListed || []) {
+      if (u.companies.some((c) => c.matched && listHas([c.name], n))) serious.push(`${n} was matched to the client's list, but it is not on it`);
+    }
+    if (t.noDates && u.time) serious.push('dates found, but the question has none');
+
+    if (t.goals && !t.goals.includes(u.primary_goal)) minor.push(`main goal ${u.primary_goal} (expected ${t.goals.join(' or ')})`);
+    for (const g of t.alsoGoals || []) {
+      if (u.primary_goal !== g && !u.secondary_goals.includes(g)) minor.push(`missing extra goal ${g}`);
+    }
+    if (t.own && !u.about_own_business) minor.push('"about own business" should be Yes');
+    if (t.dashboard && !u.dashboard_request) minor.push('"dashboard" should be Yes');
+    if (t.ownOrDashboard && !u.about_own_business && !u.dashboard_request) minor.push('"own business" or "dashboard" should be Yes');
+    return { serious, minor };
+  }
+
+  // ---- print one question, step by step ----
+  const secs = (ms) => (ms == null ? '' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+  function printOne(i, t, httpStatus, json, verdict) {
+    const d = (json && json.debug) || {};
+    const tm = d.timings || {};
+    out('─'.repeat(78));
+    out(`Q${i + 1}/${items.length}  [${t.group || t.source}]  ${t.q}`);
+
+    const r1 = d.receiveQuestion;
+    if (r1) out(`  1 Receive     ok · ${r1.is_new_conversation ? 'new chat' : 'same chat'} · ${secs(tm.receiveQuestion)}`);
+
+    const r2 = d.preprocessQuery;
+    if (r2) {
+      const changed = r2.preprocessed_query !== r2.original_query;
+      out(`  2 Clean       ${changed ? `"${r2.preprocessed_query}"` : '(no change)'} · ${secs(tm.preprocessQuery)}`);
+      out(`                swapped: ${list(r2.corrections_applied)} · date words: ${list((r2.time_expressions || []).map((x) => x.text))}${r2.word_list_loaded ? '' : ' · WORD LIST NOT LOADED'}`);
+    }
+
+    const v = d.validateQuery;
+    if (v) {
+      out(`  3 Validate    ${v.status.toUpperCase()} (AI label: ${v.ai_label}) · ${v.attempts} AI call${v.attempts === 1 ? '' : 's'} · ${secs(tm.validateQuery)}`);
+      if (v.reason) out(`                AI reason: ${v.reason}`);
+    }
+
+    const u = d.understandQuery;
+    if (u) {
+      out(`  5 Understand  ${u.status.toUpperCase()} · ${u.attempts} AI call${u.attempts === 1 ? '' : 's'} · ${secs(tm.understandQuery)}`);
+      out(`                main goal: ${u.primary_goal}   also: ${list(u.secondary_goals)}`);
+      const comp = u.companies.map((c) => {
+        if (!c.matched) return `${c.name} (not on list)`;
+        return c.matched.type === 'own_company' ? `${c.name} (= own company)` : `${c.name} (= competitor ${c.matched.name})`;
+      });
+      out(`                companies: ${list(comp)}`);
+      out(`                places: ${list(u.places)}   industries: ${list(u.industries)}   products: ${list(u.products)}`);
+      out(`                topics: ${list(u.topics)}   numbers: ${list(u.metrics)}`);
+      const dates = u.time && u.time.ranges.length
+        ? u.time.ranges.map((x) => `"${x.text}" -> ${x.from} to ${x.to}${x.note ? ` (${x.note})` : ''}`).join('; ')
+        : 'none';
+      out(`                dates: ${dates}`);
+      out(`                own business: ${u.about_own_business ? 'YES' : 'no'}   dashboard: ${u.dashboard_request ? 'YES' : 'no'}   format: ${u.answer_format || '-'}`);
+      out(`                limits: ${list(u.constraints)}   also needed: ${list(u.implied)}`);
+      if (u.removed_by_check.length) out(`                removed by code: ${u.removed_by_check.map((x) => `${x.field} "${x.value}" (${x.why})`).join('; ')}`);
+      if (u.checks_skipped) out(`                code checks skipped: ${u.checks_skipped}`);
+    }
+
+    let sees;
+    if (!json) sees = 'NO REPLY from the server';
+    else if (!json.ok) sees = `ERROR ${json.error.code} at ${json.failed_step}: ${json.error.message} (HTTP ${httpStatus})`;
+    else if (json.status === 'accept') sees = '(accepted — answer not built yet)';
+    else sees = `[${json.status === 'clarification' ? 'asked back' : 'rejected'}] ${json.answer}`;
+    out(`  User sees     ${sees}    (total ${secs(tm.total)})`);
+
+    if (verdict.serious.length) out(`  RESULT        SERIOUS: ${verdict.serious.concat(verdict.minor).join('; ')}`);
+    else if (verdict.minor.length) out(`  RESULT        minor: ${verdict.minor.join('; ')}`);
+    else out('  RESULT        OK');
+  }
+
+  // ---- run ----
+  const stamp = new Date().toLocaleString('sv-SE', { timeZone: process.env.DR_TIMEZONE || 'Asia/Kolkata' }).replace(' ', '_').replace(/:/g, '-').slice(0, 16);
+  out(`SHOW EVERY STEP — ${items.length} questions${includeAll ? ' (all lists)' : ''} — ${stamp.replace('_', ' ')}`);
+  out(`client: ${own || '(no name)'} · competitors on the list: ${list((comps || []).map((c) => c.name))}`);
+  out(`{competitor} = ${c1 ? c1.name : '(none)'} · {competitor2} = ${c2 ? c2.name : '(none)'}${skipped ? ` · ${skipped} questions skipped (no names to fill in)` : ''}`);
+  out(`about ${Math.ceil((items.length * 2) / AI_CALLS_PER_MINUTE)} minutes (AI limit: ${AI_CALLS_PER_MINUTE} calls a minute)`);
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const results = [];
+  for (let i = 0; i < items.length; i++) {
+    const t = items[i];
+    let r = await good(t.q);
+    const busy = !r.json || (r.json.ok === false && ['AI_UNAVAILABLE', 'SERVER_ERROR'].includes(r.json.error && r.json.error.code));
+    if (busy) {
+      console.log('  (AI busy — waiting 60 s and trying this question once more)');
+      await sleep(60000);
+      r = await good(t.q);
+    }
+    const verdict = judge(t, r.json);
+    printOne(i, t, r.status, r.json, verdict);
+    results.push({ t, verdict });
+  }
+
+  // ---- summary ----
+  const serious = results.filter((x) => x.verdict.serious.length);
+  const minor = results.filter((x) => !x.verdict.serious.length && x.verdict.minor.length);
+  out('═'.repeat(78));
+  out('SUMMARY');
+  out(`  questions: ${results.length}   OK: ${results.length - serious.length - minor.length}   serious: ${serious.length}   minor: ${minor.length}`);
+  if (serious.length) {
+    out('\n  SERIOUS (wrong decision, wrong / missing company or place, wrong match, wrong dates, error):');
+    for (const x of serious) out(`    - ${x.t.q}\n        ${x.verdict.serious.join('; ')}`);
+  }
+  if (minor.length) {
+    out('\n  MINOR (different goal, own business / dashboard missed):');
+    for (const x of minor) out(`    - ${x.t.q}\n        ${x.verdict.minor.join('; ')}`);
+  }
+
+  const dir = path.join(__dirname, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `showSteps_${stamp}.txt`);
+  fs.writeFileSync(file, logLines.join('\n') + '\n', 'utf8');
+  console.log(`\nLog saved: ${file}`);
+
+  await check(`Show: no serious mistakes (${serious.length} found)`, async () => serious.length === 0 || serious.length);
+}
+
 // ── Clean up: delete every chat this test created ────────────────────────
 async function cleanUp() {
   const ids = [...createdChats];
   if (ids.length === 0) return;
-  const { error } = await supabase.from('dr_conversations').delete().in('id', ids);
+  // Deleted 50 at a time: one request with hundreds of ids is too long
+  // for the database ("URI too long").
+  let error = null;
+  for (let i = 0; i < ids.length && !error; i += 50) {
+    ({ error } = await supabase.from('dr_conversations').delete().in('id', ids.slice(i, i + 50)));
+  }
   if (error) {
     console.log(`\nCLEAN-UP PROBLEM: ${error.message}`);
     console.log('Test chats left in dr_conversations:', ids.join(', '));
@@ -1161,9 +1421,10 @@ async function main() {
   const args = process.argv.slice(2).map((a) => a.toLowerCase());
   const wantBig = args.includes('big');
   const wantBig5 = args.includes('big5');
+  const wantShow = args.includes('show');
   const wanted = args.map(Number).filter(Boolean);
-  const run = (n) => (wanted.length === 0 && !wantBig && !wantBig5) || wanted.includes(n);
-  const needsServer = [1, 2, 3, 5].some(run);
+  const run = (n) => (wanted.length === 0 && !wantBig && !wantBig5 && !wantShow) || wanted.includes(n);
+  const needsServer = [1, 2, 3, 5].some(run) || wantShow;
 
   if (needsServer) {
     try {
@@ -1182,6 +1443,7 @@ async function main() {
     if (run(5)) await testStep5();
     if (wantBig) await testBig();
     if (wantBig5) await testBig5();
+    if (wantShow) await testShow(args.includes('all'));
   } finally {
     await cleanUp();
   }

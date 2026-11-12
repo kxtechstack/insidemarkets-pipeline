@@ -340,7 +340,8 @@
    "q": "What is {competitor} doing in the UAE?",
    "goals": [
     "competitor_analysis",
-    "list"
+    "list",
+    "company_profile"
    ],
    "places": [
     "UAE"

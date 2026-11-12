@@ -247,7 +247,6 @@
   "clarification": [
     "Tell me more",
     "Explain that",
-    "What do you think?",
     "Is this a good idea?",
     "How did they perform?",
     "Should we do it?",
@@ -395,7 +394,8 @@
     {
       "allowed": [
         "clarification",
-        "reject"
+        "reject",
+        "greeting"
       ],
       "question": "test"
     },
@@ -463,6 +463,14 @@
       ],
       "question": "analysis",
       "note": "One word, no topic. If Step 3 lets it through, Step 5 must ask the user back (tested in Step 5)."
+    },
+    {
+      "allowed": [
+        "clarification",
+        "greeting"
+      ],
+      "question": "What do you think?",
+      "note": "Asking back or the friendly what-I-can-do reply are both fine."
     }
   ]
 }

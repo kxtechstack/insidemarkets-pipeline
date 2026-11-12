@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<!--
+  modules/dynamicRag/chatPlayground.html
+
+  TEST PAGE for the Decision Intelligence chat (not for clients).
+  Type a question and see, step by step, what the chat did with it.
+
+  Open: http://localhost:3000/dynamic-rag/playground
+  Works only when the .env file has DR_PLAYGROUND=on.
+  It calls the real chat (POST /dynamic-rag/chat), so it uses real AI calls
+  and saves the question in the chat history like a normal question.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decision Intelligence – Playground</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --line: #e3e6ea; --text: #1d2329; --soft: #65707c;
+    --green: #1a7f4b; --green-bg: #e6f4ec; --red: #b42318; --red-bg: #fdecea;
+    --amber: #9a6700; --amber-bg: #fff4d6; --blue: #1f5fbf; --blue-bg: #e8f0fc;
+    --grey-bg: #eef0f2;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--soft); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  label { font-size: 13px; color: var(--soft); display: block; margin-bottom: 4px; }
+  input[type=text], textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: #fff; }
+  textarea { min-height: 70px; resize: vertical; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+  button { background: var(--blue); color: #fff; border: 0; border-radius: 8px; padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.link { background: none; color: var(--blue); padding: 0; font-weight: 400; }
+  .check { font-size: 14px; color: var(--soft); display: flex; align-items: center; gap: 6px; }
+  .history { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .history button { background: var(--grey-bg); color: var(--text); font-weight: 400; font-size: 13px; padding: 4px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .reply { border-left: 4px solid var(--blue); }
+  .reply h2, .step h2 { font-size: 16px; margin: 0; }
+  .reply .msg { margin-top: 8px; font-size: 16px; }
+  .step-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .num { width: 28px; height: 28px; border-radius: 50%; background: var(--grey-bg); display: grid; place-items: center; font-weight: 700; font-size: 14px; flex: none; }
+  .what { color: var(--soft); font-size: 13px; margin: 4px 0 10px 38px; }
+  .body { margin-left: 38px; }
+  .time { margin-left: auto; color: var(--soft); font-size: 13px; }
+  .chip { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 20px; }
+  .ok { background: var(--green-bg); color: var(--green); }
+  .bad { background: var(--red-bg); color: var(--red); }
+  .warn { background: var(--amber-bg); color: var(--amber); }
+  .info { background: var(--blue-bg); color: var(--blue); }
+  .off { background: var(--grey-bg); color: var(--soft); }
+  .step.dim { opacity: .55; }
+  .step.dim .what { margin-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+  tr:first-child td { border-top: 0; }
+  td.k { width: 230px; color: var(--soft); font-size: 14px; }
+  .tag { display: inline-block; background: var(--grey-bg); border-radius: 6px; padding: 1px 8px; margin: 2px 4px 2px 0; font-size: 14px; }
+  .tag.ok, .tag.warn, .tag.bad, .tag.info { font-weight: 400; }
+  .none { color: var(--soft); font-style: italic; }
+  .small { font-size: 13px; color: var(--soft); }
+  .changed { background: var(--amber-bg); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--blue); font-size: 13px; }
+  pre { background: #0f1720; color: #d6e2ee; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; max-height: 420px; }
+  .error-box { background: var(--red-bg); color: var(--red); border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } td.k { width: 120px; } .body, .what { margin-left: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Decision Intelligence – Playground</h1>
+  <p class="sub">Type a question and see what every step of the chat does with it. Test page only.</p>
+
+  <div class="card">
+    <div class="row">
+      <div><label for="clientId">Client ID</label><input type="text" id="clientId" placeholder="client id from admin.clients"></div>
+      <div><label for="userId">User ID</label><input type="text" id="userId" placeholder="user id of someone in that client"></div>
+    </div>
+    <label for="question">Question</label>
+    <textarea id="question" placeholder="for example: Compare Lancôme and Estée Lauder in the UAE over the last 3 months and find opportunities for us"></textarea>
+    <div class="actions">
+      <button id="ask">Ask</button>
+      <label class="check"><input type="checkbox" id="sameChat"> Keep asking in the same chat</label>
+      <span class="small" id="chatInfo"></span>
+    </div>
+    <div class="history" id="history"></div>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script>
+// ── Plain names for things the chat uses ──────────────────────────────────
+const GOAL_NAMES = {
+  fact_lookup: 'Find one fact or number',
+  list: 'Give a list / what is new',
+  company_profile: 'Overview of one company',
+  trends: 'Find trends / what is changing',
+  comparison: 'Compare',
+  opportunities: 'Find opportunities',
+  competitor_analysis: 'Look at competitors',
+  market_entry: 'Entering a market',
+  feasibility: 'Can this plan work?',
+  forecast: 'What will happen next',
+  risks: 'Find risks',
+  campaign_ideas: 'Campaign ideas',
+  strategy: 'What we should do',
+  framework: 'SWOT / PESTLE / Five Forces',
+};
+
+const STEPS = [
+  { key: 'receiveQuestion', num: 1, title: 'Receive the question', what: 'Checks the user and client, starts or continues the chat, saves the question.' },
+  { key: 'preprocessQuery', num: 2, title: 'Clean the question', what: 'Fixes spacing and symbols, swaps short forms from the word list (KSA → Saudi Arabia), finds date words. No AI.' },
+  { key: 'validateQuery', num: 3, title: 'Accept, reject or ask back', what: 'The AI decides if this is a business question we can work on.' },
+  { key: null, num: 4, title: 'Remember earlier questions', what: 'Skipped for now.', skipped: true },
+  { key: 'understandQuery', num: 5, title: 'Understand the question', what: 'The AI fills a form (goals, companies, places…). Code then removes anything not in the question, matches companies to the client list and works out the dates.' },
+  { key: null, num: 6, title: 'Plan what information is needed', what: 'Not built yet.', later: true },
+  { key: null, num: 7, title: 'Choose the sources', what: 'Not built yet.', later: true },
+  { key: null, num: 8, title: 'Check the plan', what: 'Not built yet.', later: true },
+  { key: null, num: 9, title: 'Search and check the evidence', what: 'Not built yet.', later: true },
+  { key: null, num: 10, title: 'Write the answer', what: 'Not built yet.', later: true },
+];
+
+// ── Small helpers ─────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const tags = (list, cls = '') => (list && list.length) ? list.map((x) => `<span class="tag ${cls}">${esc(x)}</span>`).join('') : '<span class="none">none</span>';
+const yesNo = (v) => v ? '<span class="chip ok">Yes</span>' : '<span class="chip off">No</span>';
+const secs = (ms) => ms == null ? '' : (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+const niceDate = (ymd) => {
+  if (!ymd) return '';
+  const d = new Date(ymd + 'T00:00:00Z');
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+};
+const rows = (pairs) => `<table>${pairs.map(([k, v]) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`).join('')}</table>`;
+const raw = (obj) => `<details><summary>Show raw data</summary><pre>${esc(JSON.stringify(obj, null, 2))}</pre></details>`;
+
+const store = {
+  get(k) { try { return localStorage.getItem('drPlayground.' + k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem('drPlayground.' + k, v); } catch (e) { /* not important */ } },
+};
+
+// ── What each step shows ──────────────────────────────────────────────────
+function showStep1(r) {
+  return rows([
+    ['Question as typed', esc(r.original_query)],
+    ['Chat', r.is_new_conversation ? 'New chat started' : 'Added to the same chat'],
+    ['Chat ID', `<span class="small">${esc(r.conversation_id)}</span>`],
+  ]);
+}
+
+function showStep2(r) {
+  const changed = r.preprocessed_query !== r.original_query;
+  const terms = r.detected_terms || {};
+  const termList = Object.keys(terms).flatMap((type) => (terms[type] || []).map((n) => `${n} (${type})`));
+  return rows([
+    ['Before', esc(r.original_query)],
+    ['After cleaning', `<span class="${changed ? 'changed' : ''}">${esc(r.preprocessed_query)}</span>${changed ? '' : ' <span class="small">(no change)</span>'}`],
+    ['Short forms swapped', tags(r.corrections_applied)],
+    ['Words recognised', tags(termList)],
+    ['Date words found', tags((r.time_expressions || []).map((t) => t.text))],
+    ['Word list', r.word_list_loaded ? '<span class="chip ok">loaded</span>' : '<span class="chip bad">NOT loaded – short forms were not swapped</span>'],
+  ]);
+}
+
+function showStep3(r) {
+  const decision = { accept: ['Accepted', 'ok'], reject: ['Rejected', 'bad'], clarification: ['Ask the user back', 'warn'] }[r.status] || [r.status, 'off'];
+  return rows([
+    ['Decision', `<span class="chip ${decision[1]}">${decision[0]}</span>`],
+    ['AI label', `${esc(r.ai_label)}${r.ai_label === 'greeting' ? ' <span class="small">(greetings get a friendly reply)</span>' : ''}`],
+    ['AI reason', r.reason ? esc(r.reason) : '<span class="none">none</span>'],
+    ['Message to the user', r.message ? esc(r.message) : '<span class="none">none (question goes on)</span>'],
+    ['AI calls', r.attempts === 0 ? '0 <span class="small">(no words in it, so no AI needed)</span>' : esc(r.attempts)],
+  ]);
+}
+
+function companyLine(c) {
+  if (!c.matched) return `<span class="tag">${esc(c.name)}</span> <span class="small">not in the client's list – used as a search word</span>`;
+  if (c.matched.type === 'own_company') return `<span class="tag info">${esc(c.name)}</span> <span class="small">= the client's own company (${esc(c.matched.name)})</span>`;
+  return `<span class="tag ok">${esc(c.name)}</span> <span class="small">= competitor in the client's list: ${esc(c.matched.name)}</span>`;
+}
+
+function showStep5(r) {
+  const goal = (g) => `${esc(GOAL_NAMES[g] || g)} <span class="small">(${esc(g)})</span>`;
+  const time = r.time && r.time.ranges && r.time.ranges.length
+    ? r.time.ranges.map((t) => `<div>"${esc(t.text)}" → <b>${niceDate(t.from)} to ${niceDate(t.to)}</b>${t.note ? ` <span class="small">(${esc(t.note)})</span>` : ''}</div>`).join('')
+    : '<span class="none">no dates in the question</span>';
+  const removed = (r.removed_by_check || []).length
+    ? r.removed_by_check.map((x) => `<div><span class="tag bad">${esc(x.value)}</span> <span class="small">removed from ${esc(x.field)}: ${esc(x.why)}</span></div>`).join('')
+    : '<span class="none">nothing removed</span>';
+
+  const pairs = [];
+  if (r.status === 'clarification') {
+    pairs.push(['Result', `<span class="chip warn">Ask the user back</span> ${esc(r.message)}`]);
+  } else {
+    pairs.push(['Result', '<span class="chip ok">Understood</span>']);
+  }
+  pairs.push(
+    ['Main goal', r.primary_goal ? goal(r.primary_goal) : '<span class="none">none</span>'],
+    ['Also wants', (r.secondary_goals || []).length ? r.secondary_goals.map(goal).join('<br>') : '<span class="none">nothing else</span>'],
+    ['Companies', (r.companies || []).length ? r.companies.map(companyLine).join('<br>') : '<span class="none">none</span>'],
+    ['Places', tags(r.places)],
+    ['Industries', tags(r.industries)],
+    ['Products', tags(r.products)],
+    ['Topics', tags(r.topics)],
+    ['Numbers asked for', tags(r.metrics)],
+    ['Dates', time],
+    ['About the client\'s own business?', yesNo(r.about_own_business)],
+    ['About their dashboard news / alerts?', yesNo(r.dashboard_request)],
+    ['Limits the user set', tags(r.constraints)],
+    ['Also needed (not said)', tags(r.implied)],
+    ['Answer format asked for', r.answer_format ? esc(r.answer_format) : '<span class="none">none</span>'],
+    ['Removed by the code check', removed],
+  );
+  if (r.checks_skipped) pairs.push(['Code checks skipped', `<span class="chip warn">${esc(r.checks_skipped)}</span>`]);
+  if (r.client) {
+    pairs.push(['Client', `${esc(r.client.company_name)} <span class="small">(${esc(r.client.industry || 'no industry set')})</span>`]);
+    pairs.push(['Client\'s competitor list <span class="small">(active only – names are matched against this)</span>',
+      (r.client.competitors || []).length ? tags(r.client.competitors) : '<span class="chip warn">empty – no competitors set up for this client</span>']);
+  }
+  pairs.push(['AI calls', esc(r.attempts) + (r.attempts > 1 ? ' <span class="small">(first reply could not be used, AI asked again)</span>' : '')]);
+  return rows(pairs);
+}
+
+const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5 };
+
+// ── Draw the whole result ─────────────────────────────────────────────────
+function draw(question, httpStatus, json) {
+  const debug = (json && json.debug) || {};
+  const timings = debug.timings || {};
+  let html = '';
+
+  // What the user would see
+  let replyText, replyChip;
+  if (!json) {
+    replyChip = '<span class="chip bad">No reply</span>';
+    replyText = 'The server did not answer. Is it running?';
+  } else if (!json.ok) {
+    replyChip = '<span class="chip bad">Error</span>';
+    replyText = `${esc(json.error && json.error.message)} <span class="small">(${esc(json.error && json.error.code)}, HTTP ${httpStatus})</span>`;
+  } else if (json.status === 'reject') {
+    replyChip = '<span class="chip bad">Rejected</span>';
+    replyText = esc(json.answer);
+  } else if (json.status === 'clarification') {
+    replyChip = '<span class="chip warn">Asked back</span>';
+    replyText = esc(json.answer);
+  } else {
+    replyChip = '<span class="chip ok">Accepted</span>';
+    replyText = '<span class="none">Question understood. The answer (Steps 6–10) is not built yet.</span>';
+  }
+  html += `<div class="card reply"><div class="step-head"><h2>What the user sees</h2>${replyChip}<span class="time">total ${secs(timings.total)}</span></div>
+    <div class="small" style="margin-top:4px">Question: ${esc(question)}</div>
+    <div class="msg">${replyText}</div></div>`;
+
+  // Each step
+  let stopped = false;
+  for (const s of STEPS) {
+    const result = s.key ? debug[s.key] : null;
+    let chip, body = '', dim = false;
+
+    if (s.skipped) { chip = '<span class="chip off">skipped</span>'; dim = true; }
+    else if (s.later) { chip = '<span class="chip off">not built</span>'; dim = true; }
+    else if (result) {
+      chip = '<span class="chip ok">done</span>';
+      body = SHOW[s.key](result) + raw(result);
+      const stopsHere =
+        (s.key === 'validateQuery' && result.status !== 'accept') ||
+        (s.key === 'understandQuery' && result.status === 'clarification');
+      if (stopsHere) { chip = '<span class="chip warn">chat stops here</span>'; stopped = true; }
+    } else if (json && json.failed_step === s.key && !stopped) {
+      chip = '<span class="chip bad">failed here</span>';
+      body = `<div class="error-box">${esc(json.error && json.error.message)} (${esc(json.error && json.error.code)})</div>`;
+      stopped = true;
+    } else {
+      chip = '<span class="chip off">did not run</span>';
+      dim = true;
+    }
+
+    html += `<div class="card step ${dim ? 'dim' : ''}">
+      <div class="step-head"><span class="num">${s.num}</span><h2>${esc(s.title)}</h2>${chip}
+        <span class="time">${s.key && timings[s.key] != null ? secs(timings[s.key]) : ''}</span></div>
+      <div class="what">${esc(s.what)}</div>
+      ${body ? `<div class="body">${body}</div>` : ''}
+    </div>`;
+  }
+
+  $('out').innerHTML = html;
+}
+
+// ── Asking ────────────────────────────────────────────────────────────────
+let conversationId = null;
+const history = [];
+
+async function ask(questionFromHistory) {
+  const question = questionFromHistory != null ? questionFromHistory : $('question').value;
+  const clientId = $('clientId').value.trim();
+  const userId = $('userId').value.trim();
+  store.set('clientId', clientId);
+  store.set('userId', userId);
+  $('question').value = question;
+
+  const body = { question, clientId, userId };
+  if ($('sameChat').checked && conversationId) body.conversationId = conversationId;
+
+  $('ask').disabled = true;
+  $('out').innerHTML = '<div class="card small">Working… (Steps 3 and 5 call the AI, this can take a few seconds)</div>';
+
+  let httpStatus = 0, json = null;
+  try {
+    const res = await fetch('/dynamic-rag/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    httpStatus = res.status;
+    json = await res.json();
+  } catch (e) {
+    json = null;
+  }
+  $('ask').disabled = false;
+
+  if (json && json.conversation_id) conversationId = json.conversation_id;
+  $('chatInfo').textContent = conversationId ? `chat: ${conversationId.slice(0, 8)}…` : '';
+
+  if (question.trim() && !history.includes(question)) {
+    history.unshift(question);
+    if (history.length > 15) history.pop();
+    $('history').innerHTML = history.map((q, i) => `<button title="${esc(q)}" data-i="${i}">${esc(q)}</button>`).join('');
+  }
+  draw(question, httpStatus, json);
+}
+
+$('ask').addEventListener('click', () => ask());
+$('question').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ask(); });
+$('history').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) ask(history[Number(b.dataset.i)]); });
+$('sameChat').addEventListener('change', () => { if (!$('sameChat').checked) { conversationId = null; $('chatInfo').textContent = ''; } });
+
+$('clientId').value = store.get('clientId') || '';
+$('userId').value = store.get('userId') || '';
+</script>
+</body>
+</html>
