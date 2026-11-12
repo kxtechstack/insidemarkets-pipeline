@@ -10,14 +10,19 @@
  *   2. In a second terminal:
  *        node scripts/testDynamicRag.js        all steps
  *        node scripts/testDynamicRag.js 3      only Step 3
+ *        node scripts/testDynamicRag.js 5      only Step 5
  *        node scripts/testDynamicRag.js 1 2    only Steps 1 and 2
  *        node scripts/testDynamicRag.js big    the BIG Step 3 test: ~300 questions
  *                                              from validateQueryQuestions.json
  *                                              (no server needed, takes ~8 min)
+ *        node scripts/testDynamicRag.js big5   the BIG Step 5 test: ~150 questions
+ *                                              from understandQueryQuestions.json
+ *                                              (no server needed, takes ~4 min)
  *
  * Every line must say PASS. A FAIL line shows what came back.
- * Steps 1 and 2 use no AI. Step 3 asks the real AI about 60 questions,
- * so it takes a minute or two.
+ * Steps 1 and 2 use no AI. Steps 3 and 5 ask the real AI (about 60 and
+ * 25 questions). They are spaced out to stay under the AI account limit
+ * (50 calls a minute), so Step 3 takes about 2 minutes and Step 5 about 2.
  *
  * The test asks real questions through the real API, so it uses the real
  * database. At the end it deletes every chat it created, so nothing is
@@ -33,6 +38,7 @@ const {
 const { preprocessText } = require('../modules/dynamicRag/preprocessQuery');
 const { readAiReply, decide, validateQuery } = require('../modules/dynamicRag/validateQuery');
 const { preprocessQuery } = require('../modules/dynamicRag/preprocessQuery');
+const understand = require('../modules/dynamicRag/understandQuery');
 
 // ── Test account (a real, active user of a real, active client) ──────────
 const BASE_URL = process.env.DR_TEST_URL || 'http://localhost:3000';
@@ -48,7 +54,25 @@ let passed = 0;
 let failed = 0;
 
 // ── Small helpers ────────────────────────────────────────────────────────
+// Our AI account allows only 50 AI calls per minute. Questions that reach
+// the AI (Step 3 and after) are spaced out so the test never goes over it:
+// at most AI_CALLS_PER_MINUTE calls per minute (change with DR_TEST_AI_PER_MINUTE).
+const AI_CALLS_PER_MINUTE = Number(process.env.DR_TEST_AI_PER_MINUTE) || 40;
+let nextAiSlot = 0;
+async function waitForAiSlot(aiCalls) {
+  const now = Date.now();
+  const start = Math.max(now, nextAiSlot);
+  nextAiSlot = start + Math.ceil((60000 / AI_CALLS_PER_MINUTE) * aiCalls);
+  if (start > now) await new Promise((r) => setTimeout(r, start - now));
+}
+
 async function ask(body) {
+  // Steps 1-2 use no AI. Up to Step 3 = 1 AI call, the full chat = 2 (Step 3 + Step 5).
+  const stop = Number(body && body.stopAfterStep) || null;
+  const aiCalls = stop === 1 || stop === 2 ? 0 : stop === 3 ? 1 : 2;
+  const isValidRequest = body && typeof body.question === 'string' && body.question.trim() && body.userId && body.clientId;
+  if (aiCalls > 0 && isValidRequest) await waitForAiSlot(aiCalls);
+
   const res = await fetch(`${BASE_URL}/dynamic-rag/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -64,6 +88,7 @@ const good = (question, extra = {}) => ask({ question, clientId: CLIENT_ID, user
 // Same, but the chat stops after Step 1 / Step 2 (no AI is called).
 const upToStep1 = (question, extra = {}) => good(question, { stopAfterStep: 1, ...extra });
 const upToStep2 = (question, extra = {}) => good(question, { stopAfterStep: 2, ...extra });
+const upToStep3 = (question, extra = {}) => good(question, { stopAfterStep: 3, ...extra });
 
 async function check(name, fn) {
   try {
@@ -481,7 +506,7 @@ async function testStep3() {
   for (const [expected, question] of STEP3_QUESTIONS) {
     const allowed = Array.isArray(expected) ? expected : [expected];
     await check(`${allowed.join(' or ').padEnd(13)} | ${question}`, async () => {
-      const r = await good(question);
+      const r = await upToStep3(question);
       const v = r.json && r.json.debug && r.json.debug.validateQuery;
       if (r.status !== 200 || !v) return { status: r.status, body: r.json };
 
@@ -502,8 +527,8 @@ async function testStep3() {
 
   await check('The same question gets the same result when asked again', async () => {
     const q = 'Analyse the retail industry';
-    const a = await good(q);
-    const b = await good(q);
+    const a = await upToStep3(q);
+    const b = await upToStep3(q);
     const la = a.json.debug.validateQuery.ai_label;
     const lb = b.json.debug.validateQuery.ai_label;
     return la === lb || [la, lb];
@@ -511,8 +536,284 @@ async function testStep3() {
 
   await check('The original question is still untouched after Step 3', async () => {
     const q = '  Compare KSA and UAE retail!!!  ';
-    const r = await good(q);
+    const r = await upToStep3(q);
     return r.json.debug.receiveQuestion.original_query === q || r.json.debug.receiveQuestion;
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// STEP 5 — understandQuery.js
+// ═════════════════════════════════════════════════════════════════════════
+// The code-only parts are checked with a fixed "today" (Thu 12 Nov 2026),
+// so the dates never change from run to run.
+const TEST_TODAY = new Date(Date.UTC(2026, 10, 12));
+
+// "UAE" and "United Arab Emirates" count as the same place, typos allowed.
+const listHas = (list, expected) =>
+  (list || []).some((x) => understand.isInQuestion(expected, x) || understand.isInQuestion(x, expected));
+
+// Each real question, and what Step 5 must find.
+//   goals        the main goal must be one of these
+//   alsoGoals    each of these must be the main goal or an extra goal
+//   companies    must be found (as asked)
+//   places       must be found
+//   onlyPlaces   true = no other place may appear
+//   ownBusiness / dashboard   must be true
+//   time         [from, to] the dates must be exactly these (with real today)
+//   future       true = the dates must start after today
+//   clarify      true = the user must be asked back
+const STEP5_QUESTIONS = [
+  { q: 'Compare Saudi Arabia and UAE retail markets, find new trends and suggest business opportunities',
+    goals: ['comparison'], alsoGoals: ['trends', 'opportunities'], places: ['Saudi Arabia', 'UAE'], onlyPlaces: true },
+  { q: "What was Apple's revenue in 2024?", goals: ['fact_lookup'], companies: ['Apple'], timeYear: 2024 },
+  { q: 'SWOT analysis of Tesla', goals: ['framework'], companies: ['Tesla'] },
+  { q: 'PESTLE analysis of the fintech sector in the Middle East', goals: ['framework'], places: ['Middle East'] },
+  { q: 'List the latest regulatory updates', goals: ['list'] },
+  { q: 'Who are my main competitors?', goals: ['competitor_analysis', 'list'], ownBusiness: true },
+  { q: 'Forecast demand for skincare products over the next 3 years', goals: ['forecast'], future: true },
+  { q: 'What are the risks for banks from rising interest rates?', goals: ['risks'] },
+  { q: 'Is it feasible to enter the electric vehicle market in India?', goals: ['feasibility', 'market_entry'], places: ['India'], onlyPlaces: true },
+  { q: 'Give me a company profile of Nike', goals: ['company_profile'], companies: ['Nike'] },
+  { q: 'Suggest a marketing campaign idea for a new sunscreen launch', goals: ['campaign_ideas'] },
+  { q: 'Top trends in skincare for 2025', goals: ['trends', 'list'], timeYear: 2025 },
+  { q: 'How should we position our brand against cheaper competitors?', goals: ['strategy', 'competitor_analysis'], ownBusiness: true },
+  { q: 'What are the business opportunities in Oman?', goals: ['opportunities'], places: ['Oman'], onlyPlaces: true },
+  { q: 'comapre aple and microsft revnue', goals: ['comparison'], companies: ['Apple', 'Microsoft'] },
+  { q: 'Retail trends in KSA since 2020', goals: ['trends'], places: ['Saudi Arabia'], timeFrom: '2020-01-01' },
+  { q: 'Retail growth in Dubai', goals: ['trends', 'fact_lookup', 'opportunities'], places: ['Dubai'], onlyPlaces: true },
+  { q: 'What changed in my market this week?', goals: ['list', 'trends'], ownOrDashboard: true },
+  { q: "Summarise today's highlights", goals: ['list', 'trends'], dashboard: true },
+  { q: 'ما هي اتجاهات سوق التجزئة في السعودية؟', goals: ['trends'] },
+  { q: 'analysis', clarify: true },
+  { q: 'revenue', clarify: true },
+  { q: 'growth', clarify: true },
+];
+
+async function testStep5() {
+  console.log('\nSTEP 5 — understandQuery.js  (goals, companies, places, dates)');
+
+  // ---- dates, worked out by code (fixed today = 12 Nov 2026) ----
+  const dates = (question) => {
+    const cleaned = preprocessText(question, WORDS);
+    const t = understand.resolveTime(cleaned.time_expressions, TEST_TODAY);
+    return t ? t.ranges.map((r) => `${r.from}..${r.to}`).join(' | ') : 'none';
+  };
+  const dateCheck = (name, question, expected) =>
+    check(`Dates: ${name}`, async () => dates(question) === expected || dates(question));
+
+  await dateCheck('last 5 years = rolling, up to today', 'revenue in last 5 yrs', '2021-11-13..2026-11-12');
+  await dateCheck('last 3 months', 'news from the last 3 months', '2026-08-13..2026-11-12');
+  await dateCheck('past two weeks (number as a word)', 'news from the past two weeks', '2026-10-30..2026-11-12');
+  await dateCheck('last month = the whole previous month', 'what happened last month', '2026-10-01..2026-10-31');
+  await dateCheck('last year = the whole previous year', 'last year results', '2025-01-01..2025-12-31');
+  await dateCheck('past year = the last 12 months', 'news from the past year', '2025-11-13..2026-11-12');
+  await dateCheck('last week = previous Monday to Sunday', 'last week', '2026-11-02..2026-11-08');
+  await dateCheck('this week / this month / this quarter', 'this week, this month and this quarter',
+    '2026-11-09..2026-11-12 | 2026-11-01..2026-11-12 | 2026-10-01..2026-11-12');
+  await dateCheck('today, yesterday, YTD', 'today, yesterday and YTD', '2026-11-12..2026-11-12 | 2026-11-11..2026-11-11 | 2026-01-01..2026-11-12');
+  await dateCheck('next 3 years (future)', 'demand over the next 3 years', '2026-11-13..2029-11-12');
+  await dateCheck('next year / coming quarter', 'next year and the coming quarter', '2027-01-01..2027-12-31 | 2027-01-01..2027-03-31');
+  await dateCheck('one year', 'revenue in 2024', '2024-01-01..2024-12-31');
+  await dateCheck('year to year', 'from 2020 to 2024', '2020-01-01..2024-12-31');
+  await dateCheck('since a year / since a month', 'since 2020 and since March 2023', '2020-01-01..2026-11-12 | 2023-03-01..2026-11-12');
+  await dateCheck('financial year (calendar for now)', 'FY2024 and FY24', '2024-01-01..2024-12-31 | 2024-01-01..2024-12-31');
+  await dateCheck('quarters and half year', 'Q1 2025, Q3 FY2025 and H2 2025', '2025-01-01..2025-03-31 | 2025-07-01..2025-09-30 | 2025-07-01..2025-12-31');
+  await dateCheck('month + year', 'March 2025', '2025-03-01..2025-03-31');
+  await dateCheck('two years compared stay separate', 'compare 2023 and 2024', '2023-01-01..2023-12-31 | 2024-01-01..2024-12-31');
+  await dateCheck('no dates in the question', 'who are my competitors', 'none');
+
+  // ---- "is it really in the question?" ----
+  const inQ = (name, item, question, expected) =>
+    check(`In the question: ${name}`, async () => {
+      const got = understand.isInQuestion(item, question);
+      return got === expected || { got };
+    });
+  await inQ('typo "aple" = Apple', 'Apple', 'comapre aple and microsft revnue', true);
+  await inQ('short form UAE = United Arab Emirates', 'United Arab Emirates', 'retail in UAE', true);
+  await inQ('short form P&G = Procter & Gamble', 'Procter & Gamble', 'P&G vs Unilever', true);
+  await inQ('written together "loreal" = L\'Oréal', "L'Oréal", 'compare loreal and nivea', true);
+  await inQ('a 2-letter name written exactly ("EU")', 'EU', 'new cosmetics rules in the EU this year', true);
+  await inQ('"UK" = United Kingdom', 'United Kingdom', 'refill stations in the UK', true);
+  await inQ('"H&M" is found as written', 'H&M', 'compare Shein, Zara and H&M', true);
+  await inQ('3-letter typo "nke" = Nike', 'Nike', 'revnue of nke 2024', true);
+  await inQ('"car" is NOT "Coca"', 'Coca', 'car prices', false);
+  await inQ('Qatar is NOT in "Saudi Arabia and UAE"', 'Qatar', 'retail in Saudi Arabia and UAE', false);
+  await inQ('"EU" is NOT in "Europe is big"', 'EU', 'beauty in Europe is big', false);
+  await inQ('Europe is NOT in "India"', 'Europe', 'ev market in India', false);
+
+  // ---- matching companies to the client's list ----
+  const names = {
+    client: { company_name: 'Northwind Beauty Group', industry: 'Cosmetics' },
+    competitors: [
+      { id: 'c1', name: "L'Oréal", name_key: 'loreal', search_name: "L'Oreal", aliases: ['LOreal Paris'] },
+      { id: 'c2', name: 'The Estée Lauder Companies', name_key: 'esteelauder', aliases: ['Estee Lauder'] },
+      { id: 'c3', name: 'Shiseido', name_key: 'shiseido', aliases: [] },
+    ],
+  };
+  const list = understand.buildCompanyList(names);
+  const matches = (name, asked, expectedId) => check(`Company match: ${name}`, async () => {
+    const m = understand.matchCompany(asked, list);
+    const got = m ? (m.type === 'own_company' ? 'own' : m.id) : null;
+    return got === expectedId || got;
+  });
+  await matches('"loreal" -> L\'Oréal', 'loreal', 'c1');
+  await matches('"Estee Lauder" -> The Estée Lauder Companies', 'Estee Lauder', 'c2');
+  await matches('typo "shisedo" -> Shiseido', 'shisedo', 'c3');
+  await matches('own company without accent', 'Northwind', 'own');
+  await matches('a company not in the list -> no match', 'Apple', null);
+  await matches('a short word does not match a long name', 'Beauty', null);
+
+  // ---- the code checks the AI's form ----
+  const form = (extra) => ({
+    primary_goal: 'comparison', secondary_goals: [], companies: [], places: [], industries: [], products: [],
+    topics: [], metrics: [], about_own_business: false, dashboard_request: false, constraints: [], implied: [],
+    answer_format: '', ...extra,
+  });
+  await check('Check: a place the user did not say is removed', async () => {
+    const r = understand.checkForm(form({ places: ['UAE', 'Qatar'] }), 'compare retail in UAE', names);
+    return (r.checked.places.join() === 'UAE' && r.removed.length === 1 && r.removed[0].value === 'Qatar') || r;
+  });
+  await check('Check: a company the user did not say is removed', async () => {
+    const r = understand.checkForm(form({ companies: ['Apple', 'Samsung'] }), 'what is apple doing in phones', names);
+    return (r.checked.companies.map((c) => c.name).join() === 'Apple') || r;
+  });
+  await check('Check: a listed competitor the AI missed is added', async () => {
+    const r = understand.checkForm(form({ companies: [] }), 'what did shiseido launch', names);
+    return (r.checked.companies.length === 1 && r.checked.companies[0].matched.id === 'c3') || r;
+  });
+  await check('Check: the same competitor named twice is kept once', async () => {
+    const r = understand.checkForm(form({ companies: ['Loreal', "L'Oreal"] }), 'loreal vs shiseido', names);
+    return (r.checked.companies.filter((c) => c.matched && c.matched.id === 'c1').length === 1) || r;
+  });
+  await check('Check: "we / our / my" -> about own business, even if the AI missed it', async () => {
+    const a = understand.checkForm(form({}), 'should we enter egypt', names).checked.about_own_business;
+    const b = understand.checkForm(form({}), 'anything important I missed', names).checked.about_own_business;
+    const c = understand.checkForm(form({}), 'retail trends in egypt', names).checked.about_own_business;
+    return (a === true && b === true && c === false) || { a, b, c };
+  });
+  await check('Check: own company name -> about own business', async () => {
+    const r = understand.checkForm(form({ companies: ['Northwind'] }), 'how is northwind doing', names);
+    return (r.checked.about_own_business === true) || r;
+  });
+  await check('Check: a question not in Latin letters is not checked word by word', async () => {
+    const r = understand.checkForm(form({ places: ['Saudi Arabia'] }), 'ما هي اتجاهات سوق التجزئة في السعودية؟', names);
+    return (r.checked.places.join() === 'Saudi Arabia' && Boolean(r.checks_skipped)) || r;
+  });
+
+  // ---- is there anything to work on? ----
+  const base = form({});
+  const work = (name, extra, expected) => check(`Something to work on: ${name}`, async () => {
+    const got = understand.hasSomethingToWorkOn({ ...base, ...extra });
+    return got === expected || { got };
+  });
+  await work('"analysis" alone -> no', { topics: ['analysis'] }, false);
+  await work('"revenue" alone -> no', { metrics: ['revenue'] }, false);
+  await work('"market trends" alone -> no', { topics: ['market trends'] }, false);
+  await work('an industry -> yes', { industries: ['skincare'] }, true);
+  await work('a real topic -> yes', { topics: ['product launches'] }, true);
+  await work('own business -> yes', { about_own_business: true }, true);
+  await work('dashboard request -> yes', { dashboard_request: true }, true);
+
+  // ---- reading the AI's reply ----
+  await check('AI reply: wrapped JSON is read, wrong goals and repeats are dropped', async () => {
+    const r = understand.readAiReply('```json\n{"primary_goal":"Comparison","secondary_goals":["trends","poems","comparison"],"companies":["A","a"],"places":"UAE"}\n```');
+    return (r && r.primary_goal === 'comparison' && r.secondary_goals.join() === 'trends' &&
+      r.companies.join() === 'A' && r.places.length === 0) || r;
+  });
+  await check('AI reply: a goal not in our list is NOT used', async () => understand.readAiReply('{"primary_goal":"poem"}') === null);
+  await check('AI reply: a note like "corrected spelling: Nike" is not kept as a name', async () => {
+    const r = understand.readAiReply('{"primary_goal":"fact_lookup","companies":["NKE","corrected spelling: Nike"]}');
+    return (r && r.companies.join() === 'NKE') || r;
+  });
+  await check('AI reply: not JSON is NOT used', async () => understand.readAiReply('The goal is comparison.') === null);
+  await check('AI reply: the reason is clear enough to send back to the AI', async () => {
+    const r = understand.checkAiReply('{"primary_goal":"summary"}');
+    return (r.form === null && r.problem.includes('"summary"') && r.problem.includes('GOAL LIST')) || r;
+  });
+
+  // ---- real questions through the real AI ----
+  console.log('  (now asking the real AI — this takes a minute or two)');
+  const todayReal = new Date().toISOString().slice(0, 10);
+  for (const t of STEP5_QUESTIONS) {
+    await check(`${(t.clarify ? 'ask back' : t.goals.join(' or ')).padEnd(32)} | ${t.q}`, async () => {
+      const r = await good(t.q);
+      if (r.status !== 200 || !r.json) return { status: r.status, body: r.json };
+      const u = r.json.debug && r.json.debug.understandQuery;
+
+      if (t.clarify) {
+        // asked back by Step 3 or by Step 5 — both are fine
+        return r.json.status === 'clarification' || { status: r.json.status, goal: u && u.primary_goal };
+      }
+      if (!u) return { status: r.json.status, answer: r.json.answer, note: 'Step 5 did not run' };
+      const problems = [];
+      if (u.status !== 'understood') problems.push(`status ${u.status}`);
+      if (!t.goals.includes(u.primary_goal)) problems.push(`main goal ${u.primary_goal}`);
+      for (const g of t.alsoGoals || []) {
+        if (u.primary_goal !== g && !u.secondary_goals.includes(g)) problems.push(`missing goal ${g}`);
+      }
+      for (const c of t.companies || []) {
+        if (!listHas(u.companies.map((x) => x.name), c)) problems.push(`missing company ${c}`);
+      }
+      for (const p of t.places || []) {
+        if (!listHas(u.places, p)) problems.push(`missing place ${p}`);
+      }
+      if (t.onlyPlaces) {
+        const extra = u.places.filter((p) => !(t.places || []).some((e) => listHas([p], e)));
+        if (extra.length) problems.push(`extra places ${extra.join(', ')}`);
+      }
+      if (t.ownBusiness && !u.about_own_business) problems.push('about_own_business should be true');
+      if (t.dashboard && !u.dashboard_request) problems.push('dashboard_request should be true');
+      if (t.ownOrDashboard && !u.about_own_business && !u.dashboard_request) problems.push('own business or dashboard should be true');
+      if (t.timeYear && !(u.time && u.time.from === `${t.timeYear}-01-01` && u.time.to === `${t.timeYear}-12-31`)) problems.push(`dates ${JSON.stringify(u.time)}`);
+      if (t.timeFrom && !(u.time && u.time.from === t.timeFrom)) problems.push(`dates ${JSON.stringify(u.time)}`);
+      if (t.future && !(u.time && u.time.from > todayReal)) problems.push(`dates ${JSON.stringify(u.time)}`);
+      if (problems.length === 0) return true;
+      return {
+        problems,
+        got: {
+          goal: u.primary_goal, also: u.secondary_goals, companies: u.companies.map((x) => x.name),
+          places: u.places, own: u.about_own_business, dashboard: u.dashboard_request, removed: u.removed_by_check,
+        },
+      };
+    });
+  }
+
+  // ---- the client's real competitors and own name, from the database ----
+  const { data: comps } = await supabase.schema('admin').from('competitors')
+    .select('id, name').eq('client_id', CLIENT_ID).eq('is_active', true).limit(1);
+  const realComp = (comps || [])[0];
+  if (realComp) {
+    await check(`Real competitor is matched to its id: "${realComp.name}"`, async () => {
+      const r = await good(`What has ${realComp.name} launched recently?`);
+      const u = r.json.debug && r.json.debug.understandQuery;
+      const hit = u && u.companies.find((c) => c.matched && c.matched.id === realComp.id);
+      return Boolean(hit) || (u ? u.companies : r.json);
+    });
+    await check(`Real competitor written in small letters: "${realComp.name.toLowerCase()}"`, async () => {
+      const r = await good(`news about ${realComp.name.toLowerCase()} this month`);
+      const u = r.json.debug && r.json.debug.understandQuery;
+      const hit = u && u.companies.find((c) => c.matched && c.matched.id === realComp.id);
+      return Boolean(hit) || (u ? u.companies : r.json);
+    });
+  } else {
+    console.log('  (skipped: this client has no active competitors in admin.competitors)');
+  }
+
+  const { data: client } = await supabase.schema('admin').from('clients')
+    .select('company_name').eq('id', CLIENT_ID).maybeSingle();
+  if (client && client.company_name) {
+    await check(`Own company name is recognised: "${client.company_name}"`, async () => {
+      const r = await good(`How is ${client.company_name} doing against competitors?`);
+      const u = r.json.debug && r.json.debug.understandQuery;
+      return (u && u.about_own_business === true &&
+        u.companies.some((c) => c.matched && c.matched.type === 'own_company')) || (u ? u.companies : r.json);
+    });
+  }
+
+  await check('Asked back with a message the user can read', async () => {
+    const r = await good('revenue');
+    return (r.json.status === 'clarification' && typeof r.json.answer === 'string' && r.json.answer.length > 20) ||
+      { status: r.json.status, answer: r.json.answer };
   });
 }
 
@@ -658,6 +959,185 @@ async function testBig() {
   await check(`Big test: every question was tested (${notTested.length} not tested)`, async () => notTested.length === 0 || notTested.length);
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// STEP 5 BIG TEST — ~150 questions from scripts/understandQueryQuestions.json
+// ═════════════════════════════════════════════════════════════════════════
+// Runs Step 2 + Step 5 directly for the test client (no server, nothing
+// saved). One AI call per question, at most 40 a minute. Placeholders in
+// the questions ({competitor}, {own}...) are filled with the client's REAL
+// names from the database, so the same file works for any client.
+//
+//   SERIOUS  a place or company the user did NOT say is in the result,
+//            a place or company the user DID say is missing,
+//            a real competitor is not matched to its id,
+//            a question with no topic was not asked back (or the other way round),
+//            or no answer at all. These must be 0.
+//   MINOR    a different main goal than expected, or "about own business /
+//            dashboard" missed. Later steps can still work with it.
+async function testBig5() {
+  console.log('\nSTEP 5 BIG TEST — understandQuery.js with understandQueryQuestions.json');
+
+  // ---- the client's real names ----
+  const { data: comps } = await supabase.schema('admin').from('competitors')
+    .select('id, name').eq('client_id', CLIENT_ID).eq('is_active', true).order('name').limit(2);
+  const { data: client } = await supabase.schema('admin').from('clients')
+    .select('company_name').eq('id', CLIENT_ID).maybeSingle();
+  const c1 = (comps || [])[0];
+  const c2 = (comps || [])[1];
+  const own = client && client.company_name;
+  console.log(`  client names used: competitor = ${c1 ? c1.name : '(none)'}, competitor2 = ${c2 ? c2.name : '(none)'}, own = ${own || '(none)'}`);
+
+  const bank = require('./understandQueryQuestions.json').questions;
+  const items = [];
+  let skipped = 0;
+  for (const t of bank) {
+    let q = t.q;
+    const expectIds = [];
+    const fill = (tag, value, id) => {
+      if (!q.includes(tag)) return true;
+      if (!value) return false;
+      q = q.split(tag).join(value);
+      if (id) expectIds.push(id);
+      return true;
+    };
+    const ok = fill('{competitor_lower}', c1 && c1.name.toLowerCase(), c1 && c1.id) &&
+      fill('{competitor2}', c2 && c2.name, c2 && c2.id) &&
+      fill('{competitor}', c1 && c1.name, c1 && c1.id) &&
+      fill('{own}', own, null);
+    if (!ok) { skipped += 1; continue; }
+    items.push({ ...t, q, expectIds: [...new Set(expectIds)] });
+  }
+
+  const perMinute = Number(process.env.DR_BIG_PER_MINUTE) || 40;
+  const gapMs = Math.ceil(60000 / perMinute);
+  console.log(`  ${items.length} questions (${skipped} skipped: no names to fill in), one at a time, ${perMinute} per minute`);
+  console.log(`  (about ${Math.ceil(items.length / perMinute)} minutes — stop "node server.js" while this runs)\n`);
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = (...args) => {
+    const first = String(args[0] || '');
+    if (first.includes('[llmClient]') || first.startsWith('[DynamicRAG]')) return;
+    realLog(...args);
+  };
+  console.error = () => {};
+
+  async function askOne(t) {
+    try {
+      const cleaned = await preprocessQuery({ original_query: t.q });
+      const u = await understand.understandQuery({ client_id: CLIENT_ID }, cleaned);
+      return { t, u };
+    } catch (err) {
+      return { t, error: err.message };
+    }
+  }
+
+  // What is wrong with one result: { serious: [...], minor: [...] }
+  function judge(t, u) {
+    const serious = [];
+    const minor = [];
+    if (t.clarify) {
+      if (u.status !== 'clarification') serious.push('should ask back (no topic), but did not');
+      return { serious, minor };
+    }
+    if (u.status === 'clarification') serious.push('asked back, but the question has a topic');
+
+    const companyNames = u.companies.map((c) => c.name);
+    for (const c of t.companies || []) if (!listHas(companyNames, c)) serious.push(`missing company ${c}`);
+    for (const p of t.places || []) if (!listHas(u.places, p)) serious.push(`missing place ${p}`);
+    if (t.onlyPlaces) {
+      const extra = u.places.filter((p) => !(t.places || []).some((e) => listHas([p], e)));
+      if (extra.length) serious.push(`added place ${extra.join(', ')}`);
+    }
+    if (t.onlyCompanies) {
+      const extra = companyNames.filter((n) => !(t.companies || []).some((e) => listHas([n], e)));
+      if (extra.length) serious.push(`added company ${extra.join(', ')}`);
+    }
+    for (const id of t.expectIds) {
+      if (!u.companies.some((c) => c.matched && c.matched.id === id)) serious.push('competitor not matched to its id');
+    }
+
+    if (t.goals && !t.goals.includes(u.primary_goal)) minor.push(`main goal ${u.primary_goal} (expected ${t.goals.join('/')})`);
+    if (t.ownBusiness && !u.about_own_business) minor.push('about own business missed');
+    if (t.ownOrDashboard && !u.about_own_business && !u.dashboard_request) minor.push('own business / dashboard missed');
+    return { serious, minor };
+  }
+
+  const results = [];
+  const startedBig = Date.now();
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const started = Date.now();
+      results.push(await askOne(items[i]));
+      if ((i + 1) % 25 === 0) console.log(`  ...${i + 1} done`);
+      const wait = gapMs - (Date.now() - started);
+      if (wait > 0) await sleep(wait);
+    }
+    const retry = results.filter((r) => r.error);
+    if (retry.length > 0) {
+      console.log(`\n  ${retry.length} questions got no answer (AI busy). Waiting 60s, then trying them again...`);
+      await sleep(60000);
+      for (const r of retry) {
+        const started = Date.now();
+        const again = await askOne(r.t);
+        r.u = again.u;
+        r.error = again.error;
+        const wait = gapMs - (Date.now() - started);
+        if (wait > 0) await sleep(wait);
+      }
+    }
+  } finally {
+    console.log = realLog;
+    console.error = realError;
+  }
+
+  // ---- report ----
+  const seriousRows = [];
+  const minorRows = [];
+  const noAnswer = [];
+  let goalRight = 0;
+  let goalCounted = 0;
+  for (const r of results) {
+    if (r.error) { noAnswer.push(r); continue; }
+    const { serious, minor } = judge(r.t, r.u);
+    if (r.t.goals && !r.t.clarify) {
+      goalCounted += 1;
+      if (r.t.goals.includes(r.u.primary_goal)) goalRight += 1;
+    }
+    const info = `goal=${r.u.primary_goal} companies=[${r.u.companies.map((c) => c.name + (c.matched ? '*' : '')).join(', ')}] places=[${r.u.places.join(', ')}] own=${r.u.about_own_business} dash=${r.u.dashboard_request}`;
+    if (serious.length) seriousRows.push({ q: r.t.q, why: serious.concat(minor), info, removed: r.u.removed_by_check });
+    else if (minor.length) minorRows.push({ q: r.t.q, why: minor, info });
+  }
+
+  const show = (title, rows) => {
+    if (rows.length === 0) return;
+    console.log(`\n  ${title}`);
+    for (const row of rows) {
+      console.log(`    ${row.q}`);
+      console.log(`      wrong: ${row.why.join('; ')}`);
+      console.log(`      got:   ${row.info}`);
+      if (row.removed && row.removed.length) console.log(`      removed by the code: ${row.removed.map((x) => `${x.field} ${x.value}`).join(', ')}`);
+    }
+  };
+  show('SERIOUS MISTAKES (wrong companies / places / competitor match / ask-back):', seriousRows);
+  show('MINOR MISTAKES (different main goal, or own business / dashboard missed):', minorRows);
+  if (noAnswer.length) {
+    console.log(`\n  NO ANSWER (AI busy, even after waiting): ${noAnswer.length}`);
+    for (const r of noAnswer) console.log(`    ${r.t.q}  (${r.error})`);
+  }
+
+  const tested = results.length - noAnswer.length;
+  console.log('\n  SUMMARY');
+  console.log(`    questions tested      ${tested} / ${results.length}`);
+  console.log(`    fully right           ${tested - seriousRows.length - minorRows.length}`);
+  console.log(`    main goal as expected ${goalRight} / ${goalCounted}  (${Math.round((goalRight / Math.max(goalCounted, 1)) * 100)}%)`);
+  console.log(`    serious mistakes: ${seriousRows.length}   minor mistakes: ${minorRows.length}   no answer: ${noAnswer.length}   time: ${Math.round((Date.now() - startedBig) / 1000)}s`);
+
+  await check(`Big test 5: no serious mistakes (${seriousRows.length} found)`, async () => seriousRows.length === 0 || seriousRows.length);
+  await check(`Big test 5: every question got an answer (${noAnswer.length} without)`, async () => noAnswer.length === 0 || noAnswer.length);
+}
+
 // ── Clean up: delete every chat this test created ────────────────────────
 async function cleanUp() {
   const ids = [...createdChats];
@@ -680,9 +1160,10 @@ async function main() {
   // Nothing typed = Steps 1, 2 and 3 (the big test only runs when asked).
   const args = process.argv.slice(2).map((a) => a.toLowerCase());
   const wantBig = args.includes('big');
+  const wantBig5 = args.includes('big5');
   const wanted = args.map(Number).filter(Boolean);
-  const run = (n) => (wanted.length === 0 && !wantBig) || wanted.includes(n);
-  const needsServer = [1, 2, 3].some(run);
+  const run = (n) => (wanted.length === 0 && !wantBig && !wantBig5) || wanted.includes(n);
+  const needsServer = [1, 2, 3, 5].some(run);
 
   if (needsServer) {
     try {
@@ -698,7 +1179,9 @@ async function main() {
     if (run(1)) await testStep1();
     if (run(2)) await testStep2();
     if (run(3)) await testStep3();
+    if (run(5)) await testStep5();
     if (wantBig) await testBig();
+    if (wantBig5) await testBig5();
   } finally {
     await cleanUp();
   }

@@ -13,7 +13,8 @@
  *   Step 2  preprocessQuery.js   clean the question text (no AI)
  *   Step 3  validateQuery.js     accept / reject / ask the user back (AI)
  *   Step 4  (skipped for now)    remembering earlier questions in the chat
- *   Step 5+ not built yet
+ *   Step 5  understandQuery.js   goals, companies, places, dates... (AI + code checks)
+ *   Step 6+ not built yet
  *
  * Helpers (not steps):
  *   chatConfig.js   settings
@@ -27,14 +28,15 @@
  *
  * FOR TESTING ONLY (to be switched off before real clients use the chat):
  *   - "debug" in the reply shows what every step produced.
- *   - body.stopAfterStep = 1 or 2 stops the chat after that step, so the
- *     test file can check the early steps alone, fast and without the AI.
+ *   - body.stopAfterStep = 1, 2 or 3 stops the chat after that step, so the
+ *     test file can check each step alone (Steps 1 and 2 without the AI).
  */
 
 const { ChatError } = require('./chatError');
 const { receiveQuestion } = require('./receiveQuestion');   // Step 1
 const { preprocessQuery } = require('./preprocessQuery');   // Step 2
 const { validateQuery } = require('./validateQuery');       // Step 3
+const { understandQuery } = require('./understandQuery');   // Step 5
 
 function registerDynamicRagRoute(app) {
   app.post('/dynamic-rag/chat', async (req, res) => {
@@ -91,7 +93,25 @@ function registerDynamicRagRoute(app) {
         return reply(validation.status, validation.message, debug);
       }
 
-      // ── Step 5 onwards will be added here ──────────────────────────
+      if (stopAfterStep === 3) {
+        return reply('accept', null, debug);
+      }
+
+      // ── Step 5: understand the question (AI + code checks) ─────────
+      const understood = await understandQuery(request, cleaned);
+      debug.understandQuery = understood;
+      console.log(
+        `[DynamicRAG] understandQuery ok | status=${understood.status} goal=${understood.primary_goal} ` +
+        `companies=${understood.companies.length} places=${understood.places.length} ` +
+        `removed=${understood.removed_by_check.length} aiCalls=${understood.attempts} ` +
+        `| ${Date.now() - startedAt}ms`
+      );
+
+      if (understood.status === 'clarification') {
+        return reply('clarification', understood.message, debug);
+      }
+
+      // ── Step 6 onwards will be added here ──────────────────────────
 
       return reply('accept', null, debug);
 

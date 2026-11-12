@@ -1,0 +1,1286 @@
+{
+ "_how_to_use": "Questions for the Step 5 (understandQuery.js) big test. Placeholders: {competitor}, {competitor2}, {competitor_lower} = real competitors of the test client, {own} = its own company name (filled in from the database when the test runs). Fields: goals = allowed main goals (missing = any goal); companies / places = must be found; onlyPlaces / onlyCompanies = nothing else may appear; ownBusiness / ownOrDashboard = must be marked as about the client's own business or dashboard; clarify = the user must be asked back. Run: node scripts/testDynamicRag.js big5",
+ "questions": [
+  {
+   "q": "What was Nike's revenue last year?",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "Nike"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "How many stores does Sephora have in the UAE?",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "Sephora"
+   ],
+   "places": [
+    "UAE"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "What is the market size of skincare in India?",
+   "goals": [
+    "fact_lookup",
+    "trends"
+   ],
+   "places": [
+    "India"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Unilever operating margin 2023",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "Unilever"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "How much did Amazon spend on advertising in 2022?",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "Amazon"
+   ]
+  },
+  {
+   "q": "What share of the Saudi beauty market does L'Oreal hold?",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "L'Oreal"
+   ],
+   "places": [
+    "Saudi"
+   ]
+  },
+  {
+   "q": "List all new cosmetics regulations in the EU this year",
+   "goals": [
+    "list"
+   ],
+   "places": [
+    "EU"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Show me the latest competitor moves",
+   "goals": [
+    "list",
+    "competitor_analysis"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "What are the newest policy signals?",
+   "goals": [
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "Give me the top 10 news items for my industry this month",
+   "goals": [
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "What happened in the fintech sector last week?",
+   "goals": [
+    "list",
+    "trends"
+   ]
+  },
+  {
+   "q": "Any new alerts for us today?",
+   "goals": [
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "Recent launches by {competitor}",
+   "goals": [
+    "list",
+    "competitor_analysis"
+   ]
+  },
+  {
+   "q": "Tell me about Unilever",
+   "goals": [
+    "company_profile"
+   ],
+   "companies": [
+    "Unilever"
+   ]
+  },
+  {
+   "q": "Overview of Natura & Co",
+   "goals": [
+    "company_profile"
+   ],
+   "companies": [
+    "Natura"
+   ]
+  },
+  {
+   "q": "What does Huda Beauty sell and where?",
+   "goals": [
+    "company_profile",
+    "fact_lookup"
+   ],
+   "companies": [
+    "Huda Beauty"
+   ]
+  },
+  {
+   "q": "Company profile of {competitor}",
+   "goals": [
+    "company_profile"
+   ]
+  },
+  {
+   "q": "What are the emerging trends in men's grooming?",
+   "goals": [
+    "trends"
+   ]
+  },
+  {
+   "q": "How is the halal cosmetics market changing in Indonesia?",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "Indonesia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Is clean beauty still growing?",
+   "goals": [
+    "trends"
+   ]
+  },
+  {
+   "q": "Trends in digital payments across the GCC",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "GCC"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "What's changing in luxury retail in Europe since 2023?",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "Europe"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "How is AI being used by beauty brands?",
+   "goals": [
+    "trends"
+   ]
+  },
+  {
+   "q": "consumer trends in saudi arabia for skincare",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "Saudi Arabia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Compare Sephora and Ulta",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Sephora",
+    "Ulta"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "Toyota vs Hyundai in the Middle East",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Toyota",
+    "Hyundai"
+   ],
+   "places": [
+    "Middle East"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "How does the UAE beauty market compare with Saudi Arabia?",
+   "goals": [
+    "comparison"
+   ],
+   "places": [
+    "UAE",
+    "Saudi Arabia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Compare {competitor} and {competitor2}",
+   "goals": [
+    "comparison",
+    "competitor_analysis"
+   ]
+  },
+  {
+   "q": "Which is growing faster, online or offline beauty sales in India?",
+   "goals": [
+    "comparison",
+    "trends"
+   ],
+   "places": [
+    "India"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Compare EV adoption in Norway, Germany and France",
+   "goals": [
+    "comparison"
+   ],
+   "places": [
+    "Norway",
+    "Germany",
+    "France"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Natura vs Avon in Brazil and Mexico",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Natura",
+    "Avon"
+   ],
+   "places": [
+    "Brazil",
+    "Mexico"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Where can we grow in Africa?",
+   "goals": [
+    "opportunities",
+    "market_entry",
+    "strategy"
+   ],
+   "places": [
+    "Africa"
+   ],
+   "onlyPlaces": true,
+   "ownBusiness": true
+  },
+  {
+   "q": "Untapped segments in the haircare market",
+   "goals": [
+    "opportunities"
+   ]
+  },
+  {
+   "q": "What white spaces exist in fragrance for Gen Z?",
+   "goals": [
+    "opportunities"
+   ]
+  },
+  {
+   "q": "Opportunities for premium skincare in Vietnam",
+   "goals": [
+    "opportunities",
+    "market_entry"
+   ],
+   "places": [
+    "Vietnam"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Gaps our competitors are not covering",
+   "goals": [
+    "opportunities",
+    "competitor_analysis"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "What is {competitor} doing in the UAE?",
+   "goals": [
+    "competitor_analysis",
+    "list"
+   ],
+   "places": [
+    "UAE"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "How do we compare with our competitors on pricing?",
+   "goals": [
+    "competitor_analysis",
+    "comparison"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Which competitor is most active this month?",
+   "goals": [
+    "competitor_analysis",
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "{competitor_lower} latest partnerships",
+   "goals": [
+    "competitor_analysis",
+    "list"
+   ]
+  },
+  {
+   "q": "Has {competitor} changed its prices recently?",
+   "goals": [
+    "competitor_analysis",
+    "fact_lookup",
+    "list"
+   ]
+  },
+  {
+   "q": "Is {own} ahead of {competitor} in digital marketing?",
+   "goals": [
+    "competitor_analysis",
+    "comparison"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Should we enter the Egyptian market?",
+   "goals": [
+    "market_entry",
+    "feasibility"
+   ],
+   "places": [
+    "Egypt"
+   ],
+   "onlyPlaces": true,
+   "ownBusiness": true
+  },
+  {
+   "q": "How to launch our brand in Kenya",
+   "goals": [
+    "market_entry",
+    "strategy",
+    "campaign_ideas"
+   ],
+   "places": [
+    "Kenya"
+   ],
+   "onlyPlaces": true,
+   "ownBusiness": true
+  },
+  {
+   "q": "What does it take to sell cosmetics in China?",
+   "goals": [
+    "market_entry",
+    "risks",
+    "feasibility"
+   ],
+   "places": [
+    "China"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Best way to enter the Saudi e-commerce market",
+   "goals": [
+    "market_entry",
+    "strategy"
+   ],
+   "places": [
+    "Saudi"
+   ]
+  },
+  {
+   "q": "Can a refill station model work for shampoo in the UK?",
+   "goals": [
+    "feasibility"
+   ],
+   "places": [
+    "UK"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Is a beauty subscription box viable in Qatar?",
+   "goals": [
+    "feasibility"
+   ],
+   "places": [
+    "Qatar"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Would opening 20 kiosks in Riyadh malls pay off?",
+   "goals": [
+    "feasibility"
+   ],
+   "places": [
+    "Riyadh"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "What will the EV market look like in 2030?",
+   "goals": [
+    "forecast"
+   ]
+  },
+  {
+   "q": "Predict skincare demand in the GCC for next year",
+   "goals": [
+    "forecast"
+   ],
+   "places": [
+    "GCC"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Outlook for the fragrance industry in the next 5 years",
+   "goals": [
+    "forecast",
+    "trends"
+   ]
+  },
+  {
+   "q": "Where will interest rates go in 2027?",
+   "goals": [
+    "forecast"
+   ]
+  },
+  {
+   "q": "What risks does inflation pose to our margins?",
+   "goals": [
+    "risks"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Regulatory risks for fintech startups in Egypt",
+   "goals": [
+    "risks"
+   ],
+   "places": [
+    "Egypt"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Supply chain threats for cosmetics manufacturers",
+   "goals": [
+    "risks"
+   ]
+  },
+  {
+   "q": "How exposed is {competitor} to tariff changes?",
+   "goals": [
+    "risks"
+   ]
+  },
+  {
+   "q": "Risks of selling in China",
+   "goals": [
+    "risks",
+    "market_entry"
+   ],
+   "places": [
+    "China"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Ramadan campaign ideas for a fragrance brand",
+   "goals": [
+    "campaign_ideas"
+   ]
+  },
+  {
+   "q": "Marketing ideas to launch a lip balm for teenagers",
+   "goals": [
+    "campaign_ideas"
+   ]
+  },
+  {
+   "q": "How should we promote our new serum on TikTok?",
+   "goals": [
+    "campaign_ideas",
+    "strategy"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Influencer campaign ideas for the UAE market",
+   "goals": [
+    "campaign_ideas"
+   ],
+   "places": [
+    "UAE"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "How can we win more customers in Saudi Arabia?",
+   "goals": [
+    "strategy",
+    "opportunities"
+   ],
+   "places": [
+    "Saudi Arabia"
+   ],
+   "onlyPlaces": true,
+   "ownBusiness": true
+  },
+  {
+   "q": "What should our pricing strategy be against discount brands?",
+   "goals": [
+    "strategy"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "How should a bank respond to fintech competition?",
+   "goals": [
+    "strategy"
+   ]
+  },
+  {
+   "q": "What should be our priorities for next year?",
+   "goals": [
+    "strategy"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "SWOT of Sephora",
+   "goals": [
+    "framework"
+   ],
+   "companies": [
+    "Sephora"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "pestel analysis for the UAE retail sector",
+   "goals": [
+    "framework"
+   ],
+   "places": [
+    "UAE"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Porter five forces for the cosmetics industry in India",
+   "goals": [
+    "framework"
+   ],
+   "places": [
+    "India"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Do a SWOT for {own}",
+   "goals": [
+    "framework"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "five forces of ride hailing",
+   "goals": [
+    "framework"
+   ]
+  },
+  {
+   "q": "swot {competitor_lower}",
+   "goals": [
+    "framework"
+   ]
+  },
+  {
+   "q": "Compare Nivea and Dove in Germany and the UK, list their recent launches and tell me which one is gaining share",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Nivea",
+    "Dove"
+   ],
+   "places": [
+    "Germany",
+    "UK"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "I want to understand the beauty market in Saudi Arabia, who the main players are, and what opportunities exist for a mid-priced brand",
+   "goals": [
+    "trends",
+    "competitor_analysis",
+    "opportunities",
+    "fact_lookup",
+    "company_profile"
+   ],
+   "places": [
+    "Saudi Arabia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Give me a summary of this week's signals, highlight anything about {competitor} and suggest what we should do",
+   "goals": [
+    "list",
+    "strategy",
+    "competitor_analysis"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "compitetors of sefora in dubai",
+   "goals": [
+    "competitor_analysis"
+   ],
+   "companies": [
+    "Sephora"
+   ],
+   "places": [
+    "Dubai"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "trnds in skincre india",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "India"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "swot of unilevr",
+   "goals": [
+    "framework"
+   ],
+   "companies": [
+    "Unilever"
+   ]
+  },
+  {
+   "q": "revnue of nke 2024",
+   "goals": [
+    "fact_lookup"
+   ],
+   "companies": [
+    "Nike"
+   ]
+  },
+  {
+   "q": "oppurtunities in egypt for beuty",
+   "goals": [
+    "opportunities"
+   ],
+   "places": [
+    "Egypt"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "ما هي فرص سوق العطور في الإمارات؟",
+   "goals": [
+    "opportunities"
+   ]
+  },
+  {
+   "q": "Quels sont les risques pour les banques en France ?",
+   "goals": [
+    "risks"
+   ]
+  },
+  {
+   "q": "Comparar Natura y Avon en Brasil",
+   "goals": [
+    "comparison"
+   ]
+  },
+  {
+   "q": "भारत में स्किनकेयर बाजार के रुझान क्या हैं?",
+   "goals": [
+    "trends"
+   ]
+  },
+  {
+   "q": "dubai mein beauty market ka trend kya hai",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "Dubai"
+   ]
+  },
+  {
+   "q": "Wie groß ist der Kosmetikmarkt in Deutschland?",
+   "goals": [
+    "fact_lookup",
+    "trends"
+   ]
+  },
+  {
+   "q": "Retail in Dubai and Abu Dhabi",
+   "places": [
+    "Dubai",
+    "Abu Dhabi"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Beauty trends in Riyadh",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "Riyadh"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Fintech in Bahrain",
+   "places": [
+    "Bahrain"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Skincare market in Southeast Asia",
+   "places": [
+    "Southeast Asia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "European EV sales",
+   "places": [
+    "Europe"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Dubai vs Riyadh for a flagship store",
+   "goals": [
+    "comparison",
+    "market_entry",
+    "feasibility"
+   ],
+   "places": [
+    "Dubai",
+    "Riyadh"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Beauty market in KSA and Kuwait",
+   "places": [
+    "Saudi Arabia",
+    "Kuwait"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "How big is e-commerce in Africa?",
+   "goals": [
+    "fact_lookup",
+    "trends"
+   ],
+   "places": [
+    "Africa"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "What are the risks and opportunities of entering Turkey?",
+   "goals": [
+    "market_entry",
+    "risks",
+    "opportunities"
+   ],
+   "places": [
+    "Turkey"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Policy changes in Q1 2025",
+   "goals": [
+    "list",
+    "trends"
+   ]
+  },
+  {
+   "q": "Competitor activity since March 2026",
+   "goals": [
+    "competitor_analysis",
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "What happened yesterday in my market?",
+   "goals": [
+    "list",
+    "trends"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "How is our brand perceived?",
+   "ownBusiness": true
+  },
+  {
+   "q": "What should I worry about this week?",
+   "goals": [
+    "risks",
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "Anything important I missed?",
+   "goals": [
+    "list"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "Brief me on my market",
+   "goals": [
+    "list",
+    "trends"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "What are we doing better than {competitor}?",
+   "goals": [
+    "competitor_analysis",
+    "comparison"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Show the latest market dynamics for skincare",
+   "goals": [
+    "list",
+    "trends"
+   ]
+  },
+  {
+   "q": "forward outlook for haircare",
+   "goals": [
+    "forecast",
+    "trends"
+   ]
+  },
+  {
+   "q": "Policy and Risk updates for Saudi Arabia",
+   "goals": [
+    "list"
+   ],
+   "places": [
+    "Saudi Arabia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "What is new in competitive radar?",
+   "goals": [
+    "list",
+    "competitor_analysis"
+   ],
+   "ownOrDashboard": true
+  },
+  {
+   "q": "P&G vs Unilever",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Procter & Gamble",
+    "Unilever"
+   ]
+  },
+  {
+   "q": "Johnson & Johnson consumer health split",
+   "companies": [
+    "Johnson & Johnson"
+   ]
+  },
+  {
+   "q": "What is LVMH doing in beauty?",
+   "companies": [
+    "LVMH"
+   ]
+  },
+  {
+   "q": "Is Apple entering beauty?",
+   "companies": [
+    "Apple"
+   ]
+  },
+  {
+   "q": "Coty and Revlon restructuring news",
+   "goals": [
+    "list",
+    "trends",
+    "company_profile",
+    "comparison"
+   ],
+   "companies": [
+    "Coty",
+    "Revlon"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "Compare Shein, Zara and H&M",
+   "goals": [
+    "comparison"
+   ],
+   "companies": [
+    "Shein",
+    "Zara",
+    "H&M"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "Inditex versus H&M margins",
+   "goals": [
+    "comparison",
+    "fact_lookup"
+   ],
+   "companies": [
+    "Inditex",
+    "H&M"
+   ],
+   "onlyCompanies": true
+  },
+  {
+   "q": "What did the Saudi central bank announce?",
+   "goals": [
+    "list",
+    "fact_lookup"
+   ]
+  },
+  {
+   "q": "What is happening in the plant-based meat industry?",
+   "goals": [
+    "trends",
+    "list"
+   ]
+  },
+  {
+   "q": "EV charging market in the UK",
+   "places": [
+    "UK"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "State of the coffee shop market in India",
+   "places": [
+    "India"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Outlook for the airline industry",
+   "goals": [
+    "forecast",
+    "trends"
+   ]
+  },
+  {
+   "q": "What are the biggest challenges for neobanks?",
+   "goals": [
+    "risks"
+   ]
+  },
+  {
+   "q": "{competitor} news",
+   "goals": [
+    "list",
+    "competitor_analysis"
+   ]
+  },
+  {
+   "q": "What is {competitor2} launching next?",
+   "goals": [
+    "competitor_analysis",
+    "forecast",
+    "list"
+   ]
+  },
+  {
+   "q": "Compare our prices with {competitor}",
+   "goals": [
+    "comparison",
+    "competitor_analysis"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Who is our biggest competitor?",
+   "goals": [
+    "competitor_analysis"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "How many products did {competitor} launch this year?",
+   "goals": [
+    "fact_lookup",
+    "list",
+    "competitor_analysis"
+   ]
+  },
+  {
+   "q": "Is {competitor} growing faster than us?",
+   "goals": [
+    "comparison",
+    "competitor_analysis"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "How should {own} respond to price cuts by competitors?",
+   "goals": [
+    "strategy"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "Give me a PESTLE for {own}",
+   "goals": [
+    "framework"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "SWOT analysis comparing {competitor} and {competitor2}",
+   "goals": [
+    "framework",
+    "comparison"
+   ]
+  },
+  {
+   "q": "Top 5 beauty retailers in the Middle East by sales",
+   "goals": [
+    "list",
+    "fact_lookup",
+    "comparison"
+   ],
+   "places": [
+    "Middle East"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Give me a table of EV sales by country",
+   "goals": [
+    "fact_lookup",
+    "comparison",
+    "list"
+   ]
+  },
+  {
+   "q": "Short summary of fintech regulation in UAE",
+   "goals": [
+    "list",
+    "trends",
+    "fact_lookup"
+   ],
+   "places": [
+    "UAE"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Which markets should we prioritise for expansion?",
+   "goals": [
+    "market_entry",
+    "strategy",
+    "opportunities"
+   ],
+   "ownBusiness": true
+  },
+  {
+   "q": "How did the pandemic change beauty shopping?",
+   "goals": [
+    "trends"
+   ]
+  },
+  {
+   "q": "Effect of the new VAT rules on retailers in Oman",
+   "goals": [
+    "risks",
+    "fact_lookup",
+    "trends"
+   ],
+   "places": [
+    "Oman"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Will tariffs raise car prices in the US?",
+   "goals": [
+    "forecast",
+    "risks"
+   ],
+   "places": [
+    "United States"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Why are luxury sales falling in China?",
+   "goals": [
+    "trends"
+   ],
+   "places": [
+    "China"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Where is demand for vegan cosmetics strongest?",
+   "goals": [
+    "opportunities",
+    "trends",
+    "fact_lookup"
+   ]
+  },
+  {
+   "q": "Market share of electric scooters in Indonesia",
+   "goals": [
+    "fact_lookup"
+   ],
+   "places": [
+    "Indonesia"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "News about the cosmetics ban on microplastics",
+   "goals": [
+    "list"
+   ]
+  },
+  {
+   "q": "Explain the impact of the EU deforestation law on chocolate makers",
+   "goals": [
+    "risks",
+    "trends"
+   ],
+   "places": [
+    "EU"
+   ],
+   "onlyPlaces": true
+  },
+  {
+   "q": "Big moves by beauty brands this quarter",
+   "goals": [
+    "list",
+    "trends",
+    "competitor_analysis"
+   ]
+  },
+  {
+   "q": "profit",
+   "clarify": true
+  },
+  {
+   "q": "insights please",
+   "clarify": true
+  },
+  {
+   "q": "give me numbers",
+   "clarify": true
+  },
+  {
+   "q": "strategy",
+   "clarify": true
+  },
+  {
+   "q": "trends?",
+   "clarify": true
+  },
+  {
+   "q": "do an analysis",
+   "clarify": true
+  },
+  {
+   "q": "market",
+   "clarify": true
+  },
+  {
+   "q": "sales",
+   "clarify": true
+  },
+  {
+   "q": "performance",
+   "clarify": true
+  },
+  {
+   "q": "data please",
+   "clarify": true
+  }
+ ]
+}

@@ -44,4 +44,18 @@ module.exports = {
   CLARIFICATION_FALLBACK_MESSAGE:
     'Could you tell me a little more about what you need? For example: a market or industry, ' +
     'a company, competitors, trends or opportunities.',
+
+  // ── Step 5 (understandQuery.js) ────────────────────────────────────────
+  // Which row of the prompts table holds the Step 5 instruction for the AI.
+  UNDERSTAND_PROMPT_ID: 'dynamic_rag_understand_query_v1',
+
+  // "Today" for working out dates like "last 3 months". The date is taken
+  // in this time zone.
+  CHAT_TIMEZONE: process.env.DR_TIMEZONE || 'Asia/Kolkata',
+
+  // What the user sees when the question names nothing to work on
+  // (for example just "analysis" or "revenue").
+  NO_TOPIC_MESSAGE:
+    'What should I look at? Tell me a company, market, product or topic, for example ' +
+    '"competitor launches this month" or "skincare trends in the UAE".',
 };

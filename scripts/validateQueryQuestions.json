@@ -267,7 +267,6 @@
     "trends",
     "revenue",
     "opportunities",
-    "analysis",
     "growth",
     "Is it worth it?",
     "What happened there?",
@@ -456,6 +455,14 @@
         "clarification"
       ],
       "question": "Update me"
+    },
+    {
+      "allowed": [
+        "clarification",
+        "accept"
+      ],
+      "question": "analysis",
+      "note": "One word, no topic. If Step 3 lets it through, Step 5 must ask the user back (tested in Step 5)."
     }
   ]
 }
