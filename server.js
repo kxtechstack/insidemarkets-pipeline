@@ -19,12 +19,13 @@ const { startJobTracking, updateJobStage, completeJobTracking, markFullyComplete
 const { processQueueInBatches, retryFailedArticles, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
-const { askQuestion } = require('./modules/ragChat');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
 const { startStaleJobWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
-const { registerDecisionIntelligenceV2Route } = require('./modules/decisionIntelligenceV2/route');
-const { registerDecisionIntelligenceRoute } = require('./modules/decisionIntelligence/route');
+// Decision Intelligence chat (Dynamic RAG) — the only chat in this server.
+// The old chats (decisionIntelligence, decisionIntelligenceV2, ragChat.js)
+// have been removed.
+const { registerDynamicRagRoute } = require('./modules/dynamicRag/route');
 const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -115,20 +116,6 @@ app.post('/admin/delete-user', async (req, res) => {
     return res.json({ success: true, message: 'User deleted', userId: authId });
   } catch (err) {
     console.error('[DeleteUser] Error:', err.message);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/ask', async (req, res) => {
-  try {
-    const { question, clientId, industry, moduleId } = req.body; // CHANGED: added moduleId
-    if (!question || !clientId || !industry || !moduleId) {
-      return res.status(400).json({ error: 'question, clientId, industry, and moduleId are required' });
-    }
-    const result = await askQuestion(question, clientId, industry, moduleId); // CHANGED: passes moduleId
-    return res.json(result);
-  } catch (err) {
-    console.error('[Ask] Error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1189,74 +1176,44 @@ app.get('/daily-highlight-cards/:clientId', async (req, res) => {
   }
 });
 
-// Credit usage — count every user message this client has ever sent.
+// Credit usage — count every question this client has sent in the chat.
+// used = questions saved by the chat (dr_messages, role = 'user').
 app.get('/credit-usage/:clientId', async (req, res) => {
   const CREDIT_TOTAL = 10000;
   const { clientId } = req.params;
+  const { userId } = req.query; // optional: count one user only
 
   if (!clientId) {
     return res.status(400).json({ error: 'clientId is required' });
   }
 
   try {
-    // Step 1: get every conversation ID for this client.
-    const { userId } = req.query;   // read from query string
-
-let query = supabaseClient
-  .from('di_conversations')
-  .select('id')
-  .eq('client_id', clientId);
-
-if (userId) {
-  query = query.eq('user_id', userId);
-}
-
-const { data: convos, error: convoErr } = await query;
-
-    if (convoErr) {
-      console.error('[CreditUsage] conversation query error:', convoErr.message);
-      return res.status(500).json({ error: convoErr.message || 'conversation query failed' });
-    }
-
-    const convoIds = (convos || []).map(c => c.id);
-    if (convoIds.length === 0) {
-      return res.json({ used: 0, total: CREDIT_TOTAL, remaining: CREDIT_TOTAL });
-    }
-
-    // Step 2: count user messages across those conversations, in batches,
-    // because Supabase .in() with hundreds of IDs can exceed URL length limits.
-    const BATCH_SIZE = 100;
-    let total = 0;
-
-    for (let i = 0; i < convoIds.length; i += BATCH_SIZE) {
-      const batch = convoIds.slice(i, i + BATCH_SIZE);
-      const { count, error: msgErr } = await supabaseClient
-        .from('di_messages')
-        .select('id', { count: 'exact', head: true })
-        .in('conversation_id', batch)
-        .eq('role', 'user');
-
-      if (msgErr) {
-        console.error(`[CreditUsage] batch ${i}-${i + BATCH_SIZE} error:`, msgErr.message);
-        return res.status(500).json({ error: msgErr.message || 'message count failed' });
-      }
-      total += count || 0;
-    }
-
-    const used = total;
+    const used = await countChatQuestions(clientId, userId);
     const remaining = Math.max(0, CREDIT_TOTAL - used);
 
     return res.json({ used, total: CREDIT_TOTAL, remaining });
-
   } catch (err) {
     console.error('[CreditUsage] error:', err.message);
     return res.status(500).json({ error: err.message || 'unknown error' });
   }
 });
 
+// dr_messages has client_id + user_id on every row, so one count is enough.
+async function countChatQuestions(clientId, userId) {
+  let query = supabaseClient
+    .from('dr_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_id', String(clientId))
+    .eq('role', 'user');
+  if (userId) query = query.eq('user_id', String(userId));
+
+  const { count, error } = await query;
+  if (error) throw new Error(`chat question count failed: ${error.message}`);
+  return count || 0;
+}
+
 const PORT = process.env.PORT || 3000;
-registerDecisionIntelligenceRoute(app);
-registerDecisionIntelligenceV2Route(app);
+registerDynamicRagRoute(app);
 registerCompetitiveRadarRoute(app);
 registerEmailAlertsRoute(app);
 
