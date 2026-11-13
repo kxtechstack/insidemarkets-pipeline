@@ -41,9 +41,11 @@ const { pullProcessedBatch, getProcessedQueueLength, pullProcessedBatchReliable,
 const { refreshLock, redis } = require('./queueManager');
 const { matchSignalToTrend } = require('./trendClustering');
 const { commitUrlSeen } = require('./deduplicator');
-const { commitTopicSeen } = require('./topicDedup');
+const { commitTopicSeen, claimArticle, compareHeadlines } = require('./topicDedup');
+const { standardPlaces, placeCovers } = require('./placeNames');
 const FORWARD_OUTLOOK_MODULE_ID = '2eb989fd-0ea0-4320-b73a-f7eb8b970473';
 const MARKET_DYNAMICS_MODULE_ID = '55c5ee19-bfca-468b-81b3-b89ca4f303c8';
+const POLICY_MODULE_ID = '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Log each article's processing result to Supabase ────────────────────────
@@ -667,6 +669,222 @@ const applySectorValidation = (classification) => {
   return { ...classification, sector: 'Technology' };
 };
 
+// ══════════════════════════════════════════════════════════════════════════
+// CLIENT PROFILE + IMPACT (how close a news item is to THIS client)
+// ══════════════════════════════════════════════════════════════════════════
+// Impact is not the AI's opinion. The AI only picks, from the client's OWN
+// lists, which competitors / focus products & sectors / lower-priority sectors
+// an article is about. The code checks every pick and then decides:
+//   Critical  names the client or a competitor, AND is about its focus OR its countries
+//   High      names the client or a competitor,  OR  is about its focus IN its countries
+//   Medium    is about its focus OR its countries
+//   Low       anything else in the client's industry, or about a lower-priority sector
+// Client data: admin.client_icp (competitors, core_sectors, focus_products_services,
+// geographic_focus, sectors_to_avoid) + admin.competitors (active) + admin.clients.
+// Same rule for Policy & Risk, Market Dynamics, Forward Outlook (not Competitive Radar).
+
+const NOT_A_NAME = /^(unknown|n\/a|none|na|-|tbd)$/i;
+const plain = (t) => ` ${String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  .replace(/[’'`´]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim()} `
+  // one spelling for words written two ways, so "colour" finds "color" and "skin care" finds "skincare"
+  .replace(/ colour/g, ' color').replace(/ ageing /g, ' aging ').replace(/ labour /g, ' labor ')
+  .replace(/ flavour/g, ' flavor').replace(/ skin care /g, ' skincare ').replace(/ hair care /g, ' haircare ')
+  .replace(/ anti aging /g, ' antiaging ').replace(/ e commerce /g, ' ecommerce ')
+  .trim();
+const hasPhrase = (text, phrase) => {
+  const p = plain(phrase);
+  return p.length >= 2 && ` ${text} `.includes(` ${p} `);
+};
+const sameItem = (a, b) => plain(a) === plain(b);
+
+const profileCache = new Map();   // clientId -> { at, profile }
+const getClientProfile = async (clientId) => {
+  const hit = profileCache.get(clientId);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.profile;
+  let ctx = {};
+  let companyName = null;
+  let industry = null;
+  let comps = [];
+  try {
+    const { data } = await supabase.schema('admin').from('client_icp').select('context_json').eq('client_id', clientId).maybeSingle();
+    ctx = (data && data.context_json) || {};
+  } catch (e) { /* no profile -> everything is Low */ }
+  try {
+    const { data } = await supabase.schema('admin').from('clients').select('company_name, industry').eq('id', clientId).maybeSingle();
+    companyName = data && data.company_name;
+    industry = data && data.industry;
+  } catch (e) { /* ignore */ }
+  try {
+    const { data } = await supabase.schema('admin').from('competitors')
+      .select('name, search_name, aliases').eq('client_id', clientId).eq('is_active', true);
+    comps = data || [];
+  } catch (e) { /* ignore */ }
+
+  const list = (v) => (Array.isArray(v) ? v : []).map((x) => String(x || '').trim()).filter((x) => x && !NOT_A_NAME.test(x));
+  const competitors = [];
+  const addCompetitor = (name, others = []) => {
+    if (!name || NOT_A_NAME.test(name)) return;
+    const known = competitors.find((c) => sameItem(c.name, name));
+    const names = [name, ...list(others)];
+    if (known) names.forEach((n) => { if (!known.names.some((k) => sameItem(k, n))) known.names.push(n); });
+    else competitors.push({ name, names });
+  };
+  for (const c of comps) addCompetitor(c.name, [c.search_name, ...(Array.isArray(c.aliases) ? c.aliases : [])]);
+  for (const c of list(ctx.competitors)) addCompetitor(c);
+
+  const profile = {
+    companyName,
+    industry,
+    competitors,
+    focus: [...list(ctx.core_sectors), ...list(ctx.focus_products_services)],
+    places: standardPlaces(list(ctx.geographic_focus)),
+    avoid: list(ctx.sectors_to_avoid),
+  };
+  profileCache.set(clientId, { at: Date.now(), profile });
+  return profile;
+};
+
+/** The client profile as text for the AI prompt ({client_context}). */
+const profileForPrompt = (profile) => {
+  if (!profile) return null;
+  const lines = [];
+  if (profile.companyName) lines.push(`Client company: ${profile.companyName}`);
+  lines.push(`Competitors: ${profile.competitors.map((c) => c.name).join(', ') || 'none'}`);
+  lines.push(`Focus sectors and products: ${profile.focus.join(', ') || 'none'}`);
+  lines.push(`Focus countries: ${profile.places.join(', ') || 'none'}`);
+  lines.push(`Lower priority sectors: ${profile.avoid.join(', ') || 'none'}`);
+  return lines.join('\n');
+};
+
+// Words too general to show what an article is about (plus the client's own industry
+// words, added per client): a focus item like "Prestige skincare" is matched by "skincare".
+const GENERAL_WORDS = new Set(['and', 'the', 'for', 'of', 'beauty', 'cosmetic', 'cosmetics', 'retail', 'retailer', 'product',
+  'products', 'service', 'services', 'industry', 'market', 'markets', 'sector', 'sectors', 'solution', 'solutions', 'care',
+  'personal', 'business', 'businesses', 'consumer', 'consumers', 'goods', 'specialty', 'general', 'other', 'etc',
+  'treatment', 'treatments', 'prestige', 'premium', 'luxury', 'mass', 'high', 'end', 'new', 'company', 'companies']);
+const mainWords = (item, extra) => plain(item).split(' ').filter((w) => w.length >= 3 && !GENERAL_WORDS.has(w) && !extra.has(w));
+const hasWord = (text, w) => ` ${text} `.includes(` ${w} `) || ` ${text} `.includes(` ${w}s `);
+/** an item is "in" the text when its full phrase is there, or all its main words are */
+const itemInText = (text, item, extra) => {
+  if (hasPhrase(text, item)) return true;
+  const words = mainWords(item, extra);
+  return words.length > 0 && words.every((w) => hasWord(text, w));
+};
+
+/** Works out impact_level + impact_reason from the client profile. */
+const decideImpact = (classification, article, profile) => {
+  if (!profile) return { impact_level: 'Low', impact_reason: 'no client profile' };
+  const text = plain(`${article.title || ''} ${(article.text || '').slice(0, TEXT_TRUNCATE_LENGTH)} ${classification.signal_title || ''} ${classification.summary || ''}`);
+  const headline = plain(`${article.title || ''} ${classification.signal_title || ''}`);
+  const industryWords = new Set(plain(profile.industry || '').split(' ').flatMap((w) => [w, w.replace(/s$/, '')]));
+
+  // competitor or the client itself: the name must really be in the article
+  const named = profile.competitors.filter((c) => c.names.some((n) => hasPhrase(text, n))).map((c) => c.name);
+  const selfNamed = profile.companyName && hasPhrase(text, profile.companyName);
+
+  // focus: needs proof in the article's own words.
+  //  - the full phrase is written ("prestige skincare"), or all its specific words are ("skincare")
+  //  - an item made ONLY of general words ("Prestige Beauty", "Specialty Retail") is the client's
+  //    whole industry, so it counts only when the full phrase is written
+  //  - an AI pick counts only when it CHOSE (at most half the list) AND at least one specific word
+  //    of the item is in the article (real run 13 Nov: the AI ticked "Prestige Beauty" for every
+  //    cosmetics rule, so every rule became Medium)
+  const picks = (classification.focus_matches || []).filter((m) => profile.focus.some((f) => sameItem(m, f)));
+  const aiChose = picks.length > 0 && picks.length <= Math.max(1, Math.floor(profile.focus.length / 2));
+  const focus = profile.focus.filter((f) => {
+    if (hasPhrase(text, f)) return true;
+    const words = mainWords(f, industryWords);
+    if (!words.length) return false;
+    if (words.every((w) => hasWord(text, w))) return true;
+    return aiChose && picks.some((m) => sameItem(m, f)) && words.some((w) => hasWord(text, w));
+  });
+
+  // lower-priority sector: only when it is in the HEADLINE (the AI's picks alone are not enough)
+  const avoid = profile.avoid.filter((x) => itemInText(headline, x, industryWords));
+
+  // countries: the signal's country (or region) covers one of the client's countries
+  const places = standardPlaces(classification.country)
+    .filter((p) => profile.places.some((cp) => placeCovers(p, cp)));
+
+  const who = [...(selfNamed ? [profile.companyName] : []), ...named];
+  const reasons = [];
+  if (who.length) reasons.push(`names ${who.join(', ')}`);
+  if (focus.length) reasons.push(`about ${focus.join(', ')}`);
+  if (places.length) reasons.push(`in ${places.join(', ')}`);
+
+  let level;
+  if (who.length && (focus.length || places.length)) level = 'Critical';
+  else if (who.length || (focus.length && places.length)) level = 'High';
+  else if (focus.length || places.length) level = 'Medium';
+  else level = 'Low';
+  if (avoid.length && !who.length) {
+    level = 'Low';
+    reasons.push(`lower-priority sector: ${avoid.join(', ')}`);
+  }
+  return { impact_level: level, impact_reason: reasons.join('; ') || 'general industry news, not about the client focus or countries' };
+};
+
+// ── Policy & Risk: allowed values ───────────────────────────────────────────
+// One general list for every industry. The AI may only pick from these; old or
+// invented names are mapped below; news that is not a policy item is rejected.
+const POLICY_CATEGORIES = [
+  'New Law & Legislation', 'Regulation & Guidance', 'Consultation & Proposal', 'Compliance & Reporting',
+  'Licensing & Approvals', 'Enforcement & Penalties', 'Product Safety & Standards', 'Trade, Tariffs & Customs',
+  'Tax & Financial Rules', 'Data, Privacy & Technology', 'Environment & Sustainability', 'Labour & Employment',
+  'Sanctions & Restrictions', 'Court Rulings & Litigation', 'Government Policy & Programmes',
+];
+const POLICY_CATEGORY_MAP = {
+  'legislative development': 'New Law & Legislation', 'executive order': 'New Law & Legislation',
+  'regulatory reform': 'New Law & Legislation', 'corporate & business laws': 'New Law & Legislation',
+  'regulatory change': 'Regulation & Guidance', 'regulatory development': 'Regulation & Guidance',
+  'regulatory guidance': 'Regulation & Guidance', 'regulatory risk': 'Regulation & Guidance',
+  'other regulatory risk': 'Regulation & Guidance', 'stablecoin & crypto regulation': 'Regulation & Guidance',
+  'payments system': 'Regulation & Guidance', 'infrastructure reform': 'Government Policy & Programmes',
+  'healthcare regulation': 'Regulation & Guidance', 'life insurance': 'Regulation & Guidance',
+  'cross-border regulation': 'Trade, Tariffs & Customs',
+  'regulatory consultation': 'Consultation & Proposal', 'regulatory proposal': 'Consultation & Proposal',
+  'compliance requirement': 'Compliance & Reporting', 'regulatory requirement': 'Compliance & Reporting',
+  'aml & kyc compliance': 'Compliance & Reporting', 'regulatory filing': 'Compliance & Reporting',
+  'capital requirements': 'Tax & Financial Rules', 'central bank directive': 'Tax & Financial Rules',
+  'federal taxation': 'Tax & Financial Rules', 'consumer financial protection': 'Tax & Financial Rules',
+  'licensing change': 'Licensing & Approvals', 'regulatory enforcement': 'Enforcement & Penalties',
+  'trade & tariffs': 'Trade, Tariffs & Customs', 'sanctions & embargo': 'Sanctions & Restrictions',
+  'data privacy & protection': 'Data, Privacy & Technology', 'cyber & tech risk': 'Data, Privacy & Technology',
+  'environmental & climate regulation': 'Environment & Sustainability', 'labor & employment law': 'Labour & Employment',
+  'litigation & legal risk': 'Court Rulings & Litigation', 'government policy announcement': 'Government Policy & Programmes',
+};
+// words in a category that mean "this is not a policy item at all"
+const NOT_POLICY = /\b(merger|mergers|acquisition|acquisitions|funding|investment|earnings|partnership|product launch|launch|appointment)\b/i;
+const POLICY_SOURCES = ['Regulatory Consultation', 'Regulatory Filing', 'Enforcement Action', 'Legislative Update',
+  'Court Ruling', 'Central Bank Directive', 'News Report', 'Industry Advisory', 'Government Announcement'];
+const POLICY_SOURCE_MAP = {
+  'regulatory update': 'Government Announcement', 'regulatory directive': 'Government Announcement',
+  'government policy announcement': 'Government Announcement', 'regulatory proposal': 'Regulatory Consultation',
+};
+
+/** Policy: checks category / source type / country. Returns the fixed classification, or not-relevant. */
+const applyPolicyRules = (classification) => {
+  if (!classification.is_relevant) return classification;
+  const fixed = { ...classification };
+  const cat = String(fixed.category || '').trim();
+  const exact = POLICY_CATEGORIES.find((c) => sameItem(c, cat));
+  if (exact) fixed.category = exact;
+  else if (POLICY_CATEGORY_MAP[cat.toLowerCase()]) {
+    console.log(`  [PolicyRules] category "${cat}" -> "${POLICY_CATEGORY_MAP[cat.toLowerCase()]}"`);
+    fixed.category = POLICY_CATEGORY_MAP[cat.toLowerCase()];
+  } else if (NOT_POLICY.test(cat)) {
+    console.log(`  [PolicyRules] category "${cat}" is not a policy item -> not relevant`);
+    return { ...fixed, is_relevant: false, reason: `Not a policy or regulatory item (AI said category "${cat}")` };
+  } else {
+    console.log(`  [PolicyRules] unknown category "${cat}" -> "Regulation & Guidance"`);
+    fixed.category = 'Regulation & Guidance';
+  }
+  const src = String(fixed.source_type || '').trim();
+  fixed.source_type = POLICY_SOURCES.find((x) => sameItem(x, src)) || POLICY_SOURCE_MAP[src.toLowerCase()] || 'News Report';
+  fixed.country = standardPlaces(fixed.country).join(', ') || 'Unknown';
+  return fixed;
+};
+
 // ── Fill prompt placeholders ─────────────────────────────────────────────────
 // CHANGED: now accepts clientContext (optional) — inserted wherever the
 // prompt template has a {client_context} placeholder. Prompts that don't
@@ -675,12 +893,14 @@ const fillPromptTemplate = (template, industry, title, text, clientContext = nul
   const truncatedText = (text || '').slice(0, TEXT_TRUNCATE_LENGTH);
   const contextText = clientContext || 'No specific client context available. Use industry-level reasoning only.';
   const scopeText = monitoringScope || 'No monitoring scope configured.';
+  // (functions, not strings: a "$&" or "$'" inside an article would otherwise be
+  //  read by JavaScript as "copy part of the prompt here")
   return template
-    .replace(/{industry}/g, industry)
-    .replace(/{title}/g, title || '')
-    .replace(/{text}/g, truncatedText)
-    .replace(/{client_context}/g, contextText)
-    .replace(/{monitoring_scope}/g, scopeText);
+    .replace(/{industry}/g, () => industry)
+    .replace(/{title}/g, () => title || '')
+    .replace(/{text}/g, () => truncatedText)
+    .replace(/{client_context}/g, () => contextText)
+    .replace(/{monitoring_scope}/g, () => scopeText);
 };
 
 // ── Clean raw article text before synthesis ──────────────────────────────────
@@ -702,6 +922,18 @@ const cleanArticleText = (text) => {
     .trim();
 };
 
+// Removes markdown and the "Title:" label: "**Title:** Saudi Arabia Tightens..." -> "Saudi Arabia Tightens..."
+const cleanTitle = (line) => {
+  const t = String(line || '')
+    .replace(/^\s*(\d{1,2}[.)]\s+)?[\s#>*_-]*/, '')   // leading list number ("1. "), markdown, bullets
+    .replace(/^(\*\*|__)?\s*title\s*:\s*(\*\*|__)?/i, '')
+    .replace(/[*_#`]+/g, '')
+    .replace(/^["'“‘\s]+|["'”’\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return t.length >= 5 ? t : null;
+};
+
 // ── Synthesize article into LLM's own words ──────────────────────────────────
 // Returns { title, body } — both in LLM's own words, no raw text anywhere.
 const synthesizeContent = async (article, classification) => {
@@ -709,16 +941,20 @@ const synthesizeContent = async (article, classification) => {
     const cleanedText = cleanArticleText(article.text || '');
     const promptTemplate = await getSynthesisPromptTemplate();
     const userPrompt = promptTemplate
-      .replace(/{title}/g, article.title || '')
-      .replace(/{text}/g, cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
+      .replace(/{title}/g, () => article.title || '')
+      .replace(/{text}/g, () => cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
 
     const synthesized = await callLLM([
       { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
       { role: 'user', content: userPrompt },
     ], { temperature: 0.3, max_tokens: 1500, timeout: 180000 });
-    const lines = synthesized.split('\n').filter(l => l.trim() !== '');
-    const titleLine = lines[0].replace(/^\*{0,2}Title:\s*/i, '').replace(/\*{0,2}\s*$/, '').trim();
-    const bodyText = lines.slice(1).join('\n').trim();
+    const lines = String(synthesized || '').split('\n').filter(l => l.trim() !== '');
+    // The title line can come as "Title: X", "**Title:** X", "## Title: X", "1. **Title: X**"...
+    // Take the first line that says "Title:" (within the first 3 lines), else the first line.
+    let titleIdx = lines.slice(0, 3).findIndex((l) => /title\s*:/i.test(l));
+    if (titleIdx === -1) titleIdx = 0;
+    const titleLine = cleanTitle(lines[titleIdx] || '');
+    const bodyText = lines.filter((_, i) => i !== titleIdx).join('\n').trim();
     console.log(`  [Synthesize] Title: "${titleLine}" | Body: ${bodyText.length} chars`);
     return { title: titleLine, body: bodyText };
 
@@ -787,8 +1023,8 @@ const checkIndustry = async (article, industry, clientId) => {
     const tpl = await getIndustryGatePrompt();
     const prompt = tpl
       .replace(/{industry}/g, industry)
-      .replace(/{title}/g, article.title || '')
-      .replace(/{text}/g, cleanArticleText(article.text || '').slice(0, 2500));
+      .replace(/{title}/g, () => article.title || '')
+      .replace(/{text}/g, () => cleanArticleText(article.text || '').slice(0, 2500));
     const raw = await callLLM([
       { role: 'system', content: 'You are a strict classifier. You only respond with valid JSON, nothing else.' },
       { role: 'user', content: prompt },
@@ -816,6 +1052,10 @@ const checkIndustry = async (article, industry, clientId) => {
     return { pass: true, reason: `industry check failed (${e.message}) - not blocked` };
   }
 };
+
+// Only a real yes counts. The small AI sometimes writes "false" as text, and
+// Boolean("false") is true in JavaScript, so a NO used to be read as a YES.
+const isYes = (v) => v === true || /^(true|yes)$/i.test(String(v == null ? '' : v).trim());
 
 // ── Call LM Studio for relevance classification + signal extraction ──────────
 // CHANGED: now accepts clientContext, passed through to fillPromptTemplate
@@ -907,7 +1147,7 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
 
     if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
       return {
-        is_relevant: Boolean(parsed.is_relevant),
+        is_relevant: isYes(parsed.is_relevant),
         reason: parsed.reason || 'No reason provided',
         signal_title: parsed.signal_title || article.title,
         signal_type: parsed.signal_type || 'Innovation',
@@ -920,7 +1160,7 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
 
     if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
       return {
-        is_relevant: Boolean(parsed.is_relevant),
+        is_relevant: isYes(parsed.is_relevant),
         reason: parsed.reason || 'No reason provided',
         topic_summary: parsed.topic_summary || null,
         signal_number: Number.isInteger(parsed.signal_number) ? parsed.signal_number : 0,
@@ -932,16 +1172,20 @@ const classifyArticle = async (promptTemplate, industry, article, clientContext 
       };
     }
 
+    const asList = (v) => (Array.isArray(v) ? v : (v ? [v] : [])).map((x) => String(x || '').trim()).filter(Boolean);
     return {
-      is_relevant: Boolean(parsed.is_relevant),
+      is_relevant: isYes(parsed.is_relevant),
       reason: parsed.reason || 'No reason provided',
       signal_title: parsed.signal_title || article.title,
-      category: parsed.category || 'Other Regulatory Risk',
-      impact_level: parsed.impact_level || 'Low',
-      source_type: parsed.source_type || 'News Report',
+      category: parsed.category || null,
+      source_type: parsed.source_type || null,
       country: parsed.country || 'Unknown',
       summary: parsed.summary || '',
       business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
+      // the AI's picks from the client's own lists (checked by code before use)
+      competitors_named: asList(parsed.competitors_named),
+      focus_matches: asList(parsed.focus_matches),
+      avoid_matches: asList(parsed.avoid_matches),
     };
 
   } catch (err) {
@@ -1045,29 +1289,25 @@ const setupPolicyCollection = async () => {
 // ─────────────────────────────────────────────────────────────────────────
 const DEDUP_WINDOW_DAYS = Number(process.env.SIGNAL_DEDUP_WINDOW_DAYS) || 90;
 
-async function findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, moduleId, submoduleId) {
-  if (!synthesizedTitle || typeof synthesizedTitle !== 'string') {
-    return { isDuplicate: false };
-  }
+async function findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, moduleId) {
+  // FIXED: this used to look only inside ONE sub-search and compared the rewritten
+  // title with signal_title, which (for Policy and Forward Outlook) holds a DIFFERENT
+  // title - so it almost never matched, and 3 sub-searches saved the same news 3 times.
+  // Now: the whole module, compared with the rewritten titles (policy_articles_full.title).
+  if (!synthesizedTitle || typeof synthesizedTitle !== 'string') return { isDuplicate: false };
   const title = synthesizedTitle.trim();
   if (title.length < 5) return { isDuplicate: false };
 
-  const signalTable = getSignalTableForModule(moduleId);
-  if (!signalTable) return { isDuplicate: false };
-
-  const cutoffIso = new Date(
-    Date.now() - DEDUP_WINDOW_DAYS * 24 * 60 * 60 * 1000
-  ).toISOString();
+  const cutoffIso = new Date(Date.now() - DEDUP_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const exactPattern = title.replace(/[\\%_]/g, (c) => `\\${c}`);   // ilike, but no wildcards
 
   try {
     const { data, error } = await supabase
-      .from(signalTable)
-      .select('id, signal_title, created_at')
+      .from('policy_articles_full')
+      .select('article_id, title, created_at')
       .eq('client_id', clientId)
       .eq('module_id', moduleId)
-      .eq('submodule_id', submoduleId)
-      .eq('is_duplicate', false)
-      .ilike('signal_title', title)   // case-insensitive exact match
+      .ilike('title', exactPattern)        // case-insensitive exact match
       .gte('created_at', cutoffIso)
       .order('created_at', { ascending: true })
       .limit(1)
@@ -1077,9 +1317,8 @@ async function findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, 
       console.log(`  [SynthesizedDedup] lookup error (non-fatal): ${error.message}`);
       return { isDuplicate: false };
     }
-
-    if (data && data.id) {
-      return { isDuplicate: true, existingSignalId: data.id, existingSignalTable: signalTable };
+    if (data && data.article_id) {
+      return { isDuplicate: true, existingSignalId: data.article_id, existingSignalTable: 'policy_articles_full' };
     }
     return { isDuplicate: false };
   } catch (err) {
@@ -1088,10 +1327,69 @@ async function findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, 
   }
 }
 
+// All-or-nothing saving: if any part of saving an article fails, remove every
+// part already saved (Qdrant text + Supabase rows) and throw, so the article is
+// logged as failed and tried again on the next run. Before, errors were only
+// printed and the article was marked done -> text in Qdrant with no signal.
+const undoSave = async (articleId, signalTable) => {
+  try {
+    await qdrant.delete(POLICY_COLLECTION, { wait: true, filter: { must: [{ key: 'article_id', match: { value: articleId } }] } });
+  } catch (e) { console.error(`  [Storage] undo: could not remove Qdrant text for ${articleId}: ${e.message}`); }
+  for (const table of ['policy_articles_metadata', 'policy_articles_full', signalTable].filter(Boolean)) {
+    const { error } = await supabase.from(table).delete().eq('article_id', articleId);
+    if (error) console.error(`  [Storage] undo: could not remove ${table} row for ${articleId}: ${error.message}`);
+  }
+};
+
+// ── Same event already saved? (Policy, no AI) ────────────────────────────────
+// Two websites often tell the same event with very different headlines
+// ("Strict action will be taken...": Delhi Health Minister / Delhi Raids Crack Down on
+// Unlicensed Cosmetic Units). The topic check cannot see it, but the AI's own short titles
+// are clean and alike ("Delhi Government Cracks Down on Unlicensed Cosmetic Manufacturing" /
+// "Delhi Raids Unlicensed Cosmetic Manufacturing Units").
+// So: compare the new signal title with the signals saved for this client + module in the
+// last SAME_EVENT_DAYS days, only those in the SAME country, with the same word rule as the
+// topic check, in its STRICT form: action words count (Extends / Mandates / Delays say what
+// happened), at least 3 specific words shared and 50%+, no different numbers.
+// Runs BEFORE the rewrite, so a duplicate costs no extra AI call.
+const SAME_EVENT_DAYS = Number(process.env.SAME_EVENT_DAYS) || 30;
+async function findSameEventSignal(classification, clientId, moduleId, industry) {
+  const title = String(classification.signal_title || '').trim();
+  const myPlaces = standardPlaces(classification.country).filter((p) => p !== 'Unknown' && p !== 'Global');
+  if (!title || !myPlaces.length) return null;   // no country: cannot be sure, keep it
+  try {
+    const since = new Date(Date.now() - SAME_EVENT_DAYS * 864e5).toISOString();
+    const { data, error } = await supabase.from('policy_signals')
+      .select('article_id, signal_title, country')
+      .eq('client_id', clientId).eq('module_id', moduleId)
+      .gte('created_at', since).order('created_at', { ascending: false }).limit(500);
+    if (error) { console.log(`  [SameEvent] lookup error (non-fatal): ${error.message}`); return null; }
+    const industryWords = new Set(plain(industry || '').split(' ').filter(Boolean).flatMap((w) => [w, w.replace(/s$/, '')]));
+    for (const row of data || []) {
+      const theirPlaces = standardPlaces(row.country);
+      if (!myPlaces.some((p) => theirPlaces.includes(p))) continue;
+      const h = compareHeadlines(title, row.signal_title, industryWords, { strict: true });
+      if (h.same) {
+        console.log(`  [SameEvent] "${title}" = "${row.signal_title}" (${Math.round(h.overlap * 100)}% same words: ${h.shared.join(', ')})`);
+        return row;
+      }
+    }
+  } catch (e) {
+    console.log(`  [SameEvent] check failed (non-fatal): ${e.message}`);
+  }
+  return null;
+}
+
 // ── Store relevant article ───────────────────────────────────────────────────
 // CHANGED: now takes moduleId and submoduleId, tags every insert + Qdrant payload with them
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId, moduleId, submoduleId) => {
   console.log('moduleId being inserted:', JSON.stringify(moduleId), 'length:', moduleId ? moduleId.length : 'N/A');
+
+  // Step 0 (Policy) — the same event saved already under another headline? (no AI)
+  if (moduleId === POLICY_MODULE_ID) {
+    const same = await findSameEventSignal(classification, clientId, moduleId, industry);
+    if (same) return { skipped: true, duplicateOf: same.article_id, synthesizedTitle: classification.signal_title };
+  }
 
   // Step 1 — Synthesize content into LLM's own words
   // NEVER store raw copyrighted article text anywhere
@@ -1106,9 +1404,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   // BEFORE any storage (so we don't leave orphan rows in Qdrant or
   // Supabase). If a non-duplicate signal with this synthesized title
   // already exists, this article is a syndicated copy — skip storage.
-  const dupCheck = await findExistingSignalBySynthesizedTitle(
-    synthesizedTitle, clientId, moduleId, submoduleId
-  );
+  const dupCheck = await findExistingSignalBySynthesizedTitle(synthesizedTitle, clientId, moduleId);
   if (dupCheck.isDuplicate) {
     console.log(`  [SynthesizedDedup] SKIP: "${synthesizedTitle}" already stored as ${dupCheck.existingSignalTable}/${dupCheck.existingSignalId}`);
     return { skipped: true, duplicateOf: dupCheck.existingSignalId, synthesizedTitle };
@@ -1154,7 +1450,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     module_id: moduleId,       // CHANGED: new
     submodule_id: submoduleId, // CHANGED: new
   });
-  if (metaError) console.error('[Storage] metadata insert error:', metaError.message);
+  if (metaError) {
+    await undoSave(articleId);
+    throw new Error(`save failed (policy_articles_metadata): ${metaError.message}`);
+  }
 
   // Step 4 — Store synthesized content in Supabase (no raw original text)
   const { error: fullError } = await supabase.from('policy_articles_full').insert({
@@ -1175,7 +1474,10 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     module_id: moduleId,       // CHANGED: new
     submodule_id: submoduleId, // CHANGED: new
   });
-  if (fullError) console.error('[Storage] full insert error:', fullError.message);
+  if (fullError) {
+    await undoSave(articleId);
+    throw new Error(`save failed (policy_articles_full): ${fullError.message}`);
+  }
 
   // Step 4.5 — Market Dynamics branches off here entirely: instead of a
   // policy_signals row, it stores the individual article as a
@@ -1248,6 +1550,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   } else {
     signalInsert.category = classification.category;
     signalInsert.impact_level = classification.impact_level;
+    if (classification.impact_reason) signalInsert.impact_reason = classification.impact_reason;
     signalInsert.source_type = classification.source_type;
     signalInsert.country = classification.country;
     signalInsert.business_impact = classification.business_impact;
@@ -1255,12 +1558,21 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 
   const targetSignalsTable = moduleId === FORWARD_OUTLOOK_MODULE_ID ? 'trend_signals' : 'policy_signals';
 
-  const { data: newSignal, error: signalError } = await supabase
+  let { data: newSignal, error: signalError } = await supabase
     .from(targetSignalsTable)
     .insert(signalInsert)
     .select()
     .single();
-  if (signalError) console.error('[Storage] signal insert error:', signalError.message);
+  if (signalError && /impact_reason/i.test(signalError.message) && 'impact_reason' in signalInsert) {
+    // the impact_reason column is not added yet (SQL not run): save without it
+    console.error(`[Storage] ${targetSignalsTable} has no impact_reason column yet - saved without it`);
+    delete signalInsert.impact_reason;
+    ({ data: newSignal, error: signalError } = await supabase.from(targetSignalsTable).insert(signalInsert).select().single());
+  }
+  if (signalError) {
+    await undoSave(articleId, targetSignalsTable);
+    throw new Error(`save failed (${targetSignalsTable}): ${signalError.message}`);
+  }
 
   // Step 6 — Forward Outlook trend matching (only runs for that module)
   if (moduleId === FORWARD_OUTLOOK_MODULE_ID && newSignal) {
@@ -1303,6 +1615,13 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
     }
     sectorsToAvoid = await getSectorsToAvoid(clientId);
     competitors = await getCompetitorsList(clientId);
+  }
+  // Policy & Risk: the client's profile (competitors, focus, countries) goes into the
+  // prompt so the AI can pick from it, and is used by code to decide impact.
+  let clientProfile = null;
+  if (moduleId === POLICY_MODULE_ID) {
+    clientProfile = await getClientProfile(clientId);
+    clientContext = profileForPrompt(clientProfile);
   }
   if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
     enabledSignals = await getEnabledSignalsForClient(clientId, moduleId);
@@ -1347,149 +1666,179 @@ const processArticlesForRelevance = async (articles, clientId, industry, jobId, 
       console.log(`  [!] Failed to mark retrying (non-fatal): ${markErr.message}`);
     }
 
-    // INDUSTRY CHECK first: an article that is not about the client's industry stops here
-    const gate = await checkIndustry(article, industry, clientId);
-    if (!gate.pass) {
-      const why = `Not about the ${industry} industry${gate.main_industry ? ` (it is about: ${gate.main_industry})` : ''}: ${gate.reason}`;
+    // DUPLICATE GUARD: another sub-search may be processing (or just saved) the same news
+    const claim = await claimArticle(article, clientId, moduleId);
+    if (!claim.ok) {
       try {
-        await logArticle(jobId, clientId, article, 'skipped', why, submoduleId, existingLogId);
+        await logArticle(jobId, clientId, article, 'skipped', claim.reason, submoduleId, existingLogId);
         await commitUrlSeen(article, clientId, moduleId);
-        await commitTopicSeen(article, clientId, moduleId);
-      } catch (gateLogErr) {
-        console.log(`  [!] Failed to log industry rejection (non-fatal): ${gateLogErr.message}`);
+      } catch (claimLogErr) {
+        console.log(`  [!] Failed to log duplicate (non-fatal): ${claimLogErr.message}`);
       }
       irrelevantCount++;
       consecutiveTechnicalFailures = 0;
-      console.log(`  [✗] NOT ${industry.toUpperCase()} | ${why}`);
+      console.log(`  [=] ${claim.reason}`);
       continue;
     }
 
     try {
-      let classification = await withTimeout(
-        classifyArticle(
-          promptTemplate, industry, article, clientContext, moduleId,
-          moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
-        ),
-        PER_ARTICLE_TIMEOUT_MS,
-        `classify "${(article.title || '').slice(0, 60)}"`
-      );
-      classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
-      classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
-      classification = applySectorValidation(classification);
-
-      if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
-        classification = await applyMonitoringScopeValidation(classification, enabledSignals);
-        classification = applySignalCategoryValidation(classification);
+      // INDUSTRY CHECK first: an article that is not about the client's industry stops here
+      const gate = await checkIndustry(article, industry, clientId);
+      if (!gate.pass) {
+        const why = `Not about the ${industry} industry${gate.main_industry ? ` (it is about: ${gate.main_industry})` : ''}: ${gate.reason}`;
+        try {
+          await logArticle(jobId, clientId, article, 'skipped', why, submoduleId, existingLogId);
+          await commitUrlSeen(article, clientId, moduleId);
+          await commitTopicSeen(article, clientId, moduleId);
+        } catch (gateLogErr) {
+          console.log(`  [!] Failed to log industry rejection (non-fatal): ${gateLogErr.message}`);
+        }
+        irrelevantCount++;
+        consecutiveTechnicalFailures = 0;
+        console.log(`  [✗] NOT ${industry.toUpperCase()} | ${why}`);
+        continue;
       }
 
-      if (classification.technical_failure) {
-        await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
-        irrelevantCount++;
-        technicalFailureArticles.push(article);  // NEW: track for re-queue
-        console.log(`  [!] FAILED | ${classification.reason}`);
-        // DO NOT commit dedup state -- this article failed due to a technical
-        // issue (LLM rate limit, timeout, etc.), NOT because the content was
-        // judged irrelevant. Leaving it uncommitted means a future run can
-        // re-fetch and re-process it.
+      try {
+        let classification = await withTimeout(
+          classifyArticle(
+            promptTemplate, industry, article, clientContext, moduleId,
+            moduleId === MARKET_DYNAMICS_MODULE_ID ? formatScopeForPrompt(enabledSignals) : null
+          ),
+          PER_ARTICLE_TIMEOUT_MS,
+          `classify "${(article.title || '').slice(0, 60)}"`
+        );
+        classification = applySectorsToAvoidOverride(classification, article, sectorsToAvoid);
+        classification = applyCriticalRequiresCompetitorOverride(classification, article, competitors);
+        classification = applySectorValidation(classification);
 
-        // NEW: increment the circuit-breaker counter here too. classifyArticle
-        // catches 429s internally and returns technical_failure: true (rather
-        // than throwing), so the outer catch block never sees these. Without
-        // this increment, three consecutive rate-limit failures would never
-        // trip the breaker.
+        // Policy & Risk: allowed category / source type, standard country names,
+        // and impact decided by code from the client's profile.
+        if (moduleId === POLICY_MODULE_ID && !classification.technical_failure) {
+          classification = applyPolicyRules(classification);
+          if (classification.is_relevant) {
+            classification = { ...classification, ...decideImpact(classification, article, clientProfile) };
+            console.log(`  [Impact] ${classification.impact_level} - ${classification.impact_reason}`);
+          }
+        }
+
+        if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+          classification = await applyMonitoringScopeValidation(classification, enabledSignals);
+          classification = applySignalCategoryValidation(classification);
+        }
+
+        if (classification.technical_failure) {
+          await logArticle(jobId, clientId, article, 'failed', classification.reason, submoduleId, existingLogId);
+          irrelevantCount++;
+          technicalFailureArticles.push(article);  // NEW: track for re-queue
+          console.log(`  [!] FAILED | ${classification.reason}`);
+          // DO NOT commit dedup state -- this article failed due to a technical
+          // issue (LLM rate limit, timeout, etc.), NOT because the content was
+          // judged irrelevant. Leaving it uncommitted means a future run can
+          // re-fetch and re-process it.
+
+          // NEW: increment the circuit-breaker counter here too. classifyArticle
+          // catches 429s internally and returns technical_failure: true (rather
+          // than throwing), so the outer catch block never sees these. Without
+          // this increment, three consecutive rate-limit failures would never
+          // trip the breaker.
+          consecutiveTechnicalFailures++;
+          if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+            const failedIndex = articles.indexOf(article);
+            const unprocessed = articles.slice(failedIndex);
+            console.log(`  [CircuitBreaker] ${consecutiveTechnicalFailures} consecutive failures — aborting batch. ${unprocessed.length} article(s) left unprocessed.`);
+            throw new RateLimitAbortError(
+              `${consecutiveTechnicalFailures} consecutive LLM failures`,
+              unprocessed
+            );
+          }
+        } else if (classification.is_relevant) {
+          const storeResult = await storeRelevantArticle(
+            article,
+            classification,
+            clientId,
+            industry,
+            jobId,
+            moduleId,
+            submoduleId
+          );
+
+          if (storeResult && storeResult.skipped) {
+            // Duplicate of an existing signal — not stored, but fully handled.
+            // Log as 'skipped' (report counts remain correct), commit dedup,
+            // and DO NOT increment relevantCount.
+            await logArticle(
+              jobId, clientId, article, 'skipped',
+              `Duplicate of existing signal ${storeResult.duplicateOf}`,
+              submoduleId, existingLogId
+            );
+            await commitUrlSeen(article, clientId, moduleId);
+            await commitTopicSeen(article, clientId, moduleId);
+            irrelevantCount++;
+            consecutiveTechnicalFailures = 0;
+            console.log(`  [=] DUPLICATE (skipped storage) | ${storeResult.synthesizedTitle}`);
+          } else {
+            const chunkCount = (storeResult && storeResult.chunks) ? storeResult.chunks : 0;
+            await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
+            // Article is now fully stored -- commit dedup state so future runs
+            // recognize it as handled.
+            await commitUrlSeen(article, clientId, moduleId);
+            await commitTopicSeen(article, clientId, moduleId);
+            relevantCount++;
+            consecutiveTechnicalFailures = 0;  // success resets the breaker counter
+
+            if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
+              console.log(
+                `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
+              );
+            } else {
+              console.log(
+                `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
+              );
+            }
+          }
+        } else {
+          await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
+          // LLM made a definite "irrelevant" judgement -- commit dedup state so
+          // a future run doesn't waste an LLM call to get the same answer.
+          await commitUrlSeen(article, clientId, moduleId);
+          await commitTopicSeen(article, clientId, moduleId);
+          irrelevantCount++;
+          consecutiveTechnicalFailures = 0;  // success resets the breaker counter
+          console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
+        }
+      } catch (articleErr) {
+        // NEW: catches anything that throws mid-processing (e.g. storeRelevantArticle's
+        // embedding/Qdrant/Supabase calls) so this article always gets logged instead of
+        // silently vanishing and killing the rest of the batch (previously, an uncaught
+        // error here propagated up to processQueueInBatches and aborted every remaining
+        // article in the batch without logging any of them).
+        console.error(`  [!] Unhandled error processing "${article.title}": ${articleErr.message}`);
+        try {
+          await logArticle(jobId, clientId, article, 'failed', `Unhandled error: ${articleErr.message}`, submoduleId, existingLogId);
+        } catch (logErr) {
+          console.error(`  [!] Also failed to log the error for "${article.title}": ${logErr.message}`);
+        }
+        irrelevantCount++;
+
+        // NEW: circuit breaker -- if the LLM has failed N times in a row,
+        // stop trying the remaining articles. They'd just waste time on a
+        // rate-limited LLM. The unprocessed articles are returned so the
+        // caller can re-queue them.
         consecutiveTechnicalFailures++;
         if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
           const failedIndex = articles.indexOf(article);
-          const unprocessed = articles.slice(failedIndex);
+          const unprocessed = articles.slice(failedIndex); // includes this article
           console.log(`  [CircuitBreaker] ${consecutiveTechnicalFailures} consecutive failures — aborting batch. ${unprocessed.length} article(s) left unprocessed.`);
           throw new RateLimitAbortError(
             `${consecutiveTechnicalFailures} consecutive LLM failures`,
             unprocessed
           );
         }
-      } else if (classification.is_relevant) {
-        const storeResult = await storeRelevantArticle(
-          article,
-          classification,
-          clientId,
-          industry,
-          jobId,
-          moduleId,
-          submoduleId
-        );
-
-        if (storeResult && storeResult.skipped) {
-          // Duplicate of an existing signal — not stored, but fully handled.
-          // Log as 'skipped' (report counts remain correct), commit dedup,
-          // and DO NOT increment relevantCount.
-          await logArticle(
-            jobId, clientId, article, 'skipped',
-            `Duplicate of existing signal ${storeResult.duplicateOf}`,
-            submoduleId, existingLogId
-          );
-          await commitUrlSeen(article, clientId, moduleId);
-          await commitTopicSeen(article, clientId, moduleId);
-          irrelevantCount++;
-          consecutiveTechnicalFailures = 0;
-          console.log(`  [=] DUPLICATE (skipped storage) | ${storeResult.synthesizedTitle}`);
-        } else {
-          const chunkCount = (storeResult && storeResult.chunks) ? storeResult.chunks : 0;
-          await logArticle(jobId, clientId, article, 'completed', null, submoduleId, existingLogId);
-          // Article is now fully stored -- commit dedup state so future runs
-          // recognize it as handled.
-          await commitUrlSeen(article, clientId, moduleId);
-          await commitTopicSeen(article, clientId, moduleId);
-          relevantCount++;
-          consecutiveTechnicalFailures = 0;  // success resets the breaker counter
-
-          if (moduleId === FORWARD_OUTLOOK_MODULE_ID) {
-            console.log(
-              `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.sector} | ${classification.horizon_estimate} | ${classification.reason}`
-            );
-          } else {
-            console.log(
-              `  [✓] RELEVANT (${chunkCount} chunks) | ${classification.category} | ${classification.impact_level} | ${classification.reason}`
-            );
-          }
-        }
-      } else {
-        await logArticle(jobId, clientId, article, 'skipped', classification.reason, submoduleId, existingLogId);
-        // LLM made a definite "irrelevant" judgement -- commit dedup state so
-        // a future run doesn't waste an LLM call to get the same answer.
-        await commitUrlSeen(article, clientId, moduleId);
-        await commitTopicSeen(article, clientId, moduleId);
-        irrelevantCount++;
-        consecutiveTechnicalFailures = 0;  // success resets the breaker counter
-        console.log(`  [✗] IRRELEVANT | ${classification.reason}`);
       }
-    } catch (articleErr) {
-      // NEW: catches anything that throws mid-processing (e.g. storeRelevantArticle's
-      // embedding/Qdrant/Supabase calls) so this article always gets logged instead of
-      // silently vanishing and killing the rest of the batch (previously, an uncaught
-      // error here propagated up to processQueueInBatches and aborted every remaining
-      // article in the batch without logging any of them).
-      console.error(`  [!] Unhandled error processing "${article.title}": ${articleErr.message}`);
-      try {
-        await logArticle(jobId, clientId, article, 'failed', `Unhandled error: ${articleErr.message}`, submoduleId, existingLogId);
-      } catch (logErr) {
-        console.error(`  [!] Also failed to log the error for "${article.title}": ${logErr.message}`);
-      }
-      irrelevantCount++;
 
-      // NEW: circuit breaker -- if the LLM has failed N times in a row,
-      // stop trying the remaining articles. They'd just waste time on a
-      // rate-limited LLM. The unprocessed articles are returned so the
-      // caller can re-queue them.
-      consecutiveTechnicalFailures++;
-      if (consecutiveTechnicalFailures >= CIRCUIT_BREAKER_THRESHOLD) {
-        const failedIndex = articles.indexOf(article);
-        const unprocessed = articles.slice(failedIndex); // includes this article
-        console.log(`  [CircuitBreaker] ${consecutiveTechnicalFailures} consecutive failures — aborting batch. ${unprocessed.length} article(s) left unprocessed.`);
-        throw new RateLimitAbortError(
-          `${consecutiveTechnicalFailures} consecutive LLM failures`,
-          unprocessed
-        );
-      }
+    } finally {
+      claim.release();   // the article is saved (or failed): another sub-search may now see it
     }
 
     // Heartbeat: bump pipeline_job_status.updated_at so the stale-job
@@ -1781,4 +2130,13 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
   retryFailedArticles,     // NEW: exported for server.js and jobRecovery.js
   FORWARD_OUTLOOK_MODULE_ID,
   MARKET_DYNAMICS_MODULE_ID,
-};
+  POLICY_MODULE_ID,
+  // used by scripts/testPolicyPipeline.js
+  isYes,
+  cleanTitle,
+  decideImpact,
+  applyPolicyRules,
+  getClientProfile,
+  profileForPrompt,
+  POLICY_CATEGORIES,
+};

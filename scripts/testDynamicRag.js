@@ -23,6 +23,9 @@
  *                                              what was expected (server needed, ~3 min).
  *                                              The log is saved in scripts/logs/.
  *        node scripts/testDynamicRag.js show all   the same for ~500 questions (~25 min)
+ *        node scripts/testDynamicRag.js show data  ~70 questions made from the test client's
+ *                                              own data (its companies, countries, sectors,
+ *                                              real headlines) (~4 min)
  *
  * Every line must say PASS. A FAIL line shows what came back.
  * Steps 1 and 2 use no AI. Steps 3 and 5 ask the real AI (about 60 and
@@ -637,6 +640,8 @@ async function testStep5() {
   await inQ('short form UAE = United Arab Emirates', 'United Arab Emirates', 'retail in UAE', true);
   await inQ('short form P&G = Procter & Gamble', 'Procter & Gamble', 'P&G vs Unilever', true);
   await inQ('written together "loreal" = L\'Oréal', "L'Oréal", 'compare loreal and nivea', true);
+  await inQ('two letters swapped "l\'roéal" = L\'Oréal (one typo)', "L'Oréal", "whats new with l'roéal this month", true);
+  await inQ('two letters swapped "nkie" = Nike', 'Nike', 'how is nkie doing', true);
   await inQ('a 2-letter name written exactly ("EU")', 'EU', 'new cosmetics rules in the EU this year', true);
   await inQ('"UK" = United Kingdom', 'United Kingdom', 'refill stations in the UK', true);
   await inQ('"H&M" is found as written', 'H&M', 'compare Shein, Zara and H&M', true);
@@ -1166,14 +1171,135 @@ async function testBig5() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════
+// QUESTIONS FROM THE CLIENT'S OWN DATA (for "show data")
+// ═════════════════════════════════════════════════════════════════════════
+// Reads the test client's real signals (Market Dynamics, Policy & Risk,
+// Forward Outlook, Competitive Radar) and writes questions a real user of
+// that client could ask, with the companies / countries / sectors that are
+// really in their data. We know the right answer for each one because we
+// put the names in ourselves.
+async function buildDataQuestions(comps, own) {
+  const PER = Number(process.env.DR_DATA_PER_TEMPLATE) || 4;     // questions per kind
+  const notes = [];
+  const read = async (table, columns, orderBy, extra) => {
+    let q = supabase.from(table).select(columns).eq('client_id', CLIENT_ID);
+    if (extra) q = extra(q);
+    const { data, error } = await q.order(orderBy, { ascending: false }).limit(500);
+    if (error) { notes.push(`${table}: not read (${error.message})`); return []; }
+    notes.push(`${table}: ${data.length} recent rows read`);
+    return data;
+  };
+  const md = await read('market_dynamics_signals', 'organization, country, category, signal_title', 'published_date');
+  const pol = await read('policy_signals', 'country, category, signal_title', 'source_published_date', (q) => q.eq('is_duplicate', false));
+  const tr = await read('trend_signals', 'organization, sector, signal_title', 'source_published_date');
+  const ci = await read('competitor_changes', 'organization, category, signal_title', 'event_date', (q) => q.eq('is_duplicate', false));
+
+  // most common values first, cleaned
+  const NOT_A_COMPANY = /\b(ministry|authority|government|council|commission|agency|department|bureau|unknown|various|multiple|n\/a|none|consumers?|retailers?|brands?|industry|market|sector|regulators?|customs|municipality|court|federation|association)\b/i;
+  const NOT_A_PLACE = /\b(global|world|worldwide|international|multiple|various|unknown|n\/a|none|not specified)\b/i;
+  const top = (values, n, ok) => {
+    const count = new Map();
+    for (const v of values) {
+      const t = String(v || '').trim();
+      if (!t || !ok(t)) continue;
+      count.set(t, (count.get(t) || 0) + 1);
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map((e) => e[0]);
+  };
+  const splitPlaces = (rows) => rows.flatMap((r) => String(r.country || '').split(/[,;/]|\band\b/));
+  const okCompany = (t) => t.length <= 40 && t.split(/\s+/).length <= 5 && !NOT_A_COMPANY.test(t);
+  const okPlace = (t) => t.length <= 30 && !NOT_A_PLACE.test(t);
+  const okWord = (t) => t.length <= 40 && !/^(other|general|misc|unknown)/i.test(t);
+
+  const orgs = top([...md, ...tr].map((r) => r.organization), PER * 2, okCompany);
+  const places = top([...splitPlaces(md), ...splitPlaces(pol)], PER * 2, okPlace);
+  const mdCats = top(md.map((r) => r.category), PER, okWord);
+  const polCats = top(pol.map((r) => r.category), PER, okWord);
+  const sectors = top(tr.map((r) => r.sector), PER, okWord);
+  const ciOrgs = top(ci.map((r) => r.organization), PER, (t) => t.length <= 40);
+  const ciCats = top(ci.map((r) => r.category), PER, okWord);
+  const titles = top([...md, ...pol, ...tr, ...ci].map((r) => r.signal_title), PER * 3, (t) => t.length >= 20 && t.length <= 160);
+
+  const companyList = understand.buildCompanyList({ client: { company_name: own }, competitors: comps || [] });
+  const listedIds = (names) => names.map((n) => understand.matchCompany(n, companyList))
+    .filter((m) => m && m.type !== 'own_company').map((m) => m.id);
+  const typo = (w) => (w.length < 6 ? w.toLowerCase() : (w.slice(0, 2) + w[3] + w[2] + w.slice(4)).toLowerCase());
+  const at = (arr, i) => arr[i % Math.max(arr.length, 1)];
+  const lower = (t) => String(t).toLowerCase();
+
+  const items = [];
+  const add = (group, q, expect) => items.push({ group: `data: ${group}`, q, step3: ['accept'], ...expect });
+
+  for (let i = 0; i < PER; i++) {
+    const org = orgs[i];
+    const org2 = orgs[i + PER];
+    const place = places[i];
+    const place2 = places[i + PER];
+    if (org && place) {
+      add('company in a country', `What is ${org} doing in ${place}?`,
+        { goals: ['competitor_analysis', 'company_profile'], companies: [org], onlyCompanies: true, places: [place], onlyPlaces: true, expectIds: listedIds([org]) });
+    }
+    if (org) {
+      add('company, typo + lowercase', `whats new with ${typo(org)} this month`,
+        { goals: ['list', 'competitor_analysis', 'company_profile'], companies: [org], onlyCompanies: true, places: [], onlyPlaces: true });
+    }
+    if (org && org2) {
+      add('compare two companies', `Compare ${org} and ${org2}${place ? ` in ${place}` : ''}`,
+        { goals: ['comparison'], companies: [org, org2], onlyCompanies: true, places: place ? [place] : [], onlyPlaces: true, expectIds: listedIds([org, org2]) });
+    }
+    if (mdCats[i] && place2) {
+      add('market news', `Latest ${lower(mdCats[i])} news in ${place2} over the last 3 months`,
+        { goals: ['list', 'trends'], places: [place2], onlyPlaces: true, companies: [], onlyCompanies: true });
+    }
+    if (polCats[i] && place) {
+      add('policy', `Any new ${lower(polCats[i])} changes in ${place} we should know about?`,
+        { goals: ['list', 'risks'], places: [place], onlyPlaces: true, ownOrDashboard: true });
+    }
+    if (polCats[i] && place2) {
+      add('policy impact', `How could ${lower(polCats[i])} rules in ${place2} hurt our business?`,
+        { goals: ['risks'], places: [place2], onlyPlaces: true, own: true });
+    }
+    if (sectors[i]) {
+      add('trends', `What are the emerging trends in ${lower(sectors[i])}?`, { goals: ['trends'], places: [], onlyPlaces: true });
+      add('forecast', `What will happen in ${lower(sectors[i])} over the next 2 years?`, { goals: ['forecast', 'trends'] });
+      if (place) add('opportunities', `Where are the opportunities in ${lower(sectors[i])} in ${place}?`, { goals: ['opportunities'], places: [place], onlyPlaces: true });
+    }
+    if (ciOrgs[i]) {
+      add('competitor changes', `What has ${ciOrgs[i]} changed recently?`,
+        { goals: ['competitor_analysis', 'list', 'company_profile'], companies: [ciOrgs[i]], onlyCompanies: true, expectIds: listedIds([ciOrgs[i]]) });
+      if (ciCats[i]) {
+        add('competitor + category', `${ciOrgs[i]} ${lower(ciCats[i])} moves in the last 6 months`,
+          { goals: ['competitor_analysis', 'list'], companies: [ciOrgs[i]], onlyCompanies: true, expectIds: listedIds([ciOrgs[i]]) });
+      }
+      add('framework', `SWOT analysis of ${ciOrgs[i]}`,
+        { goals: ['framework'], companies: [ciOrgs[i]], onlyCompanies: true, expectIds: listedIds([ciOrgs[i]]) });
+    }
+  }
+  // Real headlines from their dashboard, asked the way a user would.
+  for (let i = 0; i < titles.length; i++) {
+    const t = titles[i].replace(/[.?!]+$/, '');
+    const q = i % 3 === 0 ? `Tell me more about this: ${t}` : i % 3 === 1 ? `What does this mean for us: ${t}?` : `Why does this matter? ${t}`;
+    add('real headline', q, i % 3 === 1 ? { own: true } : {});
+  }
+  // Their dashboard
+  add('dashboard', 'What are today\'s highlights for us?', { goals: ['list', 'trends'], ownOrDashboard: true });
+  add('dashboard', 'Summarise the most important signals of this week', { goals: ['list', 'trends'], ownOrDashboard: true });
+
+  return { items, notes, found: { orgs, places, mdCats, polCats, sectors, ciOrgs, ciCats } };
+}
+
+// ═════════════════════════════════════════════════════════════════════════
 // SHOW — send questions through the real chat and print what EVERY step did
 // (like the playground page, but for many questions at once, saved to a log)
 // ═════════════════════════════════════════════════════════════════════════
 //   node scripts/testDynamicRag.js show       ~50 questions from showStepsQuestions.json
 //   node scripts/testDynamicRag.js show all   those + understandQueryQuestions.json
 //                                             + validateQueryQuestions.json (~500, ~25 min)
+//   node scripts/testDynamicRag.js show data  ~70 questions made from the client's own
+//                                             data (companies, countries, sectors, headlines)
 // The server must be running. The log is also saved in scripts/logs/.
-async function testShow(includeAll) {
+async function testShow(mode) {
+  const includeAll = mode === 'all';
   const fs = require('fs');
   const path = require('path');
   const logLines = [];
@@ -1182,7 +1308,7 @@ async function testShow(includeAll) {
 
   // ---- the client's real names, for the {placeholders} ----
   const { data: comps } = await supabase.schema('admin').from('competitors')
-    .select('id, name').eq('client_id', CLIENT_ID).eq('is_active', true).order('name');
+    .select('id, name, name_key, search_name, aliases').eq('client_id', CLIENT_ID).eq('is_active', true).order('name');
   const { data: client } = await supabase.schema('admin').from('clients')
     .select('company_name').eq('id', CLIENT_ID).maybeSingle();
   const c1 = (comps || [])[0];
@@ -1217,11 +1343,17 @@ async function testShow(includeAll) {
     seen.add(q);
     const fillList = (arr) => (arr ? arr.map((x) => fill(x)).filter(Boolean) : arr);
     items.push({
-      ...t, q, source, expectIds: [...ids],
+      ...t, q, source, expectIds: [...new Set([...ids, ...(t.expectIds || [])])],
       companies: fillList(t.companies), notListed: fillList(t.notListed),
     });
   };
-  for (const t of require('./showStepsQuestions.json').questions) add(t, 'show');
+  let dataInfo = null;
+  if (mode === 'data') {
+    dataInfo = await buildDataQuestions(comps, own);
+    for (const t of dataInfo.items) add(t, 'data');
+  } else {
+    for (const t of require('./showStepsQuestions.json').questions) add(t, 'show');
+  }
   if (includeAll) {
     for (const t of require('./understandQueryQuestions.json').questions) {
       add({
@@ -1253,9 +1385,13 @@ async function testShow(includeAll) {
     // user back: the user sees the right thing, so this is only minor.
     const caughtByStep5 = v && v.ai_label === 'accept' && json.status === 'clarification' &&
       t.step3 && t.step3.length === 1 && t.step3[0] === 'clarification';
+    // A no-topic message that got the friendly greeting reply: that reply also
+    // ends with "What would you like to know?", so the user is asked back too.
+    const greetedInstead = v && v.ai_label === 'greeting' && t.step3 && t.step3.length === 1 && t.step3[0] === 'clarification';
     if (caughtByStep5) minor.push('Step 3 let it through, Step 5 asked the user back');
+    else if (greetedInstead) minor.push('got the friendly "What would you like to know?" reply instead of a specific question back');
     else if (t.step3 && v && !t.step3.includes(v.ai_label)) serious.push(`Step 3 said "${v.ai_label}" (expected ${t.step3.join(' or ')})`);
-    if (t.askBack && json.status !== 'clarification') serious.push('should ask the user back, but did not');
+    if (t.askBack && json.status !== 'clarification' && !greetedInstead) serious.push('should ask the user back, but did not');
     const mustAnswer = !t.askBack && t.step3 && t.step3.length === 1 && t.step3[0] === 'accept';
     if (mustAnswer && v && v.status === 'accept' && json.status === 'clarification') serious.push('Step 5 asked the user back, but the question has a topic');
     if (!u || u.status !== 'understood') return { serious, minor };
@@ -1348,9 +1484,17 @@ async function testShow(includeAll) {
 
   // ---- run ----
   const stamp = new Date().toLocaleString('sv-SE', { timeZone: process.env.DR_TIMEZONE || 'Asia/Kolkata' }).replace(' ', '_').replace(/:/g, '-').slice(0, 16);
-  out(`SHOW EVERY STEP — ${items.length} questions${includeAll ? ' (all lists)' : ''} — ${stamp.replace('_', ' ')}`);
+  out(`SHOW EVERY STEP — ${items.length} questions${includeAll ? ' (all lists)' : mode === 'data' ? ' (from the client data)' : ''} — ${stamp.replace('_', ' ')}`);
   out(`client: ${own || '(no name)'} · competitors on the list: ${list((comps || []).map((c) => c.name))}`);
   out(`{competitor} = ${c1 ? c1.name : '(none)'} · {competitor2} = ${c2 ? c2.name : '(none)'}${skipped ? ` · ${skipped} questions skipped (no names to fill in)` : ''}`);
+  if (dataInfo) {
+    out(`data read: ${dataInfo.notes.join(' · ')}`);
+    const f = dataInfo.found;
+    out(`  companies: ${list(f.orgs)}`);
+    out(`  countries: ${list(f.places)}`);
+    out(`  market categories: ${list(f.mdCats)} · policy categories: ${list(f.polCats)}`);
+    out(`  sectors: ${list(f.sectors)} · competitor names: ${list(f.ciOrgs)} · competitor categories: ${list(f.ciCats)}`);
+  }
   out(`about ${Math.ceil((items.length * 2) / AI_CALLS_PER_MINUTE)} minutes (AI limit: ${AI_CALLS_PER_MINUTE} calls a minute)`);
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1386,7 +1530,7 @@ async function testShow(includeAll) {
 
   const dir = path.join(__dirname, 'logs');
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `showSteps_${stamp}.txt`);
+  const file = path.join(dir, `showSteps${mode === 'data' ? 'Data' : ''}_${stamp}.txt`);
   fs.writeFileSync(file, logLines.join('\n') + '\n', 'utf8');
   console.log(`\nLog saved: ${file}`);
 
@@ -1443,7 +1587,7 @@ async function main() {
     if (run(5)) await testStep5();
     if (wantBig) await testBig();
     if (wantBig5) await testBig5();
-    if (wantShow) await testShow(args.includes('all'));
+    if (wantShow) await testShow(args.includes('all') ? 'all' : args.includes('data') ? 'data' : 'list');
   } finally {
     await cleanUp();
   }

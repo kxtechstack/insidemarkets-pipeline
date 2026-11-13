@@ -208,15 +208,22 @@ const words = (text) => normalise(text).split(' ').filter(Boolean);
 const meaningfulWords = (text) => words(text).filter((w) => !FILLER_WORDS.has(w));
 
 // Number of single-letter changes between two words (typo distance).
+// Two letters swapped ("lroeal" for "loreal") counts as ONE change, because
+// that is one typing slip.
 function editDistance(a, b) {
   if (a === b) return 0;
   if (Math.abs(a.length - b.length) > 2) return 99;
+  let before = null;
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     const cur = [i];
     for (let j = 1; j <= b.length; j++) {
       cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        cur[j] = Math.min(cur[j], before[j - 2] + 1);
+      }
     }
+    before = prev;
     prev = cur;
   }
   return prev[b.length];

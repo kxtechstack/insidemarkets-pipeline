@@ -83,14 +83,23 @@ const removeUrlDuplicates = async (articles, clientId, moduleId) => {
     // Pull all recently-seen URLs for this client+module (bounded by
     // recency window) so we can normalize and compare in code -- an
     // exact .in() match can't catch normalized/mirror duplicates.
-    const { data: existingRecords, error } = await supabase
-      .from('processed_urls')
-      .select('source_url')
-      .eq('client_id', clientId)
-      .eq('module_id', moduleId)
-      .gte('created_at', cutoffIso);
-
-    if (error) throw error;
+    // FIXED: read in pages. One request returns at most 1,000 rows, so clients with
+    // more than 1,000 checked links in the window had their older links ignored
+    // and the same news was processed and saved again.
+    const existingRecords = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('processed_urls')
+        .select('source_url')
+        .eq('client_id', clientId)
+        .eq('module_id', moduleId)
+        .gte('created_at', cutoffIso)
+        .order('created_at', { ascending: true })
+        .range(from, from + 999);
+      if (error) throw error;
+      existingRecords.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
 
     const existingNormalizedSet = new Set(
       (existingRecords || []).map(r => normalizeUrl(r.source_url)).filter(Boolean)
@@ -179,4 +188,4 @@ module.exports = {
   commitUrlSeen,
   commitUrlsSeen,
   normalizeUrl, // exported for testing/inspection
-};
+};

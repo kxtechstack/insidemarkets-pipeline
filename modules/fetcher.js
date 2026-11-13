@@ -9,36 +9,32 @@ const daysAgoISO = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).t
 // India, EU, etc.) use DD/MM/YYYY. When both day and month are <=12,
 // the format is genuinely ambiguous -- if reading it as MM/DD produces
 // a future date but DD/MM would not, assume DD/MM was intended.
+// FIXED: "25/10/2026" (day first) and "10/25/2026" (month first) were turned into
+// strings JavaScript cannot read, so the date was lost and the article got no date.
+// Now a slash date is turned into a clear ISO date ("2026-10-25"):
+//   first part > 12  -> day/month      second part > 12 -> month/day
+//   both <= 12       -> month/day, unless that is in the future and day/month is not
 const disambiguateSlashDate = (rawDate) => {
-  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(.*)$/.exec(rawDate.trim());
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](\d{1,2}):(\d{2}))?/.exec(String(rawDate).trim());
   if (!match) return rawDate;
-
-  const [, first, second, year, rest] = match;
+  const [, first, second, year, hh, mm] = match;
   const f = parseInt(first, 10);
   const s = parseInt(second, 10);
-
-  // Not ambiguous if either part is >12 (must be the day)
-  if (f > 12 && s <= 12) return rawDate; // DD/MM already
-  if (s > 12 && f <= 12) return `${second}/${first}/${year}${rest}`; // MM/DD -> swap to DD/MM reading... actually need care
+  const iso = (month, day) => {
+    const d = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return hh ? `${d}T${String(hh).padStart(2, '0')}:${mm}:00Z` : d;
+  };
+  if (f > 12 && s <= 12) return iso(s, f);            // day/month
+  if (s > 12 && f <= 12) return iso(f, s);            // month/day
   if (f <= 12 && s <= 12) {
-    // Truly ambiguous -- test both interpretations
-    const asMMDD = new Date(`${first}/${second}/${year}${rest}`);
-    const asDDMM = new Date(`${second}/${first}/${year}${rest}`);
-    const now = Date.now();
-
-    const mmddIsFuture = asMMDD.getTime() > now;
-    const ddmmIsFuture = asDDMM.getTime() > now;
-
-    if (mmddIsFuture && !ddmmIsFuture) {
-      // MM/DD reads as future, DD/MM doesn't -- prefer DD/MM
-      return `${second}/${first}/${year}${rest}`;
-    }
+    const asMonthDay = new Date(iso(f, s)).getTime();
+    const asDayMonth = new Date(iso(s, f)).getTime();
+    if (asMonthDay > Date.now() && asDayMonth <= Date.now()) return iso(s, f);
+    return iso(f, s);
   }
-
-  return rawDate;
+  return rawDate;                                      // e.g. 31/31/2026: not a date
 };
 
-// ---------- Published-date sanitization ----------
 const FUTURE_DATE_GRACE_MS = 2 * 24 * 60 * 60 * 1000;
 
 const sanitizePublishedDate = (rawDate, source, url) => {
@@ -253,4 +249,4 @@ const fetchArticles = async (source, promptText, lookbackDays = 90) => {
   return results;
 };
 
-module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles, sanitizePublishedDate, extractDateFromHtml };
+module.exports = { fetchFromExa, fetchFromTavily, fetchFromParallel, fetchFromPerplexity, fetchArticles, sanitizePublishedDate, extractDateFromHtml };

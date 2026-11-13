@@ -83,28 +83,31 @@ const runPipeline = async (jobId, clientId, promptText, industry, moduleId, subm
       });
     }
 
-    // Level 2 - Topic dedup
+    // Level 2 - quality, then topic dedup
     await updateJobStage(jobId, 'url_dedup', { afterUrlCheck: allCleanArticles.length });
+
+    // FIXED ORDER: quality check BEFORE the same-topic check. Before, the topic check
+    // could keep a short copy and drop the full copy as its "duplicate"; the quality
+    // check then removed the short copy too, and the news was lost completely.
+    await setStatus(jobId, {
+      status: 'quality_filter',
+      total: sorted.length,
+      message: 'Running quality filter (length, language, freshness, date)...'
+    });
+    currentStage = 'quality_filter';
+    const goodArticles = await filterLowQualityArticles(allCleanArticles);
+
+    // Level 3 - Topic dedup (only on articles good enough to keep)
     await setStatus(jobId, {
       status: 'topic_dedup',
       total: sorted.length,
       message: 'Running embedding-based topic dedup check...'
     });
-    currentStage = 'topic_dedup'; // CHANGED
-
+    currentStage = 'topic_dedup';
     // CHANGED: removeSameTopicArticles now scoped by moduleId, not just clientId
-    const finalArticles = await removeSameTopicArticles(allCleanArticles, clientId, moduleId);
-
-    // Level 3 - Quality filter
+    const finalArticles = await removeSameTopicArticles(goodArticles, clientId, moduleId);
+    const qualityCheckedArticles = finalArticles;
     await updateJobStage(jobId, 'topic_dedup', { afterTopicDedup: finalArticles.length });
-    await setStatus(jobId, {
-      status: 'quality_filter',
-      total: sorted.length,
-      message: 'Running quality filter (length, language, freshness)...'
-    });
-    currentStage = 'quality_filter'; // CHANGED
-
-    const qualityCheckedArticles = await filterLowQualityArticles(finalArticles);
 
     // Step 5 - Push to processed queue
     const processedQueueKey = await pushToProcessedQueue(qualityCheckedArticles, jobId);
@@ -526,4 +529,4 @@ const resumePipelineRun = async (jobId) => {
   }
 };
 
-module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun, runCompetitiveIntelligenceScheduled, ciRunCounts, ciRunReport };
+module.exports = { runPipeline, triggerPipelineRun, resumePipelineRun, runCompetitiveIntelligenceScheduled, ciRunCounts, ciRunReport };

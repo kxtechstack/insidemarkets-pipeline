@@ -9,7 +9,7 @@
  * all clients and modules -- intentionally not scoped):
  *   1. Minimum content length  -> default 200 characters
  *   2. Language                -> English only
- *   3. Article freshness       -> published within last N days (default 30)
+ *   3. Article freshness       -> published within last N days (default 30); no date = rejected
  *
  * Paywalled articles are handled automatically by rule #1 — Exa can only
  * fetch a short snippet (usually under 150 chars) from paywalled pages,
@@ -107,15 +107,25 @@ const checkLanguage = (article, config) => {
 
 const checkFreshness = (article, config) => {
   if (!article.publishedDate) {
-    // No date available -> can't verify freshness, let it pass rather than
-    // silently dropping potentially-good articles due to missing metadata
-    return { passed: true, reason: null };
+    // CHANGED: no date (not from the search API, not from the page itself) -> rejected.
+    // Before, it passed and was saved with TODAY's date in Supabase (and no date in
+    // Qdrant), so old news could look new and "last 3 months" questions were wrong.
+    return { passed: false, reason: 'no published date found (search result and page)' };
   }
 
   const publishedTs = new Date(article.publishedDate).getTime();
   const cutoffTs = Date.now() - config.freshness_days * 24 * 60 * 60 * 1000;
   const passed = publishedTs >= cutoffTs;
   return { passed, reason: passed ? null : `too old (published before ${config.freshness_days}-day window)` };
+};
+
+// NEW: how-to guides and explainers are not news in any module
+// (real run 13 Nov: "How to open a beauty salon in the UK in 2026" was saved as a policy signal).
+// Only the title is checked, and only clear guide wording, so real news is not touched.
+const GUIDE_TITLE = /^\s*(how to|how do (i|you|we)|what is|what are|why you should|a (beginner'?s |quick |complete |practical )?guide (to|for)|the (complete|ultimate|essential|definitive) guide|everything you need to know|\d+ (tips|ways|steps|things|mistakes))\b|\b(step[- ]by[- ]step guide|ultimate guide|beginner'?s guide)\b/i;
+const checkNotGuide = (article) => {
+  const passed = !GUIDE_TITLE.test(String(article.title || ''));
+  return { passed, reason: passed ? null : 'how-to guide or explainer, not news' };
 };
 
 // ── Main filter function ─────────────────────────────────────────────────────
@@ -134,6 +144,7 @@ const filterLowQualityArticles = async (articles) => {
       checkMinLength(article, config),
       checkLanguage(article, config),
       checkFreshness(article, config),
+      checkNotGuide(article),
     ];
 
     const failedCheck = checks.find(c => !c.passed);
@@ -152,4 +163,5 @@ const filterLowQualityArticles = async (articles) => {
 
 module.exports = {
   filterLowQualityArticles,
-};
+  checkNotGuide,   // exported for tests
+};
