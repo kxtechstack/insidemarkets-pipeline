@@ -366,34 +366,16 @@ const FIT_DAYS = Number(process.env.MD_CARD_FIT_DAYS) || 30;
 const FIT_MIN_SCORE = Number(process.env.MD_CARD_FIT_MIN_SCORE) || 0.45;
 const FIT_MAX_CANDIDATES = 3;
 
-const CARD_FIT_DEFAULT = `A new market signal is below, and up to 3 existing cards. A card is a group of signals about ONE specific theme or trend (for example "Scalp-serum brands raise early-stage funding").
-
-Does the new signal belong to one of the cards? It belongs only when it is about the SAME specific theme as the signals already on that card (same kind of event, same kind of companies or products). A different theme, a different kind of company or a different kind of event is NOT the same card, even in the same industry.
-
-NEW SIGNAL: {signal_title}
-{signal_summary}
-
-{cards}
-
-Answer with JSON only: {"card": the card number, or 0 when it belongs to none, "reason": "one short sentence"}`;
-
-let cardFitPromptCache = null;
-const getCardFitPrompt = async () => {
-  if (cardFitPromptCache && Date.now() - cardFitPromptCache.at < 10 * 60e3) return cardFitPromptCache.text;
-  let text = CARD_FIT_DEFAULT;
-  try {
-    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'market_card_fit_v1').eq('is_active', true).maybeSingle();
-    if (data && data.prompt_template) text = data.prompt_template;
-  } catch (e) { /* use the default */ }
-  cardFitPromptCache = { at: Date.now(), text };
-  return text;
-};
+// Prompt: prompts.id = 'market_card_fit_v1' (database only). Missing -> the AI is not asked and a new card is started.
+const getCardFitPrompt = () => require('./promptStore').getPrompt('market_card_fit_v1');
 
 /** The AI picks the card (1..n) or 0. Returns { index, reason, failed? } */
 const askCardFit = async (signal, cards) => {
   try {
     const cardsText = cards.map((c, i) => `CARD ${i + 1}: ${c.title}\nSignals on it: ${(c.memberTitles || []).slice(0, 6).map((t) => `"${t}"`).join('; ') || 'none listed'}`).join('\n\n');
-    const prompt = (await getCardFitPrompt())
+    const tpl = await getCardFitPrompt();
+    if (!tpl) return { index: -1, reason: 'prompt market_card_fit_v1 missing', failed: true };
+    const prompt = tpl
       .replace(/{signal_title}/g, () => String(signal.title || '').slice(0, 300))
       .replace(/{signal_summary}/g, () => String(signal.summary || '').slice(0, 500))
       .replace(/{cards}/g, () => cardsText);

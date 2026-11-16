@@ -17,7 +17,8 @@
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
-const { CI_MODULE_ID, LIMITS, QDRANT } = require('./constants');
+const { CI_MODULE_ID, LIMITS, QDRANT, PROMPTS } = require('./constants');
+const { getPrompt, fillPrompt } = require('../promptStore');
 const { hostOf, norm, clean } = require('./webTools');
 const { callLLM } = require('../llmClient');
 const { standardPlaces } = require('../placeNames');
@@ -135,10 +136,11 @@ async function findSameEvent(clientId, comp, c, url, skipSameLink = false, sourc
 // ---------------------------------------------------------------------
 const MERGE_ASK_AI_FROM = LIMITS.MERGE_ASK_AI_FROM || 0.55;
 
+// Prompt: prompts.id = 'ci_same_event_v1' (database only). Missing -> not asked: the two are kept apart.
 async function askSameEvent(compName, a, b) {
-  const prompt = `Two short news items about the company ${compName}.\n\nA: ${a.title}. ${a.summary}\n\nB: ${b.title}. ${b.summary}\n\n`
-    + 'Do A and B describe the SAME single event (the same announcement, deal, result, lawsuit, settlement, launch or opening)? '
-    + 'Two different events of the same kind (for example two different deals) are NOT the same. Answer with one word: YES or NO.';
+  const tpl = await getPrompt(PROMPTS.SAME_EVENT);
+  if (!tpl) return false;
+  const prompt = fillPrompt(tpl, { company: compName, a_title: a.title, a_summary: a.summary, b_title: b.title, b_summary: b.summary });
   try {
     const raw = await callLLM([{ role: 'user', content: prompt }], { temperature: 0, max_tokens: 5, timeout: 30000 });
     return /^\W*yes/i.test(String(raw || ''));

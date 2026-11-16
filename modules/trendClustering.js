@@ -225,34 +225,16 @@ const TREND_FIT_MAX = 3;
 const must = (res, what) => { if (res && res.error) throw new Error(`${what}: ${res.error.message}`); return res; };
 const normName = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-const TREND_FIT_DEFAULT = `A new signal is below, and up to 3 existing trends. A trend is a group of signals that point to the SAME specific shift in an industry (for example "Refillable packaging in prestige beauty").
-
-Does the new signal belong to one of the trends? It belongs only when it is evidence of that SAME specific shift (same technology, same kind of product or same kind of move). The same industry, the same company or a loosely related topic is NOT enough.
-
-NEW SIGNAL: {signal_title}
-{signal_summary}
-
-{trends}
-
-Answer with JSON only: {"trend": the trend number, or 0 when it belongs to none, "reason": "one short sentence"}`;
-
-let trendFitPromptCache = null;
-const getTrendFitPrompt = async () => {
-  if (trendFitPromptCache && Date.now() - trendFitPromptCache.at < 10 * 60e3) return trendFitPromptCache.text;
-  let text = TREND_FIT_DEFAULT;
-  try {
-    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'trend_fit_v1').eq('is_active', true).maybeSingle();
-    if (data && data.prompt_template) text = data.prompt_template;
-  } catch (e) { /* use the default */ }
-  trendFitPromptCache = { at: Date.now(), text };
-  return text;
-};
+// Prompt: prompts.id = 'trend_fit_v1' (database only). Missing -> the AI is not asked and a new hidden trend is started.
+const getTrendFitPrompt = () => require('./promptStore').getPrompt('trend_fit_v1');
 
 /** The AI picks the trend (1..n) or 0. options: [{ name, titles[] }]. Returns { index, reason, failed? } */
 const askTrendFit = async (signal, options) => {
   try {
     const trendsText = options.map((o, i) => `TREND ${i + 1}: ${o.name || '(not named yet)'}\nSignals in it: ${(o.titles || []).slice(0, 6).map((t) => `"${t}"`).join('; ') || 'none listed'}`).join('\n\n');
-    const prompt = (await getTrendFitPrompt())
+    const tpl = await getTrendFitPrompt();
+    if (!tpl) return { index: -1, reason: 'prompt trend_fit_v1 missing', failed: true };
+    const prompt = tpl
       .replace(/{signal_title}/g, () => String(signal.title || '').slice(0, 300))
       .replace(/{signal_summary}/g, () => String(signal.summary || '').slice(0, 500))
       .replace(/{trends}/g, () => trendsText);

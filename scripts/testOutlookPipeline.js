@@ -240,6 +240,8 @@ function resetData() {
   fitRules.length = 0; nameRules.length = 0; namingFails = false;
   table('admin.clients').push({ id: CLIENT, company_name: 'Northwind Beauty', industry: 'Cosmetics' });
   table('admin.client_icp').push({ client_id: CLIENT, context_json: { competitors: ['Glowly'], core_sectors: ['Prestige Beauty'], focus_products_services: ['Prestige skincare'], geographic_focus: ['UK'], sectors_to_avoid: [] } });
+  // the database prompts the pipeline reads (it has no copies in the code)
+  Object.entries(require('./testPromptTexts')).filter(([id]) => id !== 'industry_gate_v1').forEach(([id, t]) => table('prompts').push({ id, is_active: true, prompt_template: t }));
   table('prompts').push(
     { id: 'forward_outlook_relevance_v1', is_active: true, prompt_template: 'Forward Outlook Monitor for {industry}. Title: {title}\nText: {text}\n{client_context}' },
     { id: 'article_synthesis_v1', is_active: true, prompt_template: 'First line must be: Title: ...\nArticle Title: {title}\n{text}' },

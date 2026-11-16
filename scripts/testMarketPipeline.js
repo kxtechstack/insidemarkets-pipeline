@@ -240,6 +240,8 @@ function resetData() {
   table('admin.client_signals').push({ client_id: CLIENT, is_enabled: true,
     signals: { id: 'sig-2', signal_name: 'Venture capital investments', signal_definition: 'VC investments', submodule_id: DIM, module_id: MD, submodules: { id: DIM, submodule_name: 'Funding & Investment' } } });
   fitRules.length = 0;
+  // the database prompts the pipeline reads (it has no copies in the code)
+  Object.entries(require('./testPromptTexts')).filter(([id]) => id !== 'industry_gate_v1').forEach(([id, t]) => table('prompts').push({ id, is_active: true, prompt_template: t }));
   table('prompts').push(
     { id: 'market_dynamics_relevance_v1', is_active: true, prompt_template: 'Market Dynamics Monitor for {industry}. Title: {title}\nText: {text}\nSCOPE: {monitoring_scope}' },
     { id: 'article_synthesis_v1', is_active: true, prompt_template: 'First line must be: Title: ...\nArticle Title: {title}\n{text}' },

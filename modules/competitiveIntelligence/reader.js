@@ -20,6 +20,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { CI_MODULE_ID, LIMITS, PROMPTS } = require('./constants');
+const { getPrompt } = require('../promptStore');
 const { norm, clean } = require('./webTools');
 // a title is never cut in the middle of a word: cut back to the last whole word
 const cutTitle = (t, n = 160) => { const x = clean(t, 2000); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '').replace(/[\s,;:(\-–]+$/, ''); };
@@ -481,14 +482,16 @@ async function recheckCatchAll(read, ctx, ans, checkCtx) {
   const options = ctx.signals.all.filter((s) => !isCatchAll(s.name));
   if (!options.length) return null;
   const list = options.map((s) => `${s.n}. ${s.name} [type: ${s.category}] - ${s.definition}`).join('\n');
-  const prompt = `A news item about the company ${ctx.comp.name}:\n`
-    + `Headline: ${read.itemTitle || read.title}\nWhat happened: ${read.title}. ${read.summary}\n`
-    + `Quotes from the article:\n- ${(read.facts || []).join('\n- ')}\n\n`
-    + `It was put in the general bucket "Company Updates". Look again carefully. Which ONE of these types describes WHAT THE COMPANY DID?\n${list}\n\n`
-    + 'Think about the action itself: opening a store, office, plant or website in a new country or city is an expansion; '
-    + 'a new or changed product, version, range, collection or formula is a product launch; a deal with another company is a partnership; '
-    + 'numbers about sales, profit or targets are results; an advert, campaign or event is marketing.\n'
-    + 'Answer with the number only, for example: 12. Answer 0 only if NONE of the types fits.';
+  // Prompt: prompts.id = 'ci_second_look_v1' (database only). Missing -> not asked: the item stays in Company Updates.
+  const tpl = await getPrompt(PROMPTS.SECOND_LOOK);
+  if (!tpl) return null;
+  const prompt = fill(tpl, {
+    company: ctx.comp.name,
+    headline: read.itemTitle || read.title,
+    what_happened: `${read.title}. ${read.summary}`,
+    quotes: `- ${(read.facts || []).join('\n- ')}`,
+    types: list,
+  });
   let raw;
   try {
     raw = await callLLM([{ role: 'user', content: prompt }], { temperature: 0, max_tokens: 20, timeout: 30000 });

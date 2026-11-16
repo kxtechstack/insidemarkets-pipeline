@@ -39,6 +39,8 @@ const LIMITS = {
 // Prompts (rows in public.prompts). The text lives in the database, never in code.
 const PROMPTS = {
   CHANGE_READER: 'ci_change_reader_v1',
+  SAME_EVENT: 'ci_same_event_v1',      // "do these two items report the same event?" (was written in changeStore.js)
+  SECOND_LOOK: 'ci_second_look_v1',    // second look at items put under "Company Updates" (was written in reader.js)
 };
 
 // Qdrant: CI changes go into the same collection the DI chat searches

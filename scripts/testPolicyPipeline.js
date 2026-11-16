@@ -230,6 +230,8 @@ function resetData() {
     geographic_focus: ['SG', 'UK'], sectors_to_avoid: ['Fragrance', "Men's grooming"],
   } });
   table('admin.competitors').push({ id: 'k1', client_id: CLIENT, name: 'Lumina Labs', search_name: 'Lumina Labs', aliases: ['Lumina'], is_active: true });
+  // the database prompts the pipeline reads (it has no copies in the code)
+  Object.entries(require('./testPromptTexts')).filter(([id]) => id !== 'industry_gate_v1').forEach(([id, t]) => table('prompts').push({ id, is_active: true, prompt_template: t }));
   table('prompts').push(
     { id: 'policy_risk_relevance_v1', is_active: true, prompt_template: 'Policy and Risk Monitor for {industry}. Title: {title}\nText: {text}\nCLIENT PROFILE:\n{client_context}' },
     { id: 'article_synthesis_v1', is_active: true, prompt_template: 'First line must be: Title: ...\nArticle Title: {title}\n{text}' },

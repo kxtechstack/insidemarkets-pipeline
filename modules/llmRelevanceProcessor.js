@@ -945,8 +945,7 @@ const synthesizeContent = async (article, classification) => {
       .replace(/{text}/g, () => cleanedText.slice(0, TEXT_TRUNCATE_LENGTH));
 
     const synthesized = await callLLM([
-      { role: 'system', content: 'You are a senior regulatory intelligence analyst writing original analytical summaries. You never copy text from source articles.' },
-      { role: 'user', content: userPrompt },
+      { role: 'user', content: userPrompt },   // CHANGED: the whole instruction is the prompt row article_synthesis_v1
     ], { temperature: 0.3, max_tokens: 1500, timeout: 180000 });
     const lines = String(synthesized || '').split('\n').filter(l => l.trim() !== '');
     // The title line can come as "Title: X", "**Title:** X", "## Title: X", "1. **Title: X**"...
@@ -970,49 +969,10 @@ const synthesizeContent = async (article, classification) => {
 // client's industry. This is ONE short, separate question: "is this article about the client's industry?"
 // "No" -> the article is rejected here and never reaches the module prompt.
 // Uses ONLY the client's industry (admin console) - strictly about that industry, nothing hardcoded.
-// Prompt: prompts.id = 'industry_gate_v1' (editable); the text below is used if that row is missing.
+// Prompt: prompts.id = 'industry_gate_v1' (database only - no copy in the code). If that row is missing or
+// switched off, the check is skipped (the article is NOT blocked) and the log says so.
 // Switch off with INDUSTRY_GATE=off. If the check itself fails (AI error), the article is NOT blocked.
-const INDUSTRY_GATE_DEFAULT = `You check which industry a news article is about. Answer with JSON only.
-
-INDUSTRY: {industry}
-
-ARTICLE TITLE: {title}
-ARTICLE TEXT (start):
-{text}
-
-Question: Is this article mainly about the {industry} industry?
-
-The SUBJECT of the article does not matter (a law, a regulation, funding, technology, results, a recall, a trend).
-Only ask: WHOSE companies, products or customers is it about?
-- A law, rule, guidance or recall FOR {industry} products or businesses is YES (it is about the {industry} industry).
-- "main_industry" must be an industry (for example Cosmetics, Banking, Food, Pharma), never a subject like
-  "Regulation", "Law", "Technology" or "Finance".
-
-Answer YES only if the article is mainly about at least one of these:
-- companies, brands, retailers or start-ups that make or sell {industry} products
-- {industry} products, ingredients, materials, packaging or technology made for {industry}
-- rules, laws, guidance, bans, recalls or safety alerts for {industry} products or businesses
-- consumers, demand or trends for {industry} products
-
-Answer NO when the article is mainly about another industry, even if it mentions money, funding, AI,
-technology, a regulation or a big company. Example: when the industry is not banking, "a bank starts using AI"
-is NO; when it is not pharma, "a new drug for Alzheimer's" is NO; when it is not food, "food labelling rules" is NO.
-A company that owns many businesses counts only when the article is about its {industry} business.
-When the article only names the industry once in passing, answer NO.
-
-JSON: {"about_industry": true or false, "main_industry": "the industry the article is mainly about", "reason": "one short sentence"}`;
-
-let industryGatePromptCache = null;
-const getIndustryGatePrompt = async () => {
-  if (industryGatePromptCache && Date.now() - industryGatePromptCache.at < 10 * 60e3) return industryGatePromptCache.text;
-  let text = INDUSTRY_GATE_DEFAULT;
-  try {
-    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'industry_gate_v1').eq('is_active', true).maybeSingle();
-    if (data && data.prompt_template) text = data.prompt_template;
-  } catch (e) { /* use the default */ }
-  industryGatePromptCache = { at: Date.now(), text };
-  return text;
-};
+const getIndustryGatePrompt = () => require('./promptStore').getPrompt('industry_gate_v1');
 
 /** @returns {Promise<{pass: boolean, reason: string, main_industry?: string}>} */
 const checkIndustry = async (article, industry, clientId) => {
@@ -1021,6 +981,7 @@ const checkIndustry = async (article, industry, clientId) => {
   }
   try {
     const tpl = await getIndustryGatePrompt();
+    if (!tpl) return { pass: true, reason: 'industry check off (prompt industry_gate_v1 missing)' };
     const prompt = tpl
       .replace(/{industry}/g, industry)
       .replace(/{title}/g, () => article.title || '')
@@ -1362,39 +1323,15 @@ const SAME_EVENT_MAX_AI = 2;   // AI questions per article, at most
 // solar permit" are two different events (16 Nov dry run: about 1 in 6 word matches). One tiny
 // yes/no question settles it. When it is a real copy the rewrite call is skipped, so the cost is
 // about the same as before. If the AI fails or is unsure: NOT the same (the article is kept).
-// Prompt: prompts.id = 'same_event_check_v1' (editable); the text below is used if that row is missing.
-const SAME_EVENT_DEFAULT = `Two news items are below. Do they report the SAME specific event?
-
-SAME = the same action by the same authority or company, about the same thing, at the same time
-(for example two websites reporting one new rule, one fine, one approval or one ban).
-DIFFERENT = a different authority, a different place (another state, county or city), a different
-company, a different decision or a different step of a process, even when the topic and the words are alike.
-When you are not sure, answer false.
-
-NEWS A: {title_a}
-{summary_a}
-
-NEWS B: {title_b}
-{summary_b}
-
-Answer with JSON only: {"same": true or false, "reason": "one short sentence"}`;
-
-let sameEventPromptCache = null;
-const getSameEventPrompt = async () => {
-  if (sameEventPromptCache && Date.now() - sameEventPromptCache.at < 10 * 60e3) return sameEventPromptCache.text;
-  let text = SAME_EVENT_DEFAULT;
-  try {
-    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'same_event_check_v1').eq('is_active', true).maybeSingle();
-    if (data && data.prompt_template) text = data.prompt_template;
-  } catch (e) { /* use the default */ }
-  sameEventPromptCache = { at: Date.now(), text };
-  return text;
-};
+// Prompt: prompts.id = 'same_event_check_v1' (database only - no copy in the code). If that row is missing or
+// switched off, the check is skipped: the article is kept.
+const getSameEventPrompt = () => require('./promptStore').getPrompt('same_event_check_v1');
 
 /** @returns {Promise<{same: boolean, reason: string, failed?: boolean}>} */
 const isSameEvent = async (a, b) => {
   try {
     const tpl = await getSameEventPrompt();
+    if (!tpl) return { same: false, reason: 'prompt same_event_check_v1 missing', failed: true };
     const cut = (t) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     const prompt = tpl
       .replace(/{title_a}/g, () => cut(a.title)).replace(/{summary_a}/g, () => cut(a.summary))
