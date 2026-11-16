@@ -1416,6 +1416,8 @@ const SIGNAL_TABLES = {
   [POLICY_MODULE_ID]: { table: 'policy_signals', dateCol: 'source_published_date', globalCounts: false },
   // Market Dynamics: most signals are "Global" (company and market news), so Global counts as a place there
   [MARKET_DYNAMICS_MODULE_ID]: { table: 'market_dynamics_signals', dateCol: 'published_date', globalCounts: true },
+  // Forward Outlook signals have no country: every signal counts as "Global"
+  [FORWARD_OUTLOOK_MODULE_ID]: { table: 'trend_signals', dateCol: 'source_published_date', globalCounts: true, noCountry: true },
 };
 async function findSameEventSignal(classification, clientId, moduleId, industry, article = {}) {
   const where = SIGNAL_TABLES[moduleId];
@@ -1428,7 +1430,7 @@ async function findSameEventSignal(classification, clientId, moduleId, industry,
     const myDay = new Date(article.publishedDate || Date.now()).getTime() / 864e5;
     const since = new Date(Date.now() - 90 * 864e5).toISOString();
     const { data, error } = await supabase.from(where.table)
-      .select(`article_id, signal_title, summary, country, ${where.dateCol}, created_at`)
+      .select(`article_id, signal_title, summary, ${where.noCountry ? '' : 'country, '}${where.dateCol}, created_at`)
       .eq('client_id', clientId).eq('module_id', moduleId)
       .gte('created_at', since).order('created_at', { ascending: false }).limit(500);
     if (error) { console.log(`  [SameEvent] lookup error (non-fatal): ${error.message}`); return null; }
@@ -1460,7 +1462,7 @@ async function findSameEventSignal(classification, clientId, moduleId, industry,
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId, moduleId, submoduleId) => {
   console.log('moduleId being inserted:', JSON.stringify(moduleId), 'length:', moduleId ? moduleId.length : 'N/A');
 
-  // Step 0 (Policy + Market Dynamics) — the same event saved already under another headline?
+  // Step 0 (Policy + Market Dynamics + Forward Outlook) — the same event saved already under another headline?
   // (word rule; the AI is asked only when the words already match)
   if (SIGNAL_TABLES[moduleId]) {
     const same = await findSameEventSignal(classification, clientId, moduleId, industry, article);
@@ -1663,9 +1665,15 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
     try {
       const fingerprintText = `${synthesizedTitle}. ${contentToChunk.slice(0, 400)}`;
       const fingerprintEmbedding = await embedText(fingerprintText);
-      await matchSignalToTrend(newSignal.id, fingerprintEmbedding, moduleId, clientId, industry, article.publishedDate);
+      await matchSignalToTrend(newSignal.id, fingerprintEmbedding, moduleId, clientId, industry, article.publishedDate,
+        { title: classification.signal_title, summary: classification.summary });
     } catch (trendErr) {
-      console.error('[TrendMatch] Failed to match signal to trend:', trendErr.message);
+      // CHANGED (16 Nov): before, the signal stayed saved with NO trend (63 such signals). Now the whole
+      // article is undone and tried again on the next run.
+      console.error(`  [TrendMatch] failed for "${article.title}": ${trendErr.message} - undoing, it is tried again next run`);
+      try { await require('./trendClustering').undoTrendMember(newSignal.id); } catch (e) { console.error(`  [TrendMatch] undo trend member: ${e.message}`); }
+      await undoSave(articleId, 'trend_signals');
+      throw new Error(`save failed (forward outlook trend): ${trendErr.message}`);
     }
   }
 

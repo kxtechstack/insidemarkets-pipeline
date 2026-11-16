@@ -459,6 +459,13 @@ async function main() {
     (plan6b.remove.length === 0 && plan6b.groups.every((g) => g.sameSignals && !g.membersTableOff) && plan6b.deleteCards.length === 0) || plan6b.groups.map((g) => [g.cardId, g.sameSignals, g.membersTableOff]));
   log(`  INFO  second run asked the AI fit question ${fitAsks6() - before2} times (the real script reuses saved answers: 0)`);
 
+  // quick finish: counts only
+  card6('card-A').signal_count = 99;
+  table('market_insights').push({ id: 'card-empty', client_id: CLIENT, module_id: MD, submodule_id: DIM, signal_id: 'sig-1', title: 'Empty old card', signal_count: 4 });
+  const fc = await clean.fixCounts(fakeSupabase);
+  await check('quick finish (--counts-only): wrong count corrected, empty card deleted, nothing else touched', async () =>
+    (card6('card-A').signal_count === 3 && !card6('card-empty') && fc.countsFixed === 1 && fc.emptyDeleted === 1 && table('market_insights').length === 7) || [fc, table('market_insights').map((c) => [c.id, c.signal_count])]);
+
   log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

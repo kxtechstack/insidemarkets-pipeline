@@ -9,6 +9,8 @@
  *   node scripts/cleanMarketData.js             DRY RUN with AI: asks the AI questions, writes the new card
  *                                                titles into the report, changes nothing (answers are saved)
  *   node scripts/cleanMarketData.js --apply     does the changes in the report (reuses the saved AI answers)
+ *   --counts-only                                QUICK FINISH (a few minutes, no AI, no regrouping): every card's count
+ *                                                = its real number of signals; cards with no signal are deleted
  *   --skip-industry                              no industry check (quicker, fewer AI questions)
  *   --light                                      SHORT RUN (about 30 minutes of AI): the AI only writes the cards with 2+
  *                                                signals. Same-title copies, dead clients and no-sub-category signals are
@@ -98,6 +100,7 @@ const JOIN_SCORE = Number(process.env.CLEAN_MD_JOIN_SCORE) || 0.75;    // this c
 const ASK_MIN = Number(process.env.CLEAN_MD_ASK_MIN_SCORE) || 0.55;    // below this: new card, the AI is not asked (16 Nov: halves the AI questions)
 // A card with ONE signal needs no AI: it takes the signal's own title and summary.
 const singleCard = (m) => ({ title: m.signal_title, summary: m.summary || m.signal_title, short_summary: String(m.summary || m.signal_title).slice(0, 200), business_impact: [], country: m.country || 'Global' });
+const APPLY_PARALLEL = Number(process.env.CLEAN_MD_APPLY_PARALLEL) || 6;   // cards written at the same time in --apply
 const AI_SECONDS = (Number(process.env.CLEANUP_AI_GAP_MS) || 2100) / 1000;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -341,6 +344,48 @@ async function planCards(plan, signals, cards, clientById, { embed, askFit = nul
 // PART 3: do it (only with --apply)
 // writeupFor(group) -> { title, summary, short_summary, business_impact, country } or null (failed)
 // ═════════════════════════════════════════════════════════════════════════
+// QUICK FINISH (--counts-only): no regrouping. Every card's count = its real number of signals, and cards
+// left with no signal are deleted. Used when the long card step is skipped or stopped halfway.
+async function fixCounts(db = supabase, { deleteEmpty = true } = {}) {
+  const out = { countsFixed: 0, emptyDeleted: 0, cards: 0 };
+  const cardsNow = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from('market_insights').select('id, signal_count').eq('module_id', MODULE_ID).order('id', { ascending: true }).range(from, from + 999);
+    if (error) throw new Error(`market_insights: ${error.message}`);
+    cardsNow.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const real = new Map();
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from('market_dynamics_signals').select('id, insight_id').eq('module_id', MODULE_ID).order('id', { ascending: true }).range(from, from + 999);
+    if (error) throw new Error(`market_dynamics_signals: ${error.message}`);
+    (data || []).forEach((x) => { if (x.insight_id) real.set(x.insight_id, (real.get(x.insight_id) || 0) + 1); });
+    if (!data || data.length < 1000) break;
+  }
+  out.cards = cardsNow.length;
+  for (const c of cardsNow) {
+    const n = real.get(c.id) || 0;
+    if (!n && deleteEmpty) {
+      try { await quietly(() => md.deleteInsightCentroid(c.id)); } catch (e) { /* no centroid */ }
+      await db.from('market_insight_members').delete().eq('insight_id', c.id);
+      await db.from('market_insights').delete().eq('id', c.id);
+      out.emptyDeleted++;
+    } else if (n && n !== c.signal_count) {
+      await db.from('market_insights').update({ signal_count: n }).eq('id', c.id);
+      out.countsFixed++;
+    }
+    if ((out.emptyDeleted + out.countsFixed) % 50 === 0) process.stdout.write(`\r  cards checked... fixed ${out.countsFixed}, empty deleted ${out.emptyDeleted}   `);
+  }
+  return out;
+}
+
+// the centroid helper prints one line per card: hidden here (thousands of cards)
+const realLog = console.log;
+let quietDepth = 0;
+async function quietly(fn) {
+  quietDepth++; console.log = (...a) => { if (!/^\s*\[Centroid\]/.test(String(a[0]))) realLog(...a); };
+  try { return await fn(); } finally { quietDepth--; if (!quietDepth) console.log = realLog; }
+}
 async function applyPlan(plan, clientById, { writeupFor, db = supabase, progress = () => {} }) {
   const result = { deletedSignals: 0, rewritten: 0, created: 0, unchanged: 0, writeupFailed: 0, cardsDeleted: 0, cardsKeptWithSignals: 0, countsFixed: 0, errors: [] };
   const must = (r, what) => { if (r && r.error) throw new Error(`${what}: ${r.error.message}`); return r; };
@@ -356,10 +401,10 @@ async function applyPlan(plan, clientById, { writeupFor, db = supabase, progress
   for (const { row, patch } of plan.updates) await db.from('market_dynamics_signals').update(patch).eq('id', row.id);
 
   // 3. cards
+  // CHANGED (16 Nov): several cards at a time (one by one took about 4 hours for 9,500 cards).
+  // Each card only touches its own rows, so this is safe.
   let done = 0;
-  for (const g of plan.groups) {
-    done++;
-    progress('cards', done, plan.groups.length);
+  const oneCard = async (g) => {
     try {
       const ids = g.members.map((m) => m.id);
       const articleIds = g.members.map((m) => m.article_id);
@@ -372,7 +417,7 @@ async function applyPlan(plan, clientById, { writeupFor, db = supabase, progress
         result.unchanged++;
       } else {
         const w = await writeupFor(g);
-        if (!w || !w.title) { result.writeupFailed++; continue; }   // left as it was; run again later
+        if (!w || !w.title) { result.writeupFailed++; return; }   // left as it was; run again later
         const impact = await md.cardImpact(g.client_id, w, orgs);
         fields = {
           title: w.title, summary: w.summary, short_summary: w.short_summary, business_impact: w.business_impact,
@@ -393,13 +438,17 @@ async function applyPlan(plan, clientById, { writeupFor, db = supabase, progress
         for (let i = 0; i < articleIds.length; i += 100) await db.from('market_insight_members').delete().in('article_id', articleIds.slice(i, i + 100));
         must(await db.from('market_insight_members').insert(articleIds.map((a) => ({ insight_id: cardId, article_id: a }))), 'card members');
         for (let i = 0; i < ids.length; i += 100) must(await db.from('market_dynamics_signals').update({ insight_id: cardId }).in('id', ids.slice(i, i + 100)), 'signal link');
-        try { await md.updateInsightCentroid(cardId); } catch (e) { /* rebuilt on the next update */ }
+        try { await quietly(() => md.updateInsightCentroid(cardId)); } catch (e) { /* rebuilt on the next update */ }
         if (!g.sameSignals) result.rewritten++;
       }
     } catch (e) {
       result.errors.push(`${g.cardId || 'new card'}: ${e.message}`);
+    } finally {
+      done++;
+      progress('cards', done, plan.groups.length);
     }
-  }
+  };
+  for (let i = 0; i < plan.groups.length; i += APPLY_PARALLEL) await Promise.all(plan.groups.slice(i, i + APPLY_PARALLEL).map(oneCard));
 
   // 4. old cards with no signal left
   for (const c of plan.deleteCards) {
@@ -436,6 +485,12 @@ async function applyPlan(plan, clientById, { writeupFor, db = supabase, progress
 // main
 // ═════════════════════════════════════════════════════════════════════════
 async function main() {
+  if (process.argv.includes('--counts-only')) {
+    console.log('Quick finish: fixing card counts and deleting cards with no signals (no regrouping, no AI)...');
+    const r = await fixCounts();
+    console.log(`\nDone. Cards checked: ${r.cards} | counts fixed: ${r.countsFixed} | empty cards deleted: ${r.emptyDeleted}`);
+    return;
+  }
   say(`Market Dynamics data cleanup - ${APPLY ? 'APPLY (changes will be made)' : `DRY RUN (nothing is changed)${SKIP_AI ? ', NO AI' : ''}`} - ${new Date().toISOString()}`);
   const clients = await readAll('clients', 'id, company_name, industry', null, 'admin');
   const clientById = new Map(clients.map((c) => [c.id, c]));
@@ -656,4 +711,4 @@ async function main() {
 if (require.main === module) {
   main().then(() => process.exit(0)).catch((e) => { console.error(`\nCleanup stopped: ${e.message}`); process.exit(1); });
 }
-module.exports = { planSignals, planCards, applyPlan, subCategoryFromTitle };   // used by scripts/testMarketPipeline.js
+module.exports = { planSignals, planCards, applyPlan, subCategoryFromTitle, fixCounts };   // used by scripts/testMarketPipeline.js

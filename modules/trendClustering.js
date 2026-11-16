@@ -205,217 +205,210 @@ const setupTrendCollection = async () => {
   }
 };
 
-const AUTO_JOIN_THRESHOLD = 0.65; // how close a match needs to be to auto-join a trend
-const MERGE_SEARCH_THRESHOLD = 0.60; // used only at promotion time, comparing a candidate's
-// pooled centroid against other ACTIVE trends' centroids -- lower than AUTO_JOIN_THRESHOLD
-// because comparing two averaged centroids is a much more stable signal than one raw
-// article vs a centroid, so it can afford to be a bit more permissive.
+// ── Which trend does a new signal belong to? ─────────────────────────────────────────
+// CHANGED (16 Nov audit: one trend had 541 signals, 3,681 hidden one-signal trends, 63 signals with no
+// trend). Same pattern as the Market Dynamics cards:
+//   score >= JOIN_NO_AI_SCORE (0.80)        -> joins that trend (very close, no AI)
+//   AUTO_JOIN_THRESHOLD (0.65) .. 0.80      -> ONE small AI question: "which trend is it part of, or none?"
+//                                              (before: every score from 0.65 joined on its own, so a big
+//                                              general trend swallowed everything)
+//   below 0.65                              -> starts a new hidden (candidate) trend
+// Active trends (by their centroid) and hidden candidate trends (by their signals) are looked at
+// together, so a lonely signal can find another lonely signal. If the AI fails: new candidate
+// (a separate trend is better than a wrong merge). Every database write is checked: a failure
+// throws, and the caller undoes the whole article so it is tried again on the next run.
+const AUTO_JOIN_THRESHOLD = Number(process.env.FO_TREND_MIN_SCORE) || 0.65;
+const JOIN_NO_AI_SCORE = Number(process.env.FO_TREND_JOIN_SCORE) || 0.80;
+const MERGE_SEARCH_THRESHOLD = 0.60; // promotion time: a candidate's pooled centroid vs active trends' centroids
+const TREND_FIT_MAX = 3;
 
-/**
- * Checks if a new signal matches an EXISTING trend (one that already
- * has a centroid, meaning it already has 2+ signals grouped into it).
- */
-const checkExistingTrends = async (signalEmbedding, moduleId, clientId, industry) => {
-  const searchResult = await qdrant.search(TREND_COLLECTION, {
-    vector: signalEmbedding,
-    filter: {
-      must: [
-        { key: 'type', match: { value: 'centroid' } },
-        { key: 'module_id', match: { value: moduleId } },
-        { key: 'client_id', match: { value: clientId } },
-        { key: 'industry', match: { value: industry } },
-      ],
-    },
-    limit: 1,
-    with_payload: true,
-  });
+const must = (res, what) => { if (res && res.error) throw new Error(`${what}: ${res.error.message}`); return res; };
+const normName = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-  const bestMatch = searchResult[0];
+const TREND_FIT_DEFAULT = `A new signal is below, and up to 3 existing trends. A trend is a group of signals that point to the SAME specific shift in an industry (for example "Refillable packaging in prestige beauty").
 
-  if (bestMatch && bestMatch.score >= AUTO_JOIN_THRESHOLD) {
-    console.log(`  [TrendMatch] Found existing trend match, score: ${bestMatch.score}`);
-    return { trendId: bestMatch.payload.trend_id, score: bestMatch.score };
+Does the new signal belong to one of the trends? It belongs only when it is evidence of that SAME specific shift (same technology, same kind of product or same kind of move). The same industry, the same company or a loosely related topic is NOT enough.
+
+NEW SIGNAL: {signal_title}
+{signal_summary}
+
+{trends}
+
+Answer with JSON only: {"trend": the trend number, or 0 when it belongs to none, "reason": "one short sentence"}`;
+
+let trendFitPromptCache = null;
+const getTrendFitPrompt = async () => {
+  if (trendFitPromptCache && Date.now() - trendFitPromptCache.at < 10 * 60e3) return trendFitPromptCache.text;
+  let text = TREND_FIT_DEFAULT;
+  try {
+    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'trend_fit_v1').eq('is_active', true).maybeSingle();
+    if (data && data.prompt_template) text = data.prompt_template;
+  } catch (e) { /* use the default */ }
+  trendFitPromptCache = { at: Date.now(), text };
+  return text;
+};
+
+/** The AI picks the trend (1..n) or 0. options: [{ name, titles[] }]. Returns { index, reason, failed? } */
+const askTrendFit = async (signal, options) => {
+  try {
+    const trendsText = options.map((o, i) => `TREND ${i + 1}: ${o.name || '(not named yet)'}\nSignals in it: ${(o.titles || []).slice(0, 6).map((t) => `"${t}"`).join('; ') || 'none listed'}`).join('\n\n');
+    const prompt = (await getTrendFitPrompt())
+      .replace(/{signal_title}/g, () => String(signal.title || '').slice(0, 300))
+      .replace(/{signal_summary}/g, () => String(signal.summary || '').slice(0, 500))
+      .replace(/{trends}/g, () => trendsText);
+    const raw = await callLLM([
+      { role: 'system', content: 'You are a strict classifier. You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0, max_tokens: 80, timeout: 60000 });
+    const parsed = repairAndParseJson(String(raw || '{}'));
+    const n = Number(parsed.trend);
+    if (!Number.isInteger(n) || n < 0 || n > options.length) return { index: -1, reason: `AI answered "${parsed.trend}"`, failed: true };
+    return { index: n - 1, reason: String(parsed.reason || '').slice(0, 200) };
+  } catch (e) {
+    return { index: -1, reason: `AI check failed (${e.message})`, failed: true };
   }
+};
 
-  if (bestMatch) {
-    console.log(`  [TrendMatch] No existing trend match (best score=${bestMatch.score.toFixed(3)}, below ${AUTO_JOIN_THRESHOLD})`);
-  } else {
-    console.log(`  [TrendMatch] No existing trends to compare against yet`);
-  }
-
-  return null; // no strong match found
+/** Titles of the newest signals in a trend (so the AI sees what the trend is really about). */
+const getTrendTitles = async (trendId, limit = 6) => {
+  const ids = await getMemberArticleIds(trendId);
+  if (!ids.length) return [];
+  const { data } = await supabase.from('trend_signals').select('id, signal_title, created_at').in('id', ids.slice(-50));
+  return (data || []).sort((a, b) => (String(a.created_at) < String(b.created_at) ? 1 : -1)).slice(0, limit).map((r) => r.signal_title);
 };
 
 /**
- * Checks if a new signal matches an existing CANDIDATE trend — one that
- * doesn't have a centroid yet because it only has 1 signal so far.
- * Compares directly against that lone signal, not a centroid.
+ * The closest trends for a new signal: active trends (centroid) + hidden candidate trends (their signals).
+ * Returns up to TREND_FIT_MAX of [{ trendId, score, status, name, titles }], best first.
  */
-const checkCandidateTrends = async (signalEmbedding, moduleId, clientId, industry) => {
-  const searchResult = await qdrant.search(TREND_COLLECTION, {
-    vector: signalEmbedding,
-    filter: {
-      must: [
-        { key: 'type', match: { value: 'signal' } },
-        { key: 'module_id', match: { value: moduleId } },
-        { key: 'client_id', match: { value: clientId } },
-        { key: 'industry', match: { value: industry } },
-      ],
-    },
-    limit: 5,
-    with_payload: true,
-  });
+const findTrendOptions = async (signalEmbedding, moduleId, clientId, industry) => {
+  const scope = [
+    { key: 'module_id', match: { value: moduleId } },
+    { key: 'client_id', match: { value: clientId } },
+    { key: 'industry', match: { value: industry } },
+  ];
+  const best = new Map();   // trendId -> { trendId, score, status }
+  const keep = (trendId, score, status) => { const old = best.get(trendId); if (!old || score > old.score) best.set(trendId, { trendId, score, status }); };
 
-  let bestBelowThreshold = null;
+  const centroids = await qdrant.search(TREND_COLLECTION, { vector: signalEmbedding, filter: { must: [{ key: 'type', match: { value: 'centroid' } }, ...scope] }, limit: TREND_FIT_MAX, with_payload: true });
+  for (const m of centroids || []) if (m.score >= AUTO_JOIN_THRESHOLD) keep(m.payload.trend_id, m.score, 'active');
 
-  for (const match of searchResult) {
-    if (match.score < AUTO_JOIN_THRESHOLD) {
-      if (!bestBelowThreshold || match.score > bestBelowThreshold) {
-        bestBelowThreshold = match.score;
+  // CHANGED: before, only the 5 closest signals of ANY trend were looked at, so signals of active trends
+  // hid the lonely candidates. Now the 40 closest are checked and only candidate trends are kept.
+  const nearSignals = (await qdrant.search(TREND_COLLECTION, { vector: signalEmbedding, filter: { must: [{ key: 'type', match: { value: 'signal' } }, ...scope] }, limit: 40, with_payload: true }) || [])
+    .filter((m) => m.score >= AUTO_JOIN_THRESHOLD);
+  if (nearSignals.length) {
+    const { data: memberships } = await supabase.from('trend_membership').select('trend_id, signal_id').in('signal_id', nearSignals.map((m) => m.payload.article_id));
+    const trendIds = [...new Set((memberships || []).map((m) => m.trend_id))];
+    if (trendIds.length) {
+      const { data: cands } = await supabase.from('trend_clusters').select('id').in('id', trendIds).eq('status', 'candidate');
+      const candidateIds = new Set((cands || []).map((c) => c.id));
+      const trendOfSignal = new Map((memberships || []).map((m) => [m.signal_id, m.trend_id]));
+      for (const m of nearSignals) {
+        const t = trendOfSignal.get(m.payload.article_id);
+        if (t && candidateIds.has(t)) keep(t, m.score, 'candidate');
       }
-      continue;
-    }
-
-    const { data: membership } = await supabase
-      .from('trend_membership')
-      .select('trend_id, trend_clusters!inner(status)')
-      .eq('signal_id', match.payload.article_id)
-      .single();
-
-    if (membership && membership.trend_clusters.status === 'candidate') {
-      console.log(`  [TrendMatch] Found candidate trend match, score: ${match.score}`);
-      return { trendId: membership.trend_id };
     }
   }
 
-  if (bestBelowThreshold !== null) {
-    console.log(`  [TrendMatch] No candidate match (best score=${bestBelowThreshold.toFixed(3)}, below ${AUTO_JOIN_THRESHOLD})`);
-  } else {
-    console.log(`  [TrendMatch] No candidate signals to compare against yet`);
+  const top = [...best.values()].sort((a, b) => b.score - a.score).slice(0, TREND_FIT_MAX);
+  for (const o of top) {
+    const { data: row } = await supabase.from('trend_clusters').select('name').eq('id', o.trendId).maybeSingle();
+    o.name = row && row.name;
+    o.titles = await getTrendTitles(o.trendId);
   }
+  return top;
+};
 
-  return null; // no candidate match either — this signal will start a brand new one
+/** Takes a signal back out of its trend (used when saving the article fails after the trend step). */
+const undoTrendMember = async (signalId) => {
+  const { data: rows } = await supabase.from('trend_membership').select('trend_id').eq('signal_id', signalId);
+  await supabase.from('trend_membership').delete().eq('signal_id', signalId);
+  try {
+    await qdrant.delete(TREND_COLLECTION, { wait: true, filter: { must: [{ key: 'article_id', match: { value: signalId } }, { key: 'type', match: { value: 'signal' } }] } });
+  } catch (e) { /* nothing stored yet */ }
+  for (const r of rows || []) {
+    const left = await getMemberArticleIds(r.trend_id);
+    const { data: trend } = await supabase.from('trend_clusters').select('status').eq('id', r.trend_id).maybeSingle();
+    if (!left.length && trend && trend.status === 'candidate') await supabase.from('trend_clusters').delete().eq('id', r.trend_id);
+    else if (left.length && trend && trend.status === 'active') { try { await updateTrendCentroid(r.trend_id); } catch (e) { /* rebuilt on the next join */ } }
+  }
 };
 
 /**
  * The main entry point — called once per stored signal.
- * Decides: auto-join an existing trend, join a pending candidate,
- * or start a brand new candidate trend.
+ * Decides: join an active trend, join a hidden candidate, or start a new candidate.
+ * signal = { title, summary } (for the AI question). Throws when a write fails.
  */
-const matchSignalToTrend = async (signalId, signalEmbedding, moduleId, clientId, industry, publishedDate = null) => {
-    await setupTrendCollection();
-
-  const existingMatch = await checkExistingTrends(signalEmbedding, moduleId, clientId, industry);
+const matchSignalToTrend = async (signalId, signalEmbedding, moduleId, clientId, industry, publishedDate = null, signal = {}) => {
+  await setupTrendCollection();
 
   const storeOwnVector = async () => {
     await qdrant.upsert(TREND_COLLECTION, {
       points: [{
         id: uuidv4(),
         vector: signalEmbedding,
-        payload: {
-          article_id: signalId,
-          client_id: clientId,
-          industry,
-          module_id: moduleId,
-          type: 'signal',
-        },
+        payload: { article_id: signalId, client_id: clientId, industry, module_id: moduleId, type: 'signal' },
       }],
     });
   };
+  const joinedAt = publishedDate || new Date().toISOString();
 
-  if (existingMatch) {
-    await supabase.from('trend_membership').insert({
-      trend_id: existingMatch.trendId,
-      signal_id: signalId,
-      module_id: moduleId,
-      match_type: 'auto_join',
-      joined_at: publishedDate || new Date().toISOString(),
-    });
+  const options = await findTrendOptions(signalEmbedding, moduleId, clientId, industry);
+  let pick = null;
+  if (!options.length) {
+    console.log('  [TrendMatch] nothing close enough - new candidate trend');
+  } else if (options[0].score >= JOIN_NO_AI_SCORE) {
+    pick = options[0];
+    console.log(`  [TrendMatch] very close to ${pick.status} trend "${pick.name || pick.trendId}" (${pick.score.toFixed(2)}) - joins, no AI`);
+  } else {
+    const ai = await askTrendFit(signal, options);
+    console.log(`  [TrendMatch] options: ${options.map((o, i) => `${i + 1}) ${o.status} "${o.name || (o.titles[0] || o.trendId)}" ${o.score.toFixed(2)}`).join(' | ')} -> AI: ${ai.index >= 0 ? `trend ${ai.index + 1}` : 'none'} (${ai.reason})`);
+    if (ai.index >= 0) pick = options[ai.index];
+  }
+
+  if (pick && pick.status === 'active') {
+    must(await supabase.from('trend_membership').insert({ trend_id: pick.trendId, signal_id: signalId, module_id: moduleId, match_type: 'auto_join', joined_at: joinedAt }), 'trend_membership');
     await storeOwnVector();
-    await updateTrendCentroid(existingMatch.trendId);
-    console.log(`  [TrendMatch] Signal ${signalId} auto-joined trend ${existingMatch.trendId}`);
+    await updateTrendCentroid(pick.trendId);
 
-    // Always regenerate summary/business_impact/impact/sector so the
-    // writeup reflects the full current signal set. Only regenerate the
-    // NAME once 5+ new signals have joined since it was last set --
-    // names shouldn't flip-flop on every single addition.
-    const { data: trendRow } = await supabase
-      .from('trend_clusters')
-      .select('client_id, name, last_named_signal_count')
-      .eq('id', existingMatch.trendId)
-      .single();
-
-    const refreshed = await generateTrendNameAndWriteup(existingMatch.trendId, industry, trendRow?.client_id);
-
+    // Always refresh summary/business_impact/impact/sector so the write-up reflects the full signal set.
+    // The NAME changes only once 5+ new signals have joined since it was last set (names must not flip-flop).
+    const { data: trendRow } = await supabase.from('trend_clusters').select('client_id, name, last_named_signal_count').eq('id', pick.trendId).single();
+    const refreshed = await generateTrendNameAndWriteup(pick.trendId, industry, trendRow?.client_id);
     if (refreshed) {
-      const currentSignalCount = (await getMemberArticleIds(existingMatch.trendId)).length;
+      const currentSignalCount = (await getMemberArticleIds(pick.trendId)).length;
       const signalsSinceLastNaming = currentSignalCount - (trendRow?.last_named_signal_count || 0);
-      const shouldRenameToo = signalsSinceLastNaming >= 5;
-
-      const updatePayload = {
-        summary: refreshed.summary,
-        business_impact: refreshed.business_impact,
-        impact: refreshed.impact,
-        sector: refreshed.sector,
-        last_updated_at: new Date().toISOString(),
-      };
-
-      if (shouldRenameToo) {
+      const updatePayload = { summary: refreshed.summary, business_impact: refreshed.business_impact, impact: refreshed.impact, sector: refreshed.sector, last_updated_at: new Date().toISOString() };
+      if (signalsSinceLastNaming >= 5 || !trendRow?.name) {
         updatePayload.name = refreshed.name;
         updatePayload.last_named_signal_count = currentSignalCount;
-        console.log(`  [TrendMatch] Renamed trend ${existingMatch.trendId} to "${refreshed.name}" (${signalsSinceLastNaming} new signals since last naming)`);
-      } else {
-        console.log(`  [TrendMatch] Summary/impact refreshed for trend ${existingMatch.trendId}, name kept ("${trendRow?.name}") — ${signalsSinceLastNaming}/5 signals since last naming`);
+        console.log(`  [TrendMatch] Renamed trend ${pick.trendId} to "${refreshed.name}"`);
       }
-
-      await supabase.from('trend_clusters').update(updatePayload).eq('id', existingMatch.trendId);
+      const { error: upErr } = await supabase.from('trend_clusters').update(updatePayload).eq('id', pick.trendId);
+      if (upErr) console.log(`  [TrendMatch] write-up not saved for trend ${pick.trendId} (${upErr.message}) - previous one kept`);
     } else {
-      console.log(`  [TrendMatch] Writeup refresh failed for trend ${existingMatch.trendId}, keeping previous writeup`);
+      console.log(`  [TrendMatch] Writeup refresh failed for trend ${pick.trendId}, keeping previous writeup`);
     }
-
-    return { status: 'auto_joined', trendId: existingMatch.trendId };
+    return { status: 'auto_joined', trendId: pick.trendId };
   }
 
-  const candidateMatch = await checkCandidateTrends(signalEmbedding, moduleId, clientId, industry);
-
-  if (candidateMatch) {
-    await supabase.from('trend_membership').insert({
-      trend_id: candidateMatch.trendId,
-      signal_id: signalId,
-      module_id: moduleId,
-      match_type: 'pending',
-      joined_at: publishedDate || new Date().toISOString(),
-    });
+  if (pick) {
+    must(await supabase.from('trend_membership').insert({ trend_id: pick.trendId, signal_id: signalId, module_id: moduleId, match_type: 'pending', joined_at: joinedAt }), 'trend_membership');
     await storeOwnVector();
-    console.log(`  [TrendMatch] Signal ${signalId} joined candidate trend ${candidateMatch.trendId}`);
-    return { status: 'joined_candidate', trendId: candidateMatch.trendId };
+    console.log(`  [TrendMatch] Signal ${signalId} joined candidate trend ${pick.trendId}`);
+    return { status: 'joined_candidate', trendId: pick.trendId };
   }
 
-  const { data: newTrend, error } = await supabase
-    .from('trend_clusters')
-    .insert({
-      module_id: moduleId,
-      client_id: clientId,
-      industry,
-      status: 'candidate',
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error('  [TrendMatch] Failed to create new candidate trend:', error.message);
-    return { status: 'error', error: error.message };
+  const created = must(await supabase.from('trend_clusters').insert({ module_id: moduleId, client_id: clientId, industry, status: 'candidate' }).select().single(), 'trend_clusters');
+  const newTrend = created.data;
+  if (!newTrend) throw new Error('trend_clusters: no row returned');
+  const mem = await supabase.from('trend_membership').insert({ trend_id: newTrend.id, signal_id: signalId, module_id: moduleId, match_type: 'pending', joined_at: joinedAt });
+  if (mem.error) {
+    await supabase.from('trend_clusters').delete().eq('id', newTrend.id);
+    throw new Error(`trend_membership: ${mem.error.message}`);
   }
-
-  await supabase.from('trend_membership').insert({
-    trend_id: newTrend.id,
-    signal_id: signalId,
-    module_id: moduleId,
-    match_type: 'pending',
-    joined_at: publishedDate || new Date().toISOString(),
-  });
   await storeOwnVector();
-
   console.log(`  [TrendMatch] Signal ${signalId} started new candidate trend ${newTrend.id}`);
   return { status: 'new_candidate', trendId: newTrend.id };
 };
@@ -461,171 +454,121 @@ const checkPromotionEligibility = async (trendId) => {
  * duplicated -- this is what stops near-identical trends like
  * "Sustainable Refill" / "Sustainability Refill" from both existing.
  */
+// Moves every signal of a candidate into an existing active trend, deletes the candidate, refreshes the trend.
+const mergeCandidateInto = async (trendId, existingTrendId, industry, clientId) => {
+  const { data: candidateMembers } = await supabase.from('trend_membership').select('id, signal_id').eq('trend_id', trendId);
+  const { data: existingMembers } = await supabase.from('trend_membership').select('signal_id').eq('trend_id', existingTrendId);
+  const existingSignalIds = new Set((existingMembers || []).map((m) => m.signal_id));
+  for (const member of candidateMembers || []) {
+    if (existingSignalIds.has(member.signal_id)) must(await supabase.from('trend_membership').delete().eq('id', member.id), 'trend_membership');
+    else must(await supabase.from('trend_membership').update({ trend_id: existingTrendId, match_type: 'auto_join' }).eq('id', member.id), 'trend_membership');
+  }
+  await supabase.from('trend_clusters').delete().eq('id', trendId);
+  await updateTrendCentroid(existingTrendId);
+  const merged = await generateTrendNameAndWriteup(existingTrendId, industry, clientId);
+  if (merged) {
+    await supabase.from('trend_clusters').update({
+      summary: merged.summary, business_impact: merged.business_impact, impact: merged.impact, sector: merged.sector,
+      last_updated_at: new Date().toISOString(),
+    }).eq('id', existingTrendId);   // the NAME is kept: it is the name the signals were matched to
+  }
+  return { status: 'merged', mergedIntoTrendId: existingTrendId };
+};
+
 const promoteCandidate = async (trendId, industry) => {
-  const { data: trendRow } = await supabase
-    .from('trend_clusters')
-    .select('module_id, client_id')
-    .eq('id', trendId)
-    .single();
+  const { data: trendRow } = await supabase.from('trend_clusters').select('module_id, client_id').eq('id', trendId).single();
+  const memberIds = await getMemberArticleIds(trendId);
 
   const points = await qdrant.scroll(TREND_COLLECTION, {
-    filter: {
-      must: [
-        { key: 'article_id', match: { any: await getMemberArticleIds(trendId) } },
-        { key: 'type', match: { value: 'signal' } },
-      ],
-    },
-    with_vector: true,
-    with_payload: false,
-    limit: 100,
+    filter: { must: [{ key: 'article_id', match: { any: memberIds } }, { key: 'type', match: { value: 'signal' } }] },
+    with_vector: true, with_payload: false, limit: 100,
   });
-
   if (!points.points || points.points.length === 0) {
     console.log(`  [Promotion] No signal vectors found for trend ${trendId}, skipping`);
     return { status: 'skipped', reason: 'no vectors found' };
   }
-
-  const vectors = points.points.map(p => p.vector);
+  const vectors = points.points.map((p) => p.vector);
   const dim = vectors[0].length;
   const centroid = new Array(dim).fill(0);
-
-  for (const vec of vectors) {
-    for (let i = 0; i < dim; i++) centroid[i] += vec[i];
-  }
+  for (const vec of vectors) for (let i = 0; i < dim; i++) centroid[i] += vec[i];
   for (let i = 0; i < dim; i++) centroid[i] /= vectors.length;
 
-  // NEW: before creating a brand new active trend, check if this
-  // candidate's pooled centroid is close to an EXISTING active trend's
-  // centroid. Pure article-vs-centroid matching (AUTO_JOIN_THRESHOLD)
-  // only ever runs per-signal, using one article's wording at a time --
-  // this pooled-centroid-vs-centroid check is a cleaner, more stable
-  // comparison, run once at promotion time.
+  // 1. Is this the same shift as an active trend? (16 Nov: before, every score from 0.60 was merged on
+  //    its own - one reason a trend grew to 541 signals.) Very close: merge. In between: the AI decides.
   const mergeSearch = await qdrant.search(TREND_COLLECTION, {
     vector: centroid,
-    filter: {
-      must: [
-        { key: 'type', match: { value: 'centroid' } },
-        { key: 'module_id', match: { value: trendRow?.module_id } },
-        { key: 'client_id', match: { value: trendRow?.client_id } },
-        { key: 'industry', match: { value: industry } },
-      ],
-    },
-    limit: 1,
-    with_payload: true,
+    filter: { must: [
+      { key: 'type', match: { value: 'centroid' } },
+      { key: 'module_id', match: { value: trendRow?.module_id } },
+      { key: 'client_id', match: { value: trendRow?.client_id } },
+      { key: 'industry', match: { value: industry } },
+    ] },
+    limit: 1, with_payload: true,
   });
-
   const mergeMatch = mergeSearch[0];
-
   if (mergeMatch && mergeMatch.score >= MERGE_SEARCH_THRESHOLD) {
     const existingTrendId = mergeMatch.payload.trend_id;
-    console.log(`  [Promotion] Candidate ${trendId}'s pooled centroid matches existing active trend ${existingTrendId} (score: ${mergeMatch.score.toFixed(3)}) — merging instead of creating a duplicate.`);
-
-    const { data: candidateMembers } = await supabase
-      .from('trend_membership')
-      .select('id, signal_id')
-      .eq('trend_id', trendId);
-
-    const { data: existingMembers } = await supabase
-      .from('trend_membership')
-      .select('signal_id')
-      .eq('trend_id', existingTrendId);
-    const existingSignalIds = new Set((existingMembers || []).map(m => m.signal_id));
-
-    for (const member of candidateMembers || []) {
-      if (existingSignalIds.has(member.signal_id)) {
-        await supabase.from('trend_membership').delete().eq('id', member.id);
-      } else {
-        await supabase.from('trend_membership').update({ trend_id: existingTrendId }).eq('id', member.id);
-      }
+    let merge = mergeMatch.score >= JOIN_NO_AI_SCORE;
+    let why = 'very close';
+    if (!merge) {
+      const { data: existing } = await supabase.from('trend_clusters').select('name').eq('id', existingTrendId).maybeSingle();
+      const myTitles = await getTrendTitles(trendId);
+      const ai = await askTrendFit({ title: myTitles[0], summary: myTitles.slice(1).map((t) => `Also: ${t}`).join('\n') },
+        [{ name: existing && existing.name, titles: await getTrendTitles(existingTrendId) }]);
+      merge = ai.index === 0;
+      why = `AI: ${ai.reason}`;
     }
-
-    // This candidate never had its own centroid (it wasn't promoted yet),
-    // so nothing to clean up in Qdrant for it -- just delete its row.
-    await supabase.from('trend_clusters').delete().eq('id', trendId);
-
-    await updateTrendCentroid(existingTrendId);
-    const mergedResult = await generateTrendNameAndWriteup(existingTrendId, industry, trendRow?.client_id);
-    if (mergedResult) {
-      const memberCount = (await getMemberArticleIds(existingTrendId)).length;
-      await supabase.from('trend_clusters').update({
-        name: mergedResult.name,
-        summary: mergedResult.summary,
-        business_impact: mergedResult.business_impact,
-        impact: mergedResult.impact,
-        sector: mergedResult.sector,
-        last_named_signal_count: memberCount,
-      }).eq('id', existingTrendId);
-    } else {
-      console.log(`  [Promotion] Naming refresh failed on merge for trend ${existingTrendId} — existing name kept, no NULL risk here since it was already active/named.`);
+    if (merge) {
+      console.log(`  [Promotion] Candidate ${trendId} is the same shift as active trend ${existingTrendId} (score ${mergeMatch.score.toFixed(3)}, ${why}) - merged`);
+      return mergeCandidateInto(trendId, existingTrendId, industry, trendRow?.client_id);
     }
-
-    console.log(`  [Promotion] Merged into existing trend ${existingTrendId}: "${mergedResult?.name}"`);
-    return { status: 'merged', mergedIntoTrendId: existingTrendId, name: mergedResult?.name };
+    console.log(`  [Promotion] Candidate ${trendId} is close to trend ${existingTrendId} (score ${mergeMatch.score.toFixed(3)}) but NOT the same shift (${why}) - its own trend`);
   }
 
-  // No merge match -- proceed with normal promotion as before
-  const centroidPointId = uuidv4();
-  await qdrant.upsert(TREND_COLLECTION, {
-    points: [{
-      id: centroidPointId,
-      vector: centroid,
-      payload: {
-        trend_id: trendId,
-        type: 'centroid',
-        module_id: trendRow?.module_id,
-        client_id: trendRow?.client_id,
-        industry,
-      },
-    }],
-  });
-
-  const { error } = await supabase
-    .from('trend_clusters')
-    .update({
-      status: 'active',
-      centroid_point_id: centroidPointId,
-      promoted_at: new Date().toISOString(),
-    })
-    .eq('id', trendId);
-
-  if (error) {
-    console.error(`  [Promotion] Failed to update trend_clusters for ${trendId}:`, error.message);
-    return { status: 'error', error: error.message };
-  }
-
+  // 2. Name it FIRST (16 Nov: a trend was shown on the radar as "Unnamed Trend" / sector "Unknown"
+  //    because it was made active before the naming call, and the naming failed).
   let result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
   if (!result) {
     console.log(`  [Promotion] Naming failed for trend ${trendId}, retrying once...`);
     result = await generateTrendNameAndWriteup(trendId, industry, trendRow?.client_id);
   }
-
   if (!result) {
-    const articleIds = await getMemberArticleIds(trendId);
-    const { data: sigs } = await supabase
-      .from('trend_signals')
-      .select('organization, signal_title')
-      .in('id', articleIds);
-    result = {
-      name: deriveFallbackName(sigs || []),
-      summary: null,
-      business_impact: [],
-      impact: 'Medium',
-      sector: 'Unknown',
-    };
-    console.log(`  [Promotion] Naming failed twice for trend ${trendId} — using deterministic fallback name: "${result.name}"`);
+    const { data: sigs } = await supabase.from('trend_signals').select('organization, signal_title, sector').in('id', memberIds);
+    result = { name: deriveFallbackName(sigs || []), summary: null, business_impact: [], impact: 'Medium', sector: validSector(null, sigs || []) };
+    console.log(`  [Promotion] Naming failed twice for trend ${trendId} - using fallback name: "${result.name}"`);
   }
 
-  const memberCountAtNaming = (await getMemberArticleIds(trendId)).length;
-  await supabase.from('trend_clusters').update({
+  // 3. The same name as an active trend of this client ("Nano Delivery" / "Nano-delivery") -> one trend
+  const { data: actives } = await supabase.from('trend_clusters').select('id, name')
+    .eq('module_id', trendRow?.module_id).eq('client_id', trendRow?.client_id).eq('status', 'active');
+  const twin = (actives || []).find((t) => t.id !== trendId && normName(t.name) && normName(t.name) === normName(result.name));
+  if (twin) {
+    console.log(`  [Promotion] Candidate ${trendId} got the name of active trend ${twin.id} ("${twin.name}") - merged`);
+    return mergeCandidateInto(trendId, twin.id, industry, trendRow?.client_id);
+  }
+
+  // 4. Active, with its name, in ONE update
+  const centroidPointId = uuidv4();
+  await qdrant.upsert(TREND_COLLECTION, {
+    points: [{ id: centroidPointId, vector: centroid, payload: { trend_id: trendId, type: 'centroid', module_id: trendRow?.module_id, client_id: trendRow?.client_id, industry } }],
+  });
+  const { error } = await supabase.from('trend_clusters').update({
+    status: 'active',
+    centroid_point_id: centroidPointId,
+    promoted_at: new Date().toISOString(),
     name: result.name,
     summary: result.summary,
     business_impact: result.business_impact,
     impact: result.impact,
     sector: result.sector,
-    last_named_signal_count: memberCountAtNaming,
+    last_named_signal_count: memberIds.length,
   }).eq('id', trendId);
-
-  console.log(`  [Promotion] Trend ${trendId} promoted to active with centroid ${centroidPointId}`);
+  if (error) {
+    try { await qdrant.delete(TREND_COLLECTION, { points: [centroidPointId] }); } catch (e) { /* nothing to remove */ }
+    console.error(`  [Promotion] Failed to update trend_clusters for ${trendId}:`, error.message);
+    return { status: 'error', error: error.message };
+  }
+  console.log(`  [Promotion] Trend ${trendId} promoted to active as "${result.name}"`);
   return { status: 'promoted', centroidPointId, name: result.name };
 };
 
@@ -825,8 +768,20 @@ const repairAndParseJson = (rawContent) => {
 // Builds a deterministic, never-null trend name from the raw signal data
 // itself, for use whenever the LLM naming call fails or returns nothing
 // usable. Never returns the literal string "Unnamed Trend".
+// The 5 fixed sectors of the radar. A trend's sector is the AI's answer when it is one of them,
+// otherwise the sector most of its signals have.
+const VALID_SECTORS = ['Technology', 'Supply Chain', 'Product', 'Sustainability', 'Consumer'];
+const validSector = (value, signals) => {
+  const hit = VALID_SECTORS.find((v) => v.toLowerCase() === String(value || '').trim().toLowerCase());
+  if (hit) return hit;
+  const counts = new Map();
+  (signals || []).forEach((x) => { if (VALID_SECTORS.includes(x.sector)) counts.set(x.sector, (counts.get(x.sector) || 0) + 1); });
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  return top ? top[0] : 'Technology';
+};
+
 const deriveFallbackName = (signals) => {
-  const orgs = [...new Set((signals || []).map(s => s.organization).filter(Boolean))];
+  const orgs = [...new Set((signals || []).map(s => s.organization).filter((o) => o && !/^unknown$/i.test(o)))];   // CHANGED: "Unknown — Emerging Trend" was possible
   const firstTitle = signals && signals[0]?.signal_title;
   if (orgs.length > 0) return `${orgs.slice(0, 2).join(' & ')} — Emerging Trend`;
   if (firstTitle) return firstTitle.slice(0, 60);
@@ -845,7 +800,7 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
 
     const { data: signals, error } = await supabase
       .from('trend_signals')
-      .select('signal_title, summary, signal_type, organization')
+      .select('signal_title, summary, signal_type, organization, sector')
       .in('id', articleIds);
 
     if (error || !signals || signals.length === 0) {
@@ -887,11 +842,12 @@ const generateTrendNameAndWriteup = async (trendId, industry, clientId) => {
     const parsed = repairAndParseJson(rawContent);
 
     let result = {
-      name: parsed.name || deriveFallbackName(signalsForWriteup),
+      // CHANGED: an empty name, or the AI writing "Unnamed" / "Unknown" itself, gets a real name from the signals
+      name: (parsed.name && !/^\s*(unnamed|unknown|untitled|n\/?a)\b/i.test(parsed.name)) ? parsed.name : deriveFallbackName(signalsForWriteup),
       summary: parsed.summary || null,
       business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact : [],
       impact: parsed.impact || 'Medium',
-      sector: parsed.sector || 'Unknown',
+      sector: validSector(parsed.sector, signals),   // CHANGED: never "Unknown" (it showed as its own tab on the radar)
     };
 
     // Catch competitor names the model fabricated (pulled from client
@@ -1304,8 +1260,8 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
       client_id: clientId,
       period_start: periodStart.toISOString().slice(0, 10),
       period_end: periodEnd.toISOString().slice(0, 10),
-      name: trend.name || 'Unnamed Trend',
-      sector: trend.sector || 'Unknown',
+      name: trend.name || deriveFallbackName([]),   // active trends always have a name now; this is only a last guard
+      sector: validSector(trend.sector, []),
       ring,
       dot_size: dotSize,
       confidence_score: confidenceScore,
@@ -1327,4 +1283,4 @@ const runWeeklyScoring = async (moduleId, clientId, industry) => {
 };
 
 
-  module.exports = { matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid, calculateTrendConfidenceScore, promoteCandidate };
+  module.exports = { undoTrendMember, askTrendFit, findTrendOptions, validSector, matchSignalToTrend, runPromotionCheck, setupTrendCollection, generateTrendNameAndWriteup, calculateTrendRing, calculateTrendDotSize, calculateTrendPosture, runWeeklyScoring, findSimilarTrends, updateTrendCentroid, calculateTrendConfidenceScore, promoteCandidate };
