@@ -454,4 +454,4 @@ async function main() {
 if (require.main === module) {
   main().then(() => process.exit(0)).catch((e) => { console.error(`\nCleanup stopped: ${e.message}`); process.exit(1); });
 }
-module.exports = { buildPlan, industryStep, cleanCountry, newCategory };   // used by scripts/testPolicyPipeline.js
+module.exports = { buildPlan, industryStep, cleanCountry, newCategory, aiSlot, obviouslyOnIndustry };   // used by scripts/testPolicyPipeline.js and scripts/cleanMarketData.js

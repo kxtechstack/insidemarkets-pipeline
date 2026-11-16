@@ -1411,24 +1411,34 @@ const isSameEvent = async (a, b) => {
     return { same: false, reason: `AI check failed (${e.message})`, failed: true };
   }
 };
+// Where each module keeps its signals (the same check works for Policy and Market Dynamics)
+const SIGNAL_TABLES = {
+  [POLICY_MODULE_ID]: { table: 'policy_signals', dateCol: 'source_published_date', globalCounts: false },
+  // Market Dynamics: most signals are "Global" (company and market news), so Global counts as a place there
+  [MARKET_DYNAMICS_MODULE_ID]: { table: 'market_dynamics_signals', dateCol: 'published_date', globalCounts: true },
+};
 async function findSameEventSignal(classification, clientId, moduleId, industry, article = {}) {
+  const where = SIGNAL_TABLES[moduleId];
+  if (!where) return null;
   const title = String(classification.signal_title || '').trim();
-  const myPlaces = standardPlaces(classification.country).filter((p) => p !== 'Unknown' && p !== 'Global');
+  let myPlaces = standardPlaces(classification.country).filter((p) => p !== 'Unknown' && p !== 'Global');
+  if (!myPlaces.length && where.globalCounts) myPlaces = ['Global'];
   if (!title || !myPlaces.length) return null;   // no country: cannot be sure, keep it
   try {
     const myDay = new Date(article.publishedDate || Date.now()).getTime() / 864e5;
     const since = new Date(Date.now() - 90 * 864e5).toISOString();
-    const { data, error } = await supabase.from('policy_signals')
-      .select('article_id, signal_title, summary, country, source_published_date, created_at')
+    const { data, error } = await supabase.from(where.table)
+      .select(`article_id, signal_title, summary, country, ${where.dateCol}, created_at`)
       .eq('client_id', clientId).eq('module_id', moduleId)
       .gte('created_at', since).order('created_at', { ascending: false }).limit(500);
     if (error) { console.log(`  [SameEvent] lookup error (non-fatal): ${error.message}`); return null; }
     const industryWords = new Set(plain(industry || '').split(' ').filter(Boolean).flatMap((w) => [w, w.replace(/s$/, '')]));
     let asked = 0;
     for (const row of data || []) {
-      const theirDay = new Date(row.source_published_date || row.created_at).getTime() / 864e5;
+      const theirDay = new Date(row[where.dateCol] || row.created_at).getTime() / 864e5;
       if (Number.isFinite(myDay) && Number.isFinite(theirDay) && Math.abs(myDay - theirDay) > SAME_EVENT_DAYS) continue;
-      const theirPlaces = standardPlaces(row.country);
+      let theirPlaces = standardPlaces(row.country);
+      if (where.globalCounts && !theirPlaces.filter((p) => p !== 'Unknown').length) theirPlaces = ['Global'];
       if (!myPlaces.some((p) => theirPlaces.includes(p))) continue;
       const h = compareHeadlines(title, row.signal_title, industryWords, { strict: true });
       if (h.same) {
@@ -1450,8 +1460,9 @@ async function findSameEventSignal(classification, clientId, moduleId, industry,
 const storeRelevantArticle = async (article, classification, clientId, industry, jobId, moduleId, submoduleId) => {
   console.log('moduleId being inserted:', JSON.stringify(moduleId), 'length:', moduleId ? moduleId.length : 'N/A');
 
-  // Step 0 (Policy) — the same event saved already under another headline? (no AI)
-  if (moduleId === POLICY_MODULE_ID) {
+  // Step 0 (Policy + Market Dynamics) — the same event saved already under another headline?
+  // (word rule; the AI is asked only when the words already match)
+  if (SIGNAL_TABLES[moduleId]) {
     const same = await findSameEventSignal(classification, clientId, moduleId, industry, article);
     if (same) return { skipped: true, duplicateOf: same.article_id, synthesizedTitle: classification.signal_title };
   }
@@ -1550,10 +1561,13 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
   // source), then creates/enriches the market_insights card, then links
   // the two together.
   if (moduleId === MARKET_DYNAMICS_MODULE_ID) {
+    // CHANGED: a failed signal row or card is no longer "saved anyway" (that left signals with no card
+    // and cards without their article). Any failure undoes the whole article and it is retried next run.
+    let signalRow = null;
     try {
       const { enrichOrCreateInsight } = require('./marketInsights');
 
-      const { data: signalRow, error: sigError } = await supabase
+      const { data: inserted, error: sigError } = await supabase
         .from('market_dynamics_signals')
         .insert({
           article_id: articleId,
@@ -1565,13 +1579,14 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
           summary: classification.summary || contentToChunk.slice(0, 300),
           organization: classification.organization || 'Unknown',
           category: classification.category,
-          country: classification.country,
+          country: standardPlaces(classification.country).join(', ') || 'Global',   // CHANGED: one way of writing countries
           source_url: article.url,
           published_date: article.publishedDate || new Date().toISOString(),
         })
         .select()
         .single();
-      if (sigError) console.error('[Storage] market_dynamics_signals insert error:', sigError.message);
+      if (sigError || !inserted) throw new Error(`market_dynamics_signals: ${sigError ? sigError.message : 'no row returned'}`);
+      signalRow = inserted;
 
       const result = await enrichOrCreateInsight(
         clientId,
@@ -1581,14 +1596,18 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
         articleId,
         contentToChunk,
         industry,
-        classification.organization
+        classification.organization,
+        { title: classification.signal_title, summary: classification.summary }
       );
 
-      if (signalRow && result.insightId) {
-        await supabase.from('market_dynamics_signals').update({ insight_id: result.insightId }).eq('id', signalRow.id);
-      }
+      if (!result || !result.insightId) throw new Error(`card not saved: ${(result && result.error) || 'unknown error'}`);
+      const { error: linkError } = await supabase.from('market_dynamics_signals').update({ insight_id: result.insightId }).eq('id', signalRow.id);
+      if (linkError) throw new Error(`linking signal to card: ${linkError.message}`);
     } catch (mdErr) {
-      console.error(`  [MarketDynamics] Failed to enrich/create insight for "${article.title}": ${mdErr.message} — skipping, continuing to next article`);
+      console.error(`  [MarketDynamics] save failed for "${article.title}": ${mdErr.message} - undoing, it is tried again next run`);
+      try { await require('./marketInsights').undoInsightMember(articleId); } catch (e) { console.error(`  [MarketDynamics] undo card member: ${e.message}`); }
+      await undoSave(articleId, 'market_dynamics_signals');
+      throw new Error(`save failed (market dynamics): ${mdErr.message}`);
     }
     return { stored: true, chunks: chunks.length };
   }

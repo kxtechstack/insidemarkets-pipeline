@@ -5,6 +5,11 @@ const { pipeline } = require('@xenova/transformers');
 
 
 const { QdrantClient } = require('@qdrant/js-client-rest');
+const { standardPlaces } = require('./placeNames');
+
+// one way of writing countries (same as Policy and CI)
+const standardCountry = (value) => standardPlaces(value).join(', ') || 'Global';
+
 
 const qdrantClient = new QdrantClient({
   url: process.env.QDRANT_URL,
@@ -93,7 +98,7 @@ const POLICY_COLLECTION = process.env.POLICY_QDRANT_COLLECTION || 'policy_articl
 const updateInsightCentroid = async (insightId) => {
   const { data: insight, error } = await supabase
     .from('market_insights')
-    .select('client_id, module_id, submodule_id, centroid_point_id')
+    .select('client_id, module_id, submodule_id, signal_id, centroid_point_id')
     .eq('id', insightId)
     .single();
 
@@ -164,6 +169,7 @@ const updateInsightCentroid = async (insightId) => {
         insight_id: insightId,
         module_id: insight.module_id,
         submodule_id: insight.submodule_id,
+        signal_id: insight.signal_id || null,
         client_id: insight.client_id,
         industry,
       },
@@ -347,97 +353,108 @@ const calculateRelevanceLevel = (signalCount) => {
   return 'Low';
 };
 
-// ── Find the most similar EXISTING card ──────────────────────────────────
-// TWO-TIER matching:
-//
-// TIER 1 — SAME COMPANY (deterministic, no embedding, always correct):
-// If this article's organization already has an active card in this exact
-// client/module/submodule scope, always reuse that card. A company's own
-// signals should never split apart just because the LLM phrased two
-// articles differently -- this guarantees they never do.
-//
-// TIER 2 — SAME THEME, different company (topic clustering):
-// Only runs if Tier 1 found nothing. Uses embedding similarity between
-// the incoming article and each candidate card's centroid, with a
-// dynamic threshold that rises as the candidate card grows.
-const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, articleEmbedding, organization) => {
-  // TIER 1 — exact organization match
-  if (organization && organization !== 'Unknown') {
-    // Tier 1: same organization → always reuse the most recent card.
-    // Removed the signal_id filter -- two articles about the same company
-    // often get classified into different signal_ids by the LLM, but they
-    // belong on the same card.
-    const { data: orgSignal, error: orgSignalError } = await supabase
-      .from('market_dynamics_signals')
-      .select('insight_id')
-      .eq('client_id', clientId)
-      .eq('module_id', moduleId)
-      .eq('submodule_id', submoduleId)
-      .eq('organization', organization)
-      .not('insight_id', 'is', null)
-      .order('published_date', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+// ── Find the card a new signal belongs to ─────────────────────────────────────────
+// CHANGED (16 Nov, card check: 24% of cards had signals of another sub-category, 48% had a signal
+// about something else, 38% had copies). New rule - a card is a group of signals about ONE theme
+// inside ONE sub-category (e.g. "Funding rounds announced"):
+//   1. candidates = this client's cards in the SAME sub-category, updated in the last FIT_DAYS days
+//   2. keep the closest FIT_MAX_CANDIDATES by meaning (score >= FIT_MIN_SCORE)
+//   3. no candidate -> new card (no AI). Candidates -> ONE small AI question: "which card is this
+//      signal part of, or none?" (same idea as Competitive Intelligence). AI fails -> new card
+//      (a separate card is better than a wrong merge).
+const FIT_DAYS = Number(process.env.MD_CARD_FIT_DAYS) || 30;
+const FIT_MIN_SCORE = Number(process.env.MD_CARD_FIT_MIN_SCORE) || 0.45;
+const FIT_MAX_CANDIDATES = 3;
 
-    if (orgSignalError) {
-      console.log(`  [CardMatch] TIER1 QUERY ERROR for "${organization}":`, orgSignalError.message, orgSignalError.details || '');
-    }
-    console.log(`  [CardMatch] TIER1 lookup params: client=${clientId} module=${moduleId} submodule=${submoduleId} org="${organization}" -> found=${!!(orgSignal && orgSignal.insight_id)}`);
+const CARD_FIT_DEFAULT = `A new market signal is below, and up to 3 existing cards. A card is a group of signals about ONE specific theme or trend (for example "Scalp-serum brands raise early-stage funding").
 
-    if (orgSignal && orgSignal.insight_id) {
-      const { data: card } = await supabase
-        .from('market_insights')
-        .select('*')
-        .eq('id', orgSignal.insight_id)
-        .single();
-      if (card) {
-        console.log(`  [CardMatch] TIER1 org match for "${organization}" -> card ${card.id} | title="${card.title}" | was_signals=${card.signal_count}`);
-        return card;
-      }
-    }
+Does the new signal belong to one of the cards? It belongs only when it is about the SAME specific theme as the signals already on that card (same kind of event, same kind of companies or products). A different theme, a different kind of company or a different kind of event is NOT the same card, even in the same industry.
+
+NEW SIGNAL: {signal_title}
+{signal_summary}
+
+{cards}
+
+Answer with JSON only: {"card": the card number, or 0 when it belongs to none, "reason": "one short sentence"}`;
+
+let cardFitPromptCache = null;
+const getCardFitPrompt = async () => {
+  if (cardFitPromptCache && Date.now() - cardFitPromptCache.at < 10 * 60e3) return cardFitPromptCache.text;
+  let text = CARD_FIT_DEFAULT;
+  try {
+    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'market_card_fit_v1').eq('is_active', true).maybeSingle();
+    if (data && data.prompt_template) text = data.prompt_template;
+  } catch (e) { /* use the default */ }
+  cardFitPromptCache = { at: Date.now(), text };
+  return text;
+};
+
+/** The AI picks the card (1..n) or 0. Returns { index, reason, failed? } */
+const askCardFit = async (signal, cards) => {
+  try {
+    const cardsText = cards.map((c, i) => `CARD ${i + 1}: ${c.title}\nSignals on it: ${(c.memberTitles || []).slice(0, 6).map((t) => `"${t}"`).join('; ') || 'none listed'}`).join('\n\n');
+    const prompt = (await getCardFitPrompt())
+      .replace(/{signal_title}/g, () => String(signal.title || '').slice(0, 300))
+      .replace(/{signal_summary}/g, () => String(signal.summary || '').slice(0, 500))
+      .replace(/{cards}/g, () => cardsText);
+    const raw = await callLLM([
+      { role: 'system', content: 'You are a strict classifier. You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0, max_tokens: 80, timeout: 60000 });
+    const parsed = repairAndParseJson(String(raw || '{}'));
+    const n = Number(parsed.card);
+    if (!Number.isInteger(n) || n < 0 || n > cards.length) return { index: -1, reason: `AI answered "${parsed.card}"`, failed: true };
+    return { index: n - 1, reason: String(parsed.reason || '').slice(0, 200) };
+  } catch (e) {
+    return { index: -1, reason: `AI check failed (${e.message})`, failed: true };
   }
+};
 
-  // TIER 2 — cross-company theme matching with dynamic threshold
-  const searchResult = await qdrantClient.search(INSIGHT_CENTROID_COLLECTION, {
-    vector: articleEmbedding,
-    filter: {
-      must: [
-        { key: 'client_id', match: { value: clientId } },
-        { key: 'module_id', match: { value: moduleId } },
-        { key: 'submodule_id', match: { value: submoduleId } },
-      ],
-    },
-    limit: 5,
-    with_payload: true,
-  });
+const findExistingInsight = async (clientId, moduleId, submoduleId, signalId, articleEmbedding, organization, signal = {}) => {
+  if (!signalId) return null;   // no sub-category: never join (it would land under the wrong column)
+  const since = new Date(Date.now() - FIT_DAYS * 864e5).toISOString();
+  const { data: recent, error } = await supabase
+    .from('market_insights')
+    .select('*')
+    .eq('client_id', clientId)
+    .eq('module_id', moduleId)
+    .eq('signal_id', signalId)
+    .gte('last_enriched_at', since)
+    .order('last_enriched_at', { ascending: false })
+    .limit(50);
+  if (error) { console.log(`  [CardMatch] lookup error: ${error.message} - new card`); return null; }
+  if (!recent || !recent.length) { console.log('  [CardMatch] no recent card in this sub-category - new card'); return null; }
 
-  if (searchResult.length === 0) {
-    console.log(`  [CardMatch] TIER2 no existing cards to compare against yet`);
+  // meaning score against each card (its centroid; title + summary when there is no centroid yet)
+  const withCentroid = recent.filter((c) => c.centroid_point_id);
+  const vecById = new Map();
+  if (withCentroid.length) {
+    try {
+      const pts = await qdrantClient.retrieve(INSIGHT_CENTROID_COLLECTION, { ids: withCentroid.map((c) => c.centroid_point_id), with_vector: true });
+      (pts || []).forEach((p) => vecById.set(String(p.id), p.vector));
+    } catch (e) { /* fall back to title + summary */ }
+  }
+  const scored = [];
+  for (const c of recent) {
+    let v = c.centroid_point_id ? vecById.get(String(c.centroid_point_id)) : null;
+    if (!v) v = await embedText(`${c.title || ''}. ${c.summary || ''}`);
+    scored.push({ card: c, score: cosineSimilarity(articleEmbedding, v) });
+  }
+  const top = scored.filter((x) => x.score >= FIT_MIN_SCORE).sort((a, b) => b.score - a.score).slice(0, FIT_MAX_CANDIDATES);
+  if (!top.length) {
+    console.log(`  [CardMatch] ${recent.length} recent card(s) in this sub-category, none close enough (best ${Math.max(...scored.map((x) => x.score)).toFixed(3)}) - new card`);
     return null;
   }
 
-  for (const candidate of searchResult) {
-    // Fetch the candidate card first so we can compute its dynamic threshold.
-    const { data: card } = await supabase
-      .from('market_insights')
-      .select('*')
-      .eq('id', candidate.payload.insight_id)
-      .single();
-    if (!card) continue;
-
-    const dynamicThreshold = computeDynamicThreshold(card.signal_count || 1);
-
-    if (candidate.score < dynamicThreshold) {
-      console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} below dynamic threshold=${dynamicThreshold.toFixed(3)} (card has ${card.signal_count} signals) — skipping`);
-      continue;
-    }
-
-    console.log(`  [CardMatch] TIER2 score=${candidate.score.toFixed(3)} dynamic_threshold=${dynamicThreshold.toFixed(3)} (card has ${card.signal_count} signals) card=${candidate.payload.insight_id}`);
-    return card;
+  // the signals already on the candidate cards (so the AI sees what each card is really about)
+  for (const t of top) {
+    const { data: members } = await supabase.from('market_dynamics_signals').select('signal_title')
+      .eq('insight_id', t.card.id).order('published_date', { ascending: false }).limit(6);
+    t.card.memberTitles = (members || []).map((m) => m.signal_title);
   }
-
-  console.log(`  [CardMatch] No match in either tier — creating new card`);
-  return null;
+  const ai = await askCardFit(signal, top.map((t) => t.card));
+  console.log(`  [CardMatch] candidates: ${top.map((t, i) => `${i + 1}) "${t.card.title}" ${t.score.toFixed(2)}`).join(' | ')} -> AI: ${ai.index >= 0 ? `card ${ai.index + 1}` : 'none'} (${ai.reason})`);
+  return ai.index >= 0 ? top[ai.index].card : null;
 };
 
 const cleanText = (text) => {
@@ -448,7 +465,9 @@ const cleanText = (text) => {
     .trim();
 };
 
-const generateInsightWriteup = async (existingCard, newArticleText, industry) => {
+// opts.members (used by scripts/cleanMarketData.js): write a card for a NEW group of saved signals
+// [{ signal_title, summary, organization }] instead of reading the card's signals from the database.
+const generateInsightWriteup = async (existingCard, newArticleText, industry, opts = {}) => {
   const { data: promptRow, error } = await supabase
     .from('prompts')
     .select('prompt_template')
@@ -461,7 +480,9 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
   }
 
   let companiesCovered = [];
-  if (existingCard) {
+  if (opts.members) {
+    companiesCovered = [...new Set(opts.members.map((s) => s.organization).filter((o) => o && o !== 'Unknown'))];
+  } else if (existingCard) {
     const { data: memberSignals } = await supabase
       .from('market_dynamics_signals')
       .select('organization')
@@ -469,8 +490,20 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
     companiesCovered = [...new Set((memberSignals || []).map(s => s.organization).filter(Boolean))];
   }
 
-  const existingText = existingCard
-    ? `EXISTING CARD:\nTitle: ${existingCard.title}\nSummary: ${existingCard.summary}\nCompanies already covered by this card so far: ${companiesCovered.join(', ') || 'unknown'}`
+  // CHANGED: the rewrite sees EVERY signal on the card (newest 15), so the title and summary describe
+  // all of them, not only the old card text + the newest article (the title drifted before)
+  let memberList = '';
+  if (opts.members) {
+    memberList = opts.members.slice(0, 15).map((m, i) => `${i + 1}. ${m.signal_title}${m.organization && m.organization !== 'Unknown' ? ` (${m.organization})` : ''}: ${String(m.summary || '').slice(0, 200)}`).join('\n');
+  } else if (existingCard) {
+    const { data: members } = await supabase.from('market_dynamics_signals').select('signal_title, summary, organization, published_date')
+      .eq('insight_id', existingCard.id).order('published_date', { ascending: false }).limit(15);
+    memberList = (members || []).map((m, i) => `${i + 1}. ${m.signal_title}${m.organization && m.organization !== 'Unknown' ? ` (${m.organization})` : ''}: ${String(m.summary || '').slice(0, 200)}`).join('\n');
+  }
+  const existingText = opts.members
+    ? `CARD BEING BUILT FROM THESE SAVED SIGNALS:\nCompanies covered: ${companiesCovered.join(', ') || 'unknown'}\nSIGNALS ON THIS CARD:\n${memberList}\nWrite the title and summary so they describe ALL the signals above (the newest one is repeated below).`
+    : existingCard
+    ? `EXISTING CARD:\nTitle: ${existingCard.title}\nSummary: ${existingCard.summary}\nCompanies already covered by this card so far: ${companiesCovered.join(', ') || 'unknown'}\nSIGNALS ALREADY ON THIS CARD:\n${memberList || 'none listed'}\nRewrite the title and summary so they describe ALL the signals above plus the new article, not only the newest one.`
     : 'EXISTING CARD: none — this is the first signal for this topic.';
 
   const finalPrompt = promptRow.prompt_template
@@ -491,70 +524,132 @@ const generateInsightWriteup = async (existingCard, newArticleText, industry) =>
     summary: cleanText(parsed.summary),
     short_summary: cleanText(parsed.short_summary),
     business_impact: Array.isArray(parsed.business_impact) ? parsed.business_impact.map(cleanText) : [],
-    country: parsed.country || existingCard?.country || 'Global',
+    country: standardCountry(parsed.country || existingCard?.country || 'Global'),
   };
 };
 
+// ── Card importance: how close the card is to the CLIENT (same rule as Policy) ─────────
+// CHANGED: before, importance only counted articles (7+ = Critical), so a busy topic that has
+// nothing to do with the client was "Critical". Now: client / competitor named, the client's
+// focus areas and countries - the same decideImpact the Policy module uses.
+const cardImpact = async (clientId, writeup, organizations) => {
+  const lrp = require('./llmRelevanceProcessor');   // loaded here (not at the top): the two files use each other
+  const profile = await lrp.getClientProfile(clientId);
+  const text = `${writeup.title || ''}. ${writeup.summary || ''} ${(writeup.business_impact || []).join(' ')} Companies: ${(organizations || []).join(', ')}`;
+  return lrp.decideImpact(
+    { signal_title: writeup.title, summary: writeup.summary, country: writeup.country, focus_matches: [], avoid_matches: [] },
+    { title: writeup.title || '', text },
+    profile,
+  );
+};
+
+// update / insert that falls back when the impact_reason column is not added yet
+const withoutReason = (row) => { const r = { ...row }; delete r.impact_reason; return r; };
+const missingReasonColumn = (error) => error && /impact_reason/.test(error.message || '');
+
+/** Takes an article back out of its card (used when saving the article fails after the card step). */
+const undoInsightMember = async (articleId) => {
+  const { data: members } = await supabase.from('market_insight_members').select('insight_id').eq('article_id', articleId);
+  await supabase.from('market_insight_members').delete().eq('article_id', articleId);
+  for (const m of members || []) {
+    const { data: card } = await supabase.from('market_insights').select('id, signal_count').eq('id', m.insight_id).maybeSingle();
+    if (!card) continue;
+    if ((card.signal_count || 1) <= 1) {
+      try { await deleteInsightCentroid(card.id); } catch (e) { /* nothing to delete */ }
+      await supabase.from('market_insights').delete().eq('id', card.id);
+    } else {
+      await supabase.from('market_insights').update({ signal_count: card.signal_count - 1 }).eq('id', card.id);
+    }
+  }
+};
+
 // Main entry point — called once per relevant Market Dynamics article.
-const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, organization) => {
+const enrichOrCreateInsight = async (clientId, moduleId, submoduleId, signalId, articleId, articleText, industry, organization, signal = {}) => {
   await setupInsightCentroidCollection();
   const articleEmbedding = await embedText((articleText || '').slice(0, 4000));
-  const existing = await findExistingInsight(clientId, moduleId, submoduleId, signalId, articleEmbedding, organization);
+  const existing = await findExistingInsight(clientId, moduleId, submoduleId, signalId, articleEmbedding, organization,
+    { title: signal.title, summary: signal.summary || String(articleText || '').slice(0, 500) });
 
+  // the AI write-up first: if it fails, nothing has been changed yet
   const writeup = await generateInsightWriteup(existing, articleText, industry);
   const category = await getDimensionName(submoduleId);
 
+  // companies on the card (for the importance rule)
+  let organizations = organization && organization !== 'Unknown' ? [organization] : [];
   if (existing) {
-    await supabase
-      .from('market_insights')
-      .update({
-        title: writeup.title,
-        summary: writeup.summary,
-        short_summary: writeup.short_summary,
-        business_impact: writeup.business_impact,
-        country: writeup.country,
-        category,
-        signal_count: existing.signal_count + 1,
-        relevance_level: calculateRelevanceLevel(existing.signal_count + 1),
-        last_enriched_at: new Date().toISOString(),
-      })
-      .eq('id', existing.id);
-
-    await supabase.from('market_insight_members').insert({ insight_id: existing.id, article_id: articleId });
-    await updateInsightCentroid(existing.id);
-    console.log(`  [MarketDynamics] Enriched existing card "${writeup.title}" (now ${existing.signal_count + 1} signals)`);
-    return { status: 'enriched', insightId: existing.id };
+    const { data: memberSignals } = await supabase.from('market_dynamics_signals').select('organization').eq('insight_id', existing.id);
+    organizations = [...new Set([...organizations, ...(memberSignals || []).map((s) => s.organization).filter((o) => o && o !== 'Unknown')])];
   }
+  const impact = await cardImpact(clientId, writeup, organizations);
+  console.log(`  [Impact] card: ${impact.impact_level} - ${impact.impact_reason}`);
 
-  const { data: newInsight, error } = await supabase
-    .from('market_insights')
-    .insert({
-      client_id: clientId,
-      module_id: moduleId,
-      submodule_id: submoduleId,
-      signal_id: signalId,
+  const centroidSafe = async (id) => {   // a centroid problem does not undo the card (it is rebuilt next time)
+    try { await updateInsightCentroid(id); } catch (e) { console.log(`  [Centroid] could not update for ${id}: ${e.message}`); }
+  };
+
+  if (existing) {
+    const patch = {
       title: writeup.title,
       summary: writeup.summary,
       short_summary: writeup.short_summary,
       business_impact: writeup.business_impact,
       country: writeup.country,
       category,
-      signal_count: 1,
-      relevance_level: calculateRelevanceLevel(1),
+      signal_count: existing.signal_count + 1,
+      relevance_level: impact.impact_level,
+      impact_reason: impact.impact_reason,
       last_enriched_at: new Date().toISOString(),
-    })
-    .select()
-    .single();
+    };
+    let { error: upErr } = await supabase.from('market_insights').update(patch).eq('id', existing.id);
+    if (missingReasonColumn(upErr)) ({ error: upErr } = await supabase.from('market_insights').update(withoutReason(patch)).eq('id', existing.id));
+    if (upErr) return { status: 'error', error: `card update: ${upErr.message}` };
 
-  if (error) {
-    console.error('  [MarketDynamics] Failed to create insight:', error.message);
-    return { status: 'error', error: error.message };
+    const { error: memErr } = await supabase.from('market_insight_members').insert({ insight_id: existing.id, article_id: articleId });
+    if (memErr) {
+      // put the card back as it was
+      const back = { title: existing.title, summary: existing.summary, short_summary: existing.short_summary, business_impact: existing.business_impact,
+        country: existing.country, category: existing.category, signal_count: existing.signal_count, relevance_level: existing.relevance_level,
+        last_enriched_at: existing.last_enriched_at };
+      await supabase.from('market_insights').update(back).eq('id', existing.id);
+      return { status: 'error', error: `card member: ${memErr.message}` };
+    }
+    await centroidSafe(existing.id);
+    console.log(`  [MarketDynamics] Enriched existing card "${writeup.title}" (now ${existing.signal_count + 1} signals)`);
+    return { status: 'enriched', insightId: existing.id };
   }
 
-  await supabase.from('market_insight_members').insert({ insight_id: newInsight.id, article_id: articleId });
-  await updateInsightCentroid(newInsight.id);
+  const newRow = {
+    client_id: clientId,
+    module_id: moduleId,
+    submodule_id: submoduleId,
+    signal_id: signalId,
+    title: writeup.title,
+    summary: writeup.summary,
+    short_summary: writeup.short_summary,
+    business_impact: writeup.business_impact,
+    country: writeup.country,
+    category,
+    signal_count: 1,
+    relevance_level: impact.impact_level,
+    impact_reason: impact.impact_reason,
+    last_enriched_at: new Date().toISOString(),
+  };
+  let { data: newInsight, error } = await supabase.from('market_insights').insert(newRow).select().single();
+  if (missingReasonColumn(error)) ({ data: newInsight, error } = await supabase.from('market_insights').insert(withoutReason(newRow)).select().single());
+
+  if (error || !newInsight) {
+    console.error('  [MarketDynamics] Failed to create insight:', error ? error.message : 'no row returned');
+    return { status: 'error', error: error ? error.message : 'no row returned' };
+  }
+
+  const { error: memErr } = await supabase.from('market_insight_members').insert({ insight_id: newInsight.id, article_id: articleId });
+  if (memErr) {
+    await supabase.from('market_insights').delete().eq('id', newInsight.id);
+    return { status: 'error', error: `card member: ${memErr.message}` };
+  }
+  await centroidSafe(newInsight.id);
   console.log(`  [MarketDynamics] Created new card "${writeup.title}"`);
   return { status: 'created', insightId: newInsight.id };
 };
 
-module.exports = { findExistingInsight, generateInsightWriteup, enrichOrCreateInsight, setupInsightCentroidCollection, updateInsightCentroid, findSimilarInsights, deleteInsightCentroid };
+module.exports = { getDimensionName, askCardFit, findExistingInsight, generateInsightWriteup, enrichOrCreateInsight, setupInsightCentroidCollection, updateInsightCentroid, findSimilarInsights, deleteInsightCentroid, undoInsightMember, cardImpact, calculateRelevanceLevel };
