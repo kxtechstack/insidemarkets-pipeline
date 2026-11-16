@@ -109,6 +109,35 @@ const REGION_MEMBERS = {
   'North America': ['United States', 'Canada', 'Mexico'],
 };
 
+// All other countries (standard name = how it is written here; lower case is matched).
+// Without these, "Nigeria, United Kingdom" could not be told apart from "United States, Oregon".
+const MORE_COUNTRIES = `Afghanistan|Albania|Algeria|Andorra|Angola|Antigua and Barbuda|Armenia|Azerbaijan|Bahamas|Barbados|Belarus|Belize|Benin|
+Bermuda|Bhutan|Bolivia|Bosnia and Herzegovina|Botswana|Brunei|Bulgaria|Burkina Faso|Burundi|Cambodia|Cameroon|Cape Verde|Cayman Islands|
+Central African Republic|Chad|Comoros|Congo|Costa Rica|Croatia|Cuba|Cyprus|Democratic Republic of the Congo|Djibouti|Dominica|
+Dominican Republic|Ecuador|El Salvador|Equatorial Guinea|Eritrea|Estonia|Eswatini|Ethiopia|Fiji|Gabon|Gambia|Georgia|Ghana|Grenada|
+Guatemala|Guinea|Guinea-Bissau|Guyana|Haiti|Honduras|Iceland|Iran|Iraq|Ivory Coast|Jamaica|Jersey|Guernsey|Isle of Man|Kazakhstan|
+Kiribati|Kosovo|Kyrgyzstan|Laos|Latvia|Lebanon|Lesotho|Liberia|Libya|Liechtenstein|Lithuania|Luxembourg|Macau|Madagascar|Malawi|
+Maldives|Mali|Malta|Marshall Islands|Mauritania|Mauritius|Micronesia|Moldova|Monaco|Mongolia|Montenegro|Mozambique|Myanmar|Namibia|
+Nauru|Nepal|Nicaragua|Niger|North Korea|North Macedonia|Palau|Palestine|Panama|Papua New Guinea|Paraguay|Peru|Puerto Rico|Rwanda|
+Saint Kitts and Nevis|Saint Lucia|Saint Vincent and the Grenadines|Samoa|San Marino|Senegal|Serbia|Seychelles|Sierra Leone|Slovakia|
+Slovenia|Solomon Islands|Somalia|South Sudan|Sudan|Suriname|Syria|Tajikistan|Tanzania|Timor-Leste|Togo|Tonga|Trinidad and Tobago|
+Tunisia|Turkmenistan|Tuvalu|Uganda|Uruguay|Uzbekistan|Vanuatu|Venezuela|Yemen|Zambia|Zimbabwe`.split('|').map((x) => x.trim()).filter(Boolean);
+const MORE_ALIASES = {
+  'Ivory Coast': ["cote d'ivoire", 'côte d\u2019ivoire', "côte d'ivoire"],
+  'Brunei': ['brunei darussalam'],
+  'Saint Kitts and Nevis': ['st. kitts and nevis', 'st kitts and nevis'],
+  'Timor-Leste': ['east timor'],
+  'Czech Republic': ['czechia'],
+  'Democratic Republic of the Congo': ['dr congo', 'drc'],
+  'Laos': ['lao pdr'],
+};
+for (const name of MORE_COUNTRIES) if (!PLACES[name]) PLACES[name] = [name.toLowerCase()];
+for (const [name, forms] of Object.entries(MORE_ALIASES)) PLACES[name] = [...(PLACES[name] || [name.toLowerCase()]), ...forms];
+
+// region names (everything else in PLACES is a country)
+const REGIONS = new Set(['Global', 'European Union', 'Europe', 'GCC', 'Middle East', 'ASEAN', 'Asia Pacific', 'Africa', 'Latin America', 'North America']);
+const isCountry = (name) => Boolean(PLACES[name]) && !REGIONS.has(name);
+
 const key = (text) => String(text || '').toLowerCase().normalize('NFC')
   .replace(/[’`]/g, "'").replace(/\s+/g, ' ').replace(/^the /, '').trim().replace(/[.,;:]+$/, '');
 
@@ -133,7 +162,10 @@ function standardPlace(text) {
 
 /** A list or a "UAE, KSA and Qatar" string -> standard names, no repeats. */
 function standardPlaces(value) {
-  const items = Array.isArray(value) ? value : String(value || '').split(/[,;/]|\band\b|&/i);
+  // split on commas first; split on "and" / "&" only when the part is not itself a known name
+  // ("Bosnia and Herzegovina", "St. Kitts and Nevis" stay whole; "UAE and Morocco" is split)
+  const items = Array.isArray(value) ? value : String(value || '').split(/[,;/]/)
+    .flatMap((part) => (LOOKUP.has(key(part)) ? [part] : part.split(/\band\b|&/i)));
   const out = [];
   for (const item of items) {
     const p = standardPlace(item);
@@ -151,4 +183,4 @@ function placeCovers(a, b) {
   return (REGION_MEMBERS[A] || []).includes(B) || (REGION_MEMBERS[B] || []).includes(A);
 }
 
-module.exports = { standardPlace, standardPlaces, placeCovers, PLACES, REGION_MEMBERS };
+module.exports = { standardPlace, standardPlaces, placeCovers, isCountry, PLACES, REGIONS, REGION_MEMBERS };

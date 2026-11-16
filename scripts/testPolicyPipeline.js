@@ -574,6 +574,45 @@ async function main() {
     await check('real news with "how" inside is kept ("FDA explains how brands must report...")', async () => g('FDA explains how brands must report adverse events') && g('Delhi Raids Unlicensed Cosmetic Units'));
   }
 
+  log('\n── Old data cleanup (scripts/cleanPolicyData.js), dry plan ──');
+  resetData();
+  {
+    const clean = require(path.join(__dirname, 'cleanPolicyData.js'));
+    const clientById = new Map([[CLIENT, { id: CLIENT, company_name: 'Northwind Beauty', industry: 'Cosmetics' }]]);
+    let n = 0;
+    const row = (over) => ({ id: `r${++n}`, article_id: `a${n}`, client_id: CLIENT, summary: '', category: 'Regulatory Risk', source_type: 'News Report',
+      country: 'United Kingdom', impact_level: 'High', impact_reason: null, is_duplicate: false,
+      created_at: `2026-10-${String(n).padStart(2, '0')}T00:00:00Z`, source_published_date: `2026-10-${String(n).padStart(2, '0')}T00:00:00Z`, ...over });
+    const rows = [
+      row({ signal_title: 'UK bans microbeads in rinse-off cosmetics' }),                                   // kept
+      row({ signal_title: 'UK bans microbeads in rinse-off cosmetics' }),                                   // same title -> delete
+      row({ signal_title: 'Delhi Government Cracks Down on Unlicensed Cosmetic Manufacturing', country: 'India' }), // kept
+      row({ signal_title: 'Delhi Raids Unlicensed Cosmetic Manufacturing Units', country: 'India, South Asia, Global' }), // near copy -> delete
+      row({ signal_title: 'Brand X buys Brand Y', category: 'Mergers and Acquisitions' }),                  // not policy -> delete
+      row({ signal_title: 'Old copy', is_duplicate: true }),                                                // marked before -> delete
+      row({ signal_title: 'Rule for a dead client', client_id: 'gone-client' }),                            // dead client -> delete
+      row({ signal_title: 'EU fines Glowly over sunscreen claims', country: 'European Union, EU, Global', category: 'Regulatory Enforcement', source_type: 'Regulatory Update' }),
+      row({ signal_title: 'Thailand proposes draft rule on cosmetic notification fees', country: 'Thailand, Asia, Global' }),
+    ];
+    const plan = await clean.buildPlan(rows, clientById);
+    const gone = (id) => plan.remove.some((r) => r.row.article_id === id);
+    const upd = (id) => (plan.updates.find((u) => u.row.article_id === id) || {}).patch || {};
+    await check('cleanup: first copy kept, same-title copy deleted', async () => (!gone('a1') && gone('a2')) || plan.remove.map((r) => r.why));
+    await check('cleanup: same event under another title (same country) deleted', async () => (!gone('a3') && gone('a4')) || plan.remove.map((r) => r.why));
+    await check('cleanup: M&A, old marked copy and dead client deleted', async () => (gone('a5') && gone('a6') && gone('a7')) || plan.remove.map((r) => r.why));
+    await check('cleanup: exactly 5 rows to delete (nothing else)', async () => plan.remove.length === 5 || plan.remove.map((r) => r.why));
+    await check('cleanup: "Regulatory Enforcement" -> "Enforcement & Penalties", "Regulatory Update" -> "Government Announcement"', async () =>
+      (upd('a8').category === 'Enforcement & Penalties' && upd('a8').source_type === 'Government Announcement') || upd('a8'));
+    await check('cleanup: competitor named -> impact recomputed, reason names the competitor', async () =>
+      (['Critical', 'High'].includes(upd('a8').impact_level || 'High') && /Glowly/.test(upd('a8').impact_reason || '')) || upd('a8'));
+    await check('cleanup: old vague "Regulatory Risk" + "proposes draft" title -> "Consultation & Proposal"', async () => upd('a9').category === 'Consultation & Proposal' || upd('a9'));
+    await check('cleanup: country "Thailand, Asia, Global" -> "Thailand"', async () => upd('a9').country === 'Thailand' || upd('a9'));
+    await check('cleanup: country "European Union, EU, Global" -> "European Union"', async () => upd('a8').country === 'European Union' || upd('a8'));
+    await check('cleanup: country "United States, Oregon" -> "United States"; "Nigeria, United Kingdom" kept both', async () =>
+      (clean.cleanCountry('United States, Oregon') === 'United States' && clean.cleanCountry('Nigeria, United Kingdom') === 'Nigeria, United Kingdom') || [clean.cleanCountry('United States, Oregon'), clean.cleanCountry('Nigeria, United Kingdom')]);
+    await check('cleanup: the dry plan changed nothing in the database', async () => signals().length === 0);
+  }
+
   log('\n── P5: a failed save leaves nothing half-saved ──');
   resetData();
   aiScript.set('[fail-save]', { answer: relevant({ signal_title: 'Rule that fails to save' }), synthTitle: 'Rule That Fails To Save' });

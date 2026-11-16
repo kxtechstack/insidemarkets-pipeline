@@ -2139,4 +2139,5 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
   getClientProfile,
   profileForPrompt,
   POLICY_CATEGORIES,
+  undoSave,          // used by scripts/cleanPolicyData.js (removes one article everywhere)
 };
