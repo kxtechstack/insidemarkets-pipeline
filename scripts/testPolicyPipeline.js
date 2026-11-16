@@ -144,6 +144,7 @@ class FakeQdrant {
 // ═════════════════════════════════════════════════════════════════════════
 const aiScript = new Map();   // marker in the article title -> { gate, answer, synthTitle }
 const promptsSeen = [];
+const differentEvents = ['Kings County'];   // the fake "same event?" AI says DIFFERENT when the prompt has one of these
 async function fakeCallLLM(messages) {
   const prompt = messages.map((m) => m.content).join('\n');
   promptsSeen.push(prompt);
@@ -152,6 +153,10 @@ async function fakeCallLLM(messages) {
   const s = item ? item[1] : {};
   if (prompt.includes('You check which industry')) {
     return JSON.stringify({ about_industry: s.gate !== false, main_industry: s.gate === false ? 'Banking' : 'Cosmetics', reason: 'test' });
+  }
+  if (prompt.includes('Do they report the SAME specific event')) {
+    const diff = differentEvents.some((x) => prompt.includes(x));
+    return JSON.stringify({ same: !diff, reason: diff ? 'different county' : 'same event' });
   }
   if (prompt.includes('First line must be: Title:')) {
     return `${s.synthFormat || 'Title: '}${s.synthTitle || 'A rewritten title for the test'}${s.synthFormat ? '**' : ''}\n\n${'This is the rewritten body of the article in new words. '.repeat(12)}`;
@@ -554,6 +559,14 @@ async function main() {
   await check('two DIFFERENT Indonesia enforcement stories (both "crack down") -> both saved', async () => signals().filter((x) => x.country === 'Indonesia').length === 2 || signals().map((x) => x.signal_title));
   await run([art('ev-e', 'Malaysia NPRA seizes unregistered cosmetics from home factories in Selangor')], SUB_A);
   await check('same words but ANOTHER country (Malaysia vs India) -> saved', async () => signals().some((x) => x.country === 'Malaysia') || signals().map((x) => x.signal_title));
+  // 16 Nov dry run: words alike, different county = different news. The AI is asked (only now) and says DIFFERENT.
+  aiScript.set('[cty-a]', { answer: relevant({ signal_title: 'Mills County Approves Conditional Use Permit for Large-Scale Solar Project', country: 'United States', category: 'Licensing & Approvals' }), synthTitle: 'Mills County Approves Solar Permit' });
+  aiScript.set('[cty-b]', { answer: relevant({ signal_title: 'Kings County Approves Conditional Use Permit Amendment for Solar Project', country: 'United States', category: 'Licensing & Approvals' }), synthTitle: 'Kings County Approves Solar Permit Amendment' });
+  await run([art('cty-a', 'Mills County board backs large solar farm permit')], SUB_A);
+  const askedBefore = promptsSeen.filter((p) => p.includes('Do they report the SAME specific event')).length;
+  await run([art('cty-b', 'Kings County amends conditional use permit for Westlands solar')], SUB_A);
+  await check('same words, different county: AI says different -> BOTH saved', async () => signals().filter((x) => /County/.test(x.signal_title)).length === 2 || signals().map((x) => x.signal_title));
+  await check('the AI "same event?" question was asked once (only because the words matched)', async () => promptsSeen.filter((p) => p.includes('Do they report the SAME specific event')).length - askedBefore === 1);
 
   log('\n── Real run (13 Nov): Qdrant drops the connection once ──');
   resetData();
@@ -594,7 +607,12 @@ async function main() {
       row({ signal_title: 'EU fines Glowly over sunscreen claims', country: 'European Union, EU, Global', category: 'Regulatory Enforcement', source_type: 'Regulatory Update' }),
       row({ signal_title: 'Thailand proposes draft rule on cosmetic notification fees', country: 'Thailand, Asia, Global' }),
     ];
-    const plan = await clean.buildPlan(rows, clientById);
+    let confirms = 0;
+    const fakeConfirm = async (a, b) => { confirms++; return /Kings County/.test(a.signal_title + b.signal_title) ? { same: false, reason: 'different county' } : { same: true, reason: 'same event' }; };
+    const noAi = await clean.buildPlan(rows, clientById);
+    await check('cleanup without AI: the near copy is KEPT (only exact copies deleted)', async () => !noAi.remove.some((r) => r.row.article_id === 'a4') || noAi.remove.map((r) => r.why));
+    const plan = await clean.buildPlan(rows, clientById, { confirmSame: fakeConfirm });
+    await check('cleanup: the AI was asked only for the word match (1 time)', async () => confirms === 1 || confirms);
     const gone = (id) => plan.remove.some((r) => r.row.article_id === id);
     const upd = (id) => (plan.updates.find((u) => u.row.article_id === id) || {}).patch || {};
     await check('cleanup: first copy kept, same-title copy deleted', async () => (!gone('a1') && gone('a2')) || plan.remove.map((r) => r.why));
@@ -611,6 +629,45 @@ async function main() {
     await check('cleanup: country "United States, Oregon" -> "United States"; "Nigeria, United Kingdom" kept both', async () =>
       (clean.cleanCountry('United States, Oregon') === 'United States' && clean.cleanCountry('Nigeria, United Kingdom') === 'Nigeria, United Kingdom') || [clean.cleanCountry('United States, Oregon'), clean.cleanCountry('Nigeria, United Kingdom')]);
     await check('cleanup: the dry plan changed nothing in the database', async () => signals().length === 0);
+    // 16 Nov dry run: same words, but months apart = new news on the same topic, not a copy
+    const far = await clean.buildPlan([
+      row({ signal_title: 'Madras High Court Rejects Plea for Mandatory Microplastic Warning Labels', country: 'India', source_published_date: '2026-06-01T00:00:00Z', created_at: '2026-06-01T00:00:00Z' }),
+      row({ signal_title: 'Madras High Court Orders Mandatory Microplastic Labeling for Cosmetics', country: 'India', source_published_date: '2026-09-15T00:00:00Z', created_at: '2026-09-15T00:00:00Z' }),
+    ], clientById, { confirmSame: fakeConfirm });
+    await check('cleanup: same words but published months apart -> both kept', async () => far.remove.length === 0 || far.remove.map((r) => r.why));
+    const counties = await clean.buildPlan([
+      row({ signal_title: 'Mills County Approves Conditional Use Permit for Large-Scale Solar Project', country: 'United States' }),
+      row({ signal_title: 'Kings County Approves Conditional Use Permit Amendment for Solar Project', country: 'United States' }),
+    ], clientById, { confirmSame: fakeConfirm });
+    await check('cleanup: same words, different county, AI says different -> both kept and listed for review', async () => (counties.remove.length === 0 && counties.notSameSamples.length === 1) || counties.remove.map((r) => r.why));
+    // step 4: rows about another industry (the AI question is faked here)
+    const mixed = [
+      row({ signal_title: 'California introduces voluntary label for non-ultraprocessed foods [food]', country: 'United States' }),
+      row({ signal_title: 'UK limits retinol strength in face creams', country: 'United Kingdom' }),
+      row({ signal_title: 'Government proposes rules for online gaming [ai-down]', country: 'India' }),
+    ];
+    const plan2 = await clean.buildPlan(mixed, clientById);
+    let calls = 0;
+    const fakeCheck = async (article) => {
+      calls++;
+      if (/\[ai-down\]/.test(article.title)) return { pass: true, reason: 'industry check failed (timeout) - not blocked' };
+      return /\[food\]/.test(article.title) ? { pass: false, main_industry: 'Food', reason: 'food labelling' } : { pass: true, main_industry: 'Cosmetics', reason: 'cosmetics rule' };
+    };
+    const cache = {};
+    await clean.industryStep(plan2, mixed, clientById, { checkFn: fakeCheck, textOf: async () => new Map(), cache });
+    const why2 = plan2.remove.map((r) => r.why).join(' | ');
+    await check('cleanup: food label row for a cosmetics client -> deleted (not the client industry)', async () => /Food/.test(why2) || why2);
+    await check('cleanup: cosmetics row kept, and the row where the AI failed is KEPT', async () => plan2.remove.length === 1 || why2);
+    await check('cleanup: AI answers saved; a failed AI answer is not saved (asked again next time)', async () => Object.keys(cache).length === 2 || cache);
+    const before = calls;
+    const plan3 = await clean.buildPlan(mixed, clientById);
+    await clean.industryStep(plan3, mixed, clientById, { checkFn: fakeCheck, textOf: async () => new Map(), cache });
+    const named = [row({ signal_title: 'Thailand bans mercury in cosmetic creams', country: 'Thailand' })];
+    const plan4 = await clean.buildPlan(named, clientById);
+    const callsBefore = calls;
+    await clean.industryStep(plan4, named, clientById, { checkFn: fakeCheck, textOf: async () => new Map(), cache: {} });
+    await check('cleanup: a row that names the industry ("cosmetic") is NOT sent to the AI (saves credit)', async () => calls === callsBefore || calls - callsBefore);
+    await check('cleanup: second run (or --apply) reuses saved answers: only the failed row is asked again', async () => (calls - before === 1 && plan3.remove.length === 1) || [calls - before, plan3.remove.length]);
   }
 
   log('\n── P5: a failed save leaves nothing half-saved ──');

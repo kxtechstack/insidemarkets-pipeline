@@ -10,8 +10,16 @@
  *   1. Rows of deleted clients (client_id no longer in admin.clients)  -> deleted everywhere
  *   2. Rows that are not policy news (category "Mergers and Acquisitions" ...)  -> deleted everywhere
  *   3. Copies: the same title saved again for the same client (first one kept), and near-copies
- *      (same client, same country, within 30 days, same words by the strict no-AI rule)  -> deleted everywhere
- *   4. Kept rows:
+ *      (same client, same country, published within 7 days, same words by the strict word rule,
+ *      AND the AI confirms it is the same event - the same check the pipeline does)  -> deleted everywhere
+ *      AI answers are saved in scripts/logs/policySameEventCheck.json (reused by --apply).
+ *   4. Rows NOT about the client's industry (food labels for a cosmetics client...)  -> deleted everywhere
+ *      Checked with the SAME AI industry question the pipeline asks for new articles (one short call per
+ *      row). The answers are saved in scripts/logs/policyIndustryCheck.json, so the dry run asks the AI,
+ *      and --apply (or a second dry run) reuses the saved answers - no second AI call, same result.
+ *      If the AI fails for a row, that row is KEPT (and asked again next time).
+ *      Skip this step with --skip-industry (fast dry run without AI).
+ *   5. Kept rows:
  *        category     -> one of the 15 general categories (old names mapped; the vague old
  *                        "Regulatory Risk" type is sorted by the words of its title)
  *        source type  -> one of the 9 allowed source types
@@ -49,8 +57,36 @@ const { compareHeadlines } = require('../modules/topicDedup');
 const { standardPlaces, isCountry, REGIONS } = require('../modules/placeNames');
 
 const APPLY = process.argv.includes('--apply');
+const SKIP_AI = process.argv.includes('--skip-ai');   // no AI at all: near copies and other-industry rows are kept
+const SKIP_INDUSTRY = SKIP_AI || process.argv.includes('--skip-industry');
+const SAME_CACHE_FILE = path.join(__dirname, 'logs', 'policySameEventCheck.json');
+const INDUSTRY_CACHE_FILE = path.join(__dirname, 'logs', 'policyIndustryCheck.json');
+const INDUSTRY_PARALLEL = 3;   // rows prepared at a time; the AI itself is limited by aiSlot below
+
+// ── AI speed limit (16 Nov: 7 clients at once hit the AI provider's limit, "429 rate limited") ──
+// At most AI_PARALLEL questions at the same time, and at least AI_GAP_MS between two questions.
+const AI_PARALLEL = Number(process.env.CLEANUP_AI_PARALLEL) || 2;
+// Novita limit for our model: 30 requests per minute -> one question every 2.1 seconds (about 28 a minute).
+// If the limit is raised in Novita (Quotas & Limits -> Increase Limit), set CLEANUP_AI_GAP_MS lower in .env.
+const AI_GAP_MS = Number(process.env.CLEANUP_AI_GAP_MS) || 2100;
+let aiActive = 0; let aiLast = 0;
+const aiWaiting = [];
+async function aiSlot(fn) {
+  while (aiActive >= AI_PARALLEL) await new Promise((r) => aiWaiting.push(r));
+  aiActive++;
+  try {
+    const wait = aiLast + AI_GAP_MS - Date.now();
+    aiLast = Math.max(Date.now(), aiLast + AI_GAP_MS);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    return await fn();
+  } finally {
+    aiActive--;
+    const next = aiWaiting.shift();
+    if (next) next();
+  }
+}
 const MODULE_ID = proc.POLICY_MODULE_ID;
-const NEAR_COPY_DAYS = 30;
+const NEAR_COPY_DAYS = 7;    // same rule as the live same-event check (published within 7 days)
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── report ────────────────────────────────────────────────────────────────
@@ -126,11 +162,15 @@ async function inBatches(items, size, fn, label) {
 const quiet = (fn) => { const log = console.log; console.log = () => {}; try { return fn(); } finally { console.log = log; } };
 
 // ── the plan: what to delete and what to update (changes nothing) ─────────
-async function buildPlan(rows, clientById) {
+// confirmSame(rowA, rowB) -> Promise<{ same, reason, failed? }>: the AI "same event?" question, asked only
+// when the words already say "same" (the same question the pipeline asks). Without it (no AI) a near
+// copy is NOT deleted - safe: only exact same titles are deleted then.
+async function buildPlan(rows, clientById, { confirmSame = null } = {}) {
   const remove = [];          // { row, why }
   const updates = [];         // { row, patch }
   const nearSamples = [];
-  const count = { dead: 0, notPolicy: 0, markedBefore: 0, exact: 0, near: 0 };
+  const count = { dead: 0, notPolicy: 0, markedBefore: 0, exact: 0, near: 0, nearNotSame: 0, nearAiFailed: 0 };
+  const notSameSamples = [];
   const catMoves = new Map(); const srcMoves = new Map(); const impactMoves = new Map();
   const countrySamples = new Map();
   const bump = (m, k) => m.set(k, (m.get(k) || 0) + 1);
@@ -142,12 +182,13 @@ async function buildPlan(rows, clientById) {
     byClient.get(r.client_id).push(r);
   }
 
-  for (const [clientId, list] of byClient) {
+  // clients run side by side (each client's own rows stay in order: the first one is kept)
+  await Promise.all([...byClient.entries()].map(async ([clientId, list]) => {
     const client = clientById.get(clientId);
     if (!client) {
       list.forEach((row) => remove.push({ row, why: 'client no longer exists' }));
       count.dead += list.length;
-      continue;
+      return;
     }
     const profile = await proc.getClientProfile(clientId);
     const industryWords = new Set(String(client.industry || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).flatMap((w) => [w, w.replace(/s$/, '')]));
@@ -169,18 +210,29 @@ async function buildPlan(rows, clientById) {
       const country = cleanCountry(row.country);
       const places = country.split(', ').filter((p) => p !== 'Unknown' && p !== 'Global');
       let near = null;
+      let asked = 0;
+      const d = (r) => String(r.source_published_date || r.created_at).slice(0, 10);
       for (const p of places) {
         for (const k of keptByCountry.get(p) || []) {
           if (Math.abs(dayOf(k) - dayOf(row)) > NEAR_COPY_DAYS) continue;
           const h = compareHeadlines(row.signal_title, k.signal_title, industryWords, { strict: true });
-          if (h.same) { near = { k, h }; break; }
+          if (!h.same) continue;
+          if (!confirmSame || asked >= 2) break;           // no AI: never delete a near copy
+          asked++;
+          const ai = await confirmSame(row, k);
+          if (ai.same) { near = { k, h, ai }; break; }
+          if (ai.failed) count.nearAiFailed++;
+          else {
+            count.nearNotSame++;
+            notSameSamples.push(`  [${client.company_name}] ${d(row)} "${row.signal_title}"\n      # ${d(k)} "${k.signal_title}"   (AI: ${ai.reason})`);
+          }
         }
-        if (near) break;
+        if (near || asked >= 2) break;
       }
       if (near) {
-        remove.push({ row, why: `same event as ${near.k.article_id} (${near.h.shared.join(', ')})` });
+        remove.push({ row, why: `same event as ${near.k.article_id} (${near.h.shared.join(', ')}; AI: ${near.ai.reason})` });
         count.near++;
-        if (nearSamples.length < 60) nearSamples.push(`  [${client.company_name}] "${row.signal_title}"\n      = "${near.k.signal_title}"   (shared: ${near.h.shared.join(', ')})`);
+        nearSamples.push(`  [${client.company_name}] ${d(row)} "${row.signal_title}"\n      = ${d(near.k)} "${near.k.signal_title}"   (AI: ${near.ai.reason})`);
         continue;
       }
       if (t) keptByTitle.set(t, row);
@@ -204,8 +256,85 @@ async function buildPlan(rows, clientById) {
       if (impact.impact_reason !== row.impact_reason) patch.impact_reason = impact.impact_reason;
       if (Object.keys(patch).length) updates.push({ row, patch });
     }
+  }));
+  return { remove, updates, count, nearSamples, notSameSamples, catMoves, srcMoves, impactMoves, countrySamples };
+}
+
+// ── step 4: rows not about the client's industry (AI, answers saved) ────────
+// checkFn(article, industry, clientId) -> { pass, reason, main_industry }   (the pipeline's checkIndustry)
+// textOf(articleIds) -> Map(article_id -> full text)                          (rewritten text from policy_articles_full)
+// To keep AI use small, a row is NOT asked when its title or summary already names the client's
+// industry or one of the client's own focus areas (e.g. "cosmetic" for a Cosmetics client,
+// "solar" for an energy client): such a row is clearly about the industry.
+const wordsOf = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 4).map((w) => w.replace(/(ies|es|s)$/, ''));
+const SKIP_WORDS = new Set(['general', 'other', 'product', 'service', 'solution', 'industry', 'sector', 'market', 'prestige', 'premium', 'retail', 'specialty', 'global']);
+function obviouslyOnIndustry(row, client, profile) {
+  const keys = new Set([
+    ...wordsOf(client.industry),
+    ...((profile && profile.focus) || []).flatMap(wordsOf),
+  ].filter((w) => !SKIP_WORDS.has(w)));
+  if (!keys.size) return false;
+  const text = new Set(wordsOf(`${row.signal_title} ${row.summary || ''}`));
+  return [...keys].some((k) => text.has(k));
+}
+
+async function industryStep(plan, rows, clientById, { checkFn, textOf, cache, saveCache, profileOf = null }) {
+  const removing = new Set(plan.remove.map((r) => r.row.id));
+  const candidates = rows.filter((r) => !removing.has(r.id) && clientById.get(r.client_id));
+  const todo = [];
+  let obvious = 0;
+  for (const r of candidates) {
+    const profile = profileOf ? await profileOf(r.client_id) : null;
+    if (obviouslyOnIndustry(r, clientById.get(r.client_id), profile)) obvious++;
+    else todo.push(r);
   }
-  return { remove, updates, count, nearSamples, catMoves, srcMoves, impactMoves, countrySamples };
+  console.log(`  industry check: ${obvious} rows clearly name the industry (no AI), ${todo.length} rows to ask`);
+  const wrong = [];
+  let asked = 0; let fromCache = 0; let failed = 0;
+  for (let i = 0; i < todo.length; i += 100) {
+    const part = todo.slice(i, i + 100);
+    const texts = await textOf(part.filter((r) => !cache[r.article_id]).map((r) => r.article_id));
+    for (let j = 0; j < part.length; j += INDUSTRY_PARALLEL) {
+      await Promise.all(part.slice(j, j + INDUSTRY_PARALLEL).map(async (row) => {
+        let answer = cache[row.article_id];
+        if (answer) fromCache++;
+        else {
+          const industry = clientById.get(row.client_id).industry;
+          answer = await checkFn({ title: row.signal_title, text: texts.get(row.article_id) || row.summary || '' }, industry, row.client_id);
+          asked++;
+          // an AI failure is not an answer: keep the row and ask again next time
+          if (/check (failed|gave no answer|off)/.test(answer.reason || '')) { failed++; return; }
+          cache[row.article_id] = { pass: !!answer.pass, main_industry: answer.main_industry || '', reason: answer.reason || '' };
+        }
+        if (!answer.pass) wrong.push({ row, answer });
+      }));
+    }
+    if (saveCache) saveCache(cache);
+    if (checkFn.name !== 'fakeCheck') process.stdout.write(`\r  industry check: ${Math.min(i + 100, todo.length)}/${todo.length} (asked AI ${asked}, saved answers ${fromCache}, AI failed ${failed})`);
+  }
+  if (todo.length && checkFn.name !== 'fakeCheck') console.log('');
+  for (const { row, answer } of wrong) {
+    const industry = clientById.get(row.client_id).industry;
+    plan.remove.push({ row, why: `not about the ${industry} industry (it is about: ${answer.main_industry || '?'}) - ${answer.reason}` });
+  }
+  const gone = new Set(wrong.map((w) => w.row.id));
+  plan.updates = plan.updates.filter((u) => !gone.has(u.row.id));
+  plan.count.wrongIndustry = wrong.length;
+  plan.count.industryNoAi = obvious;
+  plan.count.industryAsked = todo.length;
+  plan.count.industryFailed = failed;
+  plan.wrongIndustry = wrong;
+  return plan;
+}
+
+async function readFullTexts(articleIds) {
+  const map = new Map();
+  for (let i = 0; i < articleIds.length; i += 100) {
+    const { data } = await supabase.from('policy_articles_full').select('article_id, full_text').in('article_id', articleIds.slice(i, i + 100));
+    (data || []).forEach((r) => map.set(r.article_id, r.full_text || ''));
+  }
+  return map;
 }
 
 // ── main ──────────────────────────────────────────────────────────────────
@@ -218,7 +347,43 @@ async function main() {
   if (error) throw new Error(`admin.clients: ${error.message}`);
   const clientById = new Map((clients || []).map((c) => [c.id, c]));
   say(`Policy signals read: ${rows.length}`);
-  const { remove, updates, count, nearSamples, catMoves, srcMoves, impactMoves, countrySamples } = await buildPlan(rows, clientById);
+  let sameCache = {};
+  try { sameCache = JSON.parse(fs.readFileSync(SAME_CACHE_FILE, 'utf8')); } catch (e) { /* first run */ }
+  fs.mkdirSync(path.dirname(SAME_CACHE_FILE), { recursive: true });
+  let sameAsked = 0;
+  const confirmSame = SKIP_AI ? null : async (a, b) => {
+    const k = `${a.article_id}|${b.article_id}`;
+    if (sameCache[k]) return sameCache[k];
+    const ai = await aiSlot(() => proc.isSameEvent({ title: a.signal_title, summary: a.summary }, { title: b.signal_title, summary: b.summary }));
+    sameAsked++;
+    if (!ai.failed) sameCache[k] = { same: ai.same, reason: ai.reason };
+    if (sameAsked % 25 === 0) {
+      fs.writeFileSync(SAME_CACHE_FILE, JSON.stringify(sameCache));
+      process.stdout.write(`\r  same-event check: asked AI ${sameAsked}`);
+    }
+    return ai;
+  };
+  if (SKIP_AI) say('AI SKIPPED (--skip-ai): near copies and rows about other industries are KEPT, only exact copies are counted.');
+  else console.log('Same-event check (AI asked only when the words already say "same")...');
+  const plan = await buildPlan(rows, clientById, { confirmSame });
+  if (confirmSame) { fs.writeFileSync(SAME_CACHE_FILE, JSON.stringify(sameCache)); console.log(`\n  same-event check done: asked AI ${sameAsked} (saved answers reused for the rest)`); }
+  if (SKIP_INDUSTRY) {
+    if (!SKIP_AI) say('Industry check SKIPPED (--skip-industry): rows about other industries are not counted below.');
+    plan.count.wrongIndustry = 0;
+  } else {
+    let cache = {};
+    try { cache = JSON.parse(fs.readFileSync(INDUSTRY_CACHE_FILE, 'utf8')); } catch (e) { /* first run */ }
+    fs.mkdirSync(path.dirname(INDUSTRY_CACHE_FILE), { recursive: true });
+    console.log(`Industry check (one short AI question per row, saved answers reused: ${Object.keys(cache).length})...`);
+    await industryStep(plan, rows, clientById, {
+      checkFn: (article, industry, clientId) => aiSlot(() => proc.checkIndustry(article, industry, clientId)),
+      textOf: async () => new Map(),   // title + short summary only (small AI questions, low cost)
+      profileOf: (clientId) => proc.getClientProfile(clientId),
+      cache,
+      saveCache: (c) => fs.writeFileSync(INDUSTRY_CACHE_FILE, JSON.stringify(c)),
+    });
+  }
+  const { remove, updates, count, nearSamples, notSameSamples, catMoves, srcMoves, impactMoves, countrySamples } = plan;
 
   // ── report ──
   const sorted = (m) => [...m.entries()].sort((a, b) => b[1] - a[1]);
@@ -228,13 +393,25 @@ async function main() {
   say(`  not policy news:            ${count.notPolicy}`);
   say(`  already marked duplicates:  ${count.markedBefore}`);
   say(`  same title again:           ${count.exact}`);
-  say(`  same event (near copy):     ${count.near}`);
+  say(`  same event (near copy):     ${count.near}   (AI said "different" for ${count.nearNotSame} word matches: kept${count.nearAiFailed ? `; AI failed ${count.nearAiFailed}: kept` : ''})`);
+  say(`  not the client's industry:  ${count.wrongIndustry}${count.industryFailed ? `   (AI failed for ${count.industryFailed} rows: kept, run again to ask them)` : ''}`);
   say(`  TOTAL:                      ${remove.length}`);
   say(`TO UPDATE: ${updates.length} rows (category / source type / country / impact)`);
   say(`LEFT AFTER CLEANUP: ${rows.length - remove.length}`);
   out('');
-  out('NEAR COPIES (first 60) - please check these look like the same event:');
+  if (plan.wrongIndustry && plan.wrongIndustry.length) {
+    out("NOT THE CLIENT'S INDUSTRY (all) - please check:");
+    plan.wrongIndustry.forEach(({ row, answer }) => {
+      const c = clientById.get(row.client_id);
+      out(`  [${c.company_name} / ${c.industry}] "${row.signal_title}"  -> about: ${answer.main_industry || '?'} | ${answer.reason}`);
+    });
+    out('');
+  }
+  out('NEAR COPIES (all) - deleted row first, the row that is KEPT second, with published dates:');
   nearSamples.forEach((l) => out(l));
+  out('');
+  out('WORD MATCHES THE AI SAID ARE DIFFERENT NEWS (both KEPT) - please check:');
+  notSameSamples.forEach((l) => out(l));
   out('');
   out('CATEGORY CHANGES');
   sorted(catMoves).forEach(([k, v]) => out(`  ${String(v).padStart(5)}  ${k}`));
@@ -277,4 +454,4 @@ async function main() {
 if (require.main === module) {
   main().then(() => process.exit(0)).catch((e) => { console.error(`\nCleanup stopped: ${e.message}`); process.exit(1); });
 }
-module.exports = { buildPlan, cleanCountry, newCategory };   // used by scripts/testPolicyPipeline.js
+module.exports = { buildPlan, industryStep, cleanCountry, newCategory };   // used by scripts/testPolicyPipeline.js

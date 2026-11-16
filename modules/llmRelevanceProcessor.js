@@ -1348,30 +1348,95 @@ const undoSave = async (articleId, signalTable) => {
 // are clean and alike ("Delhi Government Cracks Down on Unlicensed Cosmetic Manufacturing" /
 // "Delhi Raids Unlicensed Cosmetic Manufacturing Units").
 // So: compare the new signal title with the signals saved for this client + module in the
-// last SAME_EVENT_DAYS days, only those in the SAME country, with the same word rule as the
+// signals PUBLISHED within SAME_EVENT_DAYS days of this one (copies of one event come out within
+// days; the same topic months apart is new news - 16 Nov dry run: "Madras HC rejects plea" vs
+// "Madras HC orders labels", "Omnibus Act IX" vs "Omnibus 2"), only those in the SAME country, with the same word rule as the
 // topic check, in its STRICT form: action words count (Extends / Mandates / Delays say what
 // happened), at least 3 specific words shared and 50%+, no different numbers.
 // Runs BEFORE the rewrite, so a duplicate costs no extra AI call.
-const SAME_EVENT_DAYS = Number(process.env.SAME_EVENT_DAYS) || 30;
-async function findSameEventSignal(classification, clientId, moduleId, industry) {
+const SAME_EVENT_DAYS = Number(process.env.SAME_EVENT_DAYS) || 7;
+const SAME_EVENT_MAX_AI = 2;   // AI questions per article, at most
+
+// ── "Same event?" final yes/no by the AI (asked ONLY when the words already say "same") ──
+// The word rule cannot see that "Mills County approves solar permit" and "Kings County approves
+// solar permit" are two different events (16 Nov dry run: about 1 in 6 word matches). One tiny
+// yes/no question settles it. When it is a real copy the rewrite call is skipped, so the cost is
+// about the same as before. If the AI fails or is unsure: NOT the same (the article is kept).
+// Prompt: prompts.id = 'same_event_check_v1' (editable); the text below is used if that row is missing.
+const SAME_EVENT_DEFAULT = `Two news items are below. Do they report the SAME specific event?
+
+SAME = the same action by the same authority or company, about the same thing, at the same time
+(for example two websites reporting one new rule, one fine, one approval or one ban).
+DIFFERENT = a different authority, a different place (another state, county or city), a different
+company, a different decision or a different step of a process, even when the topic and the words are alike.
+When you are not sure, answer false.
+
+NEWS A: {title_a}
+{summary_a}
+
+NEWS B: {title_b}
+{summary_b}
+
+Answer with JSON only: {"same": true or false, "reason": "one short sentence"}`;
+
+let sameEventPromptCache = null;
+const getSameEventPrompt = async () => {
+  if (sameEventPromptCache && Date.now() - sameEventPromptCache.at < 10 * 60e3) return sameEventPromptCache.text;
+  let text = SAME_EVENT_DEFAULT;
+  try {
+    const { data } = await supabase.from('prompts').select('prompt_template').eq('id', 'same_event_check_v1').eq('is_active', true).maybeSingle();
+    if (data && data.prompt_template) text = data.prompt_template;
+  } catch (e) { /* use the default */ }
+  sameEventPromptCache = { at: Date.now(), text };
+  return text;
+};
+
+/** @returns {Promise<{same: boolean, reason: string, failed?: boolean}>} */
+const isSameEvent = async (a, b) => {
+  try {
+    const tpl = await getSameEventPrompt();
+    const cut = (t) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    const prompt = tpl
+      .replace(/{title_a}/g, () => cut(a.title)).replace(/{summary_a}/g, () => cut(a.summary))
+      .replace(/{title_b}/g, () => cut(b.title)).replace(/{summary_b}/g, () => cut(b.summary));
+    const raw = await callLLM([
+      { role: 'system', content: 'You are a strict classifier. You only respond with valid JSON, nothing else.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0, max_tokens: 80, timeout: 60000 });
+    const m = String(raw || '').match(/\{[\s\S]*\}/);
+    const parsed = m ? JSON.parse(m[0].replace(/[\u0000-\u001F]+/g, ' ')) : null;
+    if (!parsed || typeof parsed.same === 'undefined') return { same: false, reason: 'AI gave no answer', failed: true };
+    return { same: isYes(parsed.same), reason: String(parsed.reason || '').slice(0, 200) };
+  } catch (e) {
+    return { same: false, reason: `AI check failed (${e.message})`, failed: true };
+  }
+};
+async function findSameEventSignal(classification, clientId, moduleId, industry, article = {}) {
   const title = String(classification.signal_title || '').trim();
   const myPlaces = standardPlaces(classification.country).filter((p) => p !== 'Unknown' && p !== 'Global');
   if (!title || !myPlaces.length) return null;   // no country: cannot be sure, keep it
   try {
-    const since = new Date(Date.now() - SAME_EVENT_DAYS * 864e5).toISOString();
+    const myDay = new Date(article.publishedDate || Date.now()).getTime() / 864e5;
+    const since = new Date(Date.now() - 90 * 864e5).toISOString();
     const { data, error } = await supabase.from('policy_signals')
-      .select('article_id, signal_title, country')
+      .select('article_id, signal_title, summary, country, source_published_date, created_at')
       .eq('client_id', clientId).eq('module_id', moduleId)
       .gte('created_at', since).order('created_at', { ascending: false }).limit(500);
     if (error) { console.log(`  [SameEvent] lookup error (non-fatal): ${error.message}`); return null; }
     const industryWords = new Set(plain(industry || '').split(' ').filter(Boolean).flatMap((w) => [w, w.replace(/s$/, '')]));
+    let asked = 0;
     for (const row of data || []) {
+      const theirDay = new Date(row.source_published_date || row.created_at).getTime() / 864e5;
+      if (Number.isFinite(myDay) && Number.isFinite(theirDay) && Math.abs(myDay - theirDay) > SAME_EVENT_DAYS) continue;
       const theirPlaces = standardPlaces(row.country);
       if (!myPlaces.some((p) => theirPlaces.includes(p))) continue;
       const h = compareHeadlines(title, row.signal_title, industryWords, { strict: true });
       if (h.same) {
-        console.log(`  [SameEvent] "${title}" = "${row.signal_title}" (${Math.round(h.overlap * 100)}% same words: ${h.shared.join(', ')})`);
-        return row;
+        if (asked >= SAME_EVENT_MAX_AI) break;
+        asked++;
+        const ai = await isSameEvent({ title, summary: classification.summary }, { title: row.signal_title, summary: row.summary });
+        console.log(`  [SameEvent] "${title}" ~ "${row.signal_title}" (words: ${h.shared.join(', ')}) -> AI: ${ai.same ? 'SAME' : 'DIFFERENT'} (${ai.reason})`);
+        if (ai.same) return row;
       }
     }
   } catch (e) {
@@ -1387,7 +1452,7 @@ const storeRelevantArticle = async (article, classification, clientId, industry,
 
   // Step 0 (Policy) — the same event saved already under another headline? (no AI)
   if (moduleId === POLICY_MODULE_ID) {
-    const same = await findSameEventSignal(classification, clientId, moduleId, industry);
+    const same = await findSameEventSignal(classification, clientId, moduleId, industry, article);
     if (same) return { skipped: true, duplicateOf: same.article_id, synthesizedTitle: classification.signal_title };
   }
 
@@ -2140,4 +2205,6 @@ const retryFailedArticles = async (clientId, submoduleId = null, deadlineTs = nu
   profileForPrompt,
   POLICY_CATEGORIES,
   undoSave,          // used by scripts/cleanPolicyData.js (removes one article everywhere)
+  checkIndustry,     // used by scripts/cleanPolicyData.js (the same industry question for old rows)
+  isSameEvent,       // used by scripts/cleanPolicyData.js (the same "same event?" question for old rows)
 };

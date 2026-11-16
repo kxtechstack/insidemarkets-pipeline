@@ -32,6 +32,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { pipeline } = require('@xenova/transformers');
 const { v4: uuidv4 } = require('uuid');
 const { createClient } = require('@supabase/supabase-js');
+const { PLACES } = require('./placeNames');
 
 const QDRANT_URL = process.env.QDRANT_URL;
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
@@ -151,14 +152,25 @@ authority authorities regulator regulators industry product products market mark
 say says take takes effect effects change changes changed public comment comments information procedure procedures requirement
 requirements standard standards safety technical management sector official officials plan plans
 crack cracks cracked cracking crackdown down strict action actions target targets targeted take taken against
-2024 2025 2026 2027`.split(/\s+/));
+2024 2025 2026 2027 january february march april may june july august september october november december
+jan feb mar apr jun jul aug sep sept oct nov dec ahead approaching looms looming imminent seen amid more than over`.split(/\s+/));
 // action words: in HEADLINES of copies they vary ("Amends" / "Corrects"), so they are ignored there.
 // In the AI's own short signal titles they say WHAT happened ("Extends" vs "Mandates" vs "Delays"),
 // so the strict check (signal titles) keeps them.
 const ACTION_WORDS = new Set(`propose proposes proposed revise revises revised revising amend amends amended correct corrects corrected
 add adds added adding confirm confirms confirmed implement implements implemented optimize optimise seek seeks extend extends extended
 reveal reveals revoke revokes resume resumes lift lifts raid raids raided launch launches set sets introduce introduces introduced`.split(/\s+/));
-const COUNTRY_WORDS = /\b(indonesia|indonesian|china|chinese|india|indian|south|north|korea|korean|japan|japanese|eu|europe|european|union|singapore|singaporean|malaysia|malaysian|uk|britain|british|us|usa|america|american|united|states|kingdom|arab|emirates|uae|saudi|arabia|qatar|egypt|gulf|gcc|asean|global)\b/g;
+// every word of every country / region name (placeNames.js) and the usual "-ese / -ian" forms:
+// a place says WHERE, not WHAT happened (places are compared separately, see countriesIn)
+const PLACE_WORDS = new Set([
+  ...Object.entries(PLACES).flatMap(([name, forms]) => [name, ...forms])
+    .flatMap((x) => String(x).toLowerCase().replace(/[^a-z ]+/g, ' ').split(' ')).filter((w) => w.length >= 2),
+  ...`indonesian chinese indian korean japanese european singaporean malaysian british american emirati saudi qatari egyptian
+  thai vietnamese filipino australian canadian mexican brazilian argentinian chilean colombian nigerian kenyan moroccan french
+  german italian spanish portuguese dutch belgian swiss austrian irish swedish norwegian danish finnish polish czech greek
+  romanian hungarian russian ukrainian pakistani bangladeshi turkish israeli african asian gulf global`.split(/\s+/),
+]);
+PLACE_WORDS.delete('us'); PLACE_WORDS.delete('in'); PLACE_WORDS.delete('is'); PLACE_WORDS.delete('it');
 const ACRONYM = /\b[A-Z]{2,6}\b/g;   // short organisation names: NIDC, BPOM, HSA, FDA...
 
 const clientWordsCache = new Map();   // clientId -> words of the client's industry
@@ -187,9 +199,9 @@ const countriesIn = (title) => new Set(String(title || '').toLowerCase().replace
 const stemWord = (w) => w.replace(/ies$/, 'y').replace(/([^s])s$/, '$1');
 const isGeneral = (w, keepActions) => GENERAL_NEWS_WORDS.has(w) || (!keepActions && ACTION_WORDS.has(w));
 const specificWords = (title, industryWords, keepActions = false) => [...new Set(stripSourceSuffix(String(title || ''))
-  .replace(ACRONYM, ' ').toLowerCase().replace(/[’']/g, '').replace(COUNTRY_WORDS, ' ')
+  .replace(ACRONYM, ' ').toLowerCase().replace(/[’']s\b/g, '').replace(/[’']/g, '')
   .replace(/[^a-z0-9]+/g, ' ').trim().split(' ')
-  .filter((w) => w.length >= 2 && !isGeneral(w, keepActions))
+  .filter((w) => w.length >= 2 && !isGeneral(w, keepActions) && !PLACE_WORDS.has(w))
   .map(stemWord)
   .filter((w) => !isGeneral(w, keepActions) && !industryWords.has(w)))];
 // numbers in a headline, also inside words ("Rp16" -> 16), years ignored
@@ -221,7 +233,7 @@ const compareHeadlines = (titleA, titleB, industryWords, opts = {}) => {
     ? shared.length >= 3 && overlap >= 0.5
     : (shared.length >= 3 && overlap >= MIN_WORD_OVERLAP) || (shared.length === 2 && overlap >= 0.6);
   const same = enough && !clash;
-  return { same, overlap, shared, clash };
+  return { same, overlap, shared, clash, sizes: [A.length, B.length] };
 };
 
 /**
