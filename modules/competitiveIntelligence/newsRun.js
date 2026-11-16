@@ -368,9 +368,11 @@ async function runNewsForClient(clientId, opts = {}) {
     const out = [];
     for (const c of comps || []) {
       // scheduled run: skip a competitor already done in the last 20 hours (e.g. laptop + server both on)
+      // CHANGED: any section of the daily run counts (press / blog / own_site run BEFORE news, so checking
+      // only 'news' let a second machine start the same competitor while the first was still on press)
       if (opts.triggeredBy === 'schedule' && !opts.dryRun) {
         const { data: recent } = await supabase.from('competitor_runs').select('id')
-          .eq('competitor_id', c.id).eq('section', 'news').in('status', ['completed', 'running'])
+          .eq('competitor_id', c.id).in('section', SECTIONS).in('status', ['completed', 'running'])
           .gte('started_at', new Date(Date.now() - 20 * 3600e3).toISOString()).limit(1);
         if (recent && recent.length) { out.push({ competitor: c.name, skipped: 'already ran in the last 20 hours' }); continue; }
       }

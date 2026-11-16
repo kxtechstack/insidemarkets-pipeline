@@ -34,7 +34,7 @@ const { discoverCompetitor, discoverClient } = require('./discovery');
 const { hostOf, rootDomain, clean } = require('./webTools');
 const cron = require('node-cron');
 const { runNewsForClient, closeStuckRuns, isRunning: newsIsRunning, summarise } = require('./newsRun');
-const { repairPendingChanges } = require('./changeStore');
+const { repairPendingChanges, repairChatCopies } = require('./changeStore');
 const { runPagesForClient, detectPageType } = require('./pageWatch');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -607,7 +607,10 @@ function registerCompetitiveRadarRoute(app) {
       try {
         const r = await repairPendingChanges();
         const stuck = await closeStuckRuns();
-        if (r.checked || stuck) console.log(`[CI repair] chat copies fixed ${r.fixed}/${r.checked}, stuck runs closed ${stuck}`);
+        const chat = await repairChatCopies();   // NEW: joined cards out of the chat, verified cards in it
+        if (r.checked || stuck || chat.removed || chat.restored) {
+          console.log(`[CI repair] chat copies fixed ${r.fixed}/${r.checked}, stuck runs closed ${stuck}, joined-card copies removed ${chat.removed}, missing copies restored ${chat.restored}`);
+        }
       } catch (e) {
         console.error(`[CI repair] ${e.message}`);
       }

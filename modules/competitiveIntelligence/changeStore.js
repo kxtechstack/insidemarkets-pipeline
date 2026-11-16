@@ -20,6 +20,10 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { CI_MODULE_ID, LIMITS, QDRANT } = require('./constants');
 const { hostOf, norm, clean } = require('./webTools');
 const { callLLM } = require('../llmClient');
+const { standardPlaces } = require('../placeNames');
+
+// one way of writing a country for every module ("UAE" -> "United Arab Emirates", same as Policy)
+const standardCountry = (value) => (value ? standardPlaces(value).join(', ') || null : null);
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const qdrant = new QdrantClient({
@@ -325,6 +329,41 @@ async function markSyncProblem(ch, reason) {
   console.log(`[CI store] Qdrant problem for change ${ch.id} (try ${attempts}): ${reason}`);
 }
 
+/**
+ * NEW - timer job: the chat copies (Qdrant) must match the cards exactly.
+ *   a) a card joined into another one (is_duplicate) must have NO chat copy
+ *      (before: if that delete failed once, nothing tried again -> a duplicate stayed in the chat)
+ *   b) a verified card must HAVE its chat copy (before: only 'pending' cards were re-checked,
+ *      so a verified card whose copy was lost stayed missing - e.g. SolarGrid's 9 cards)
+ * Works in pages of 100 and only reads ids, so it is cheap.
+ */
+async function repairChatCopies() {
+  let removed = 0; let restored = 0; let checked = 0;
+  for (const [dup, label] of [[true, 'joined'], [false, 'verified']]) {
+    for (let from = 0; ; from += 500) {
+      let q = supabase.from('competitor_changes').select('id').order('id').range(from, from + 499);
+      q = dup ? q.eq('is_duplicate', true) : q.eq('status', 'verified').or('is_duplicate.is.null,is_duplicate.eq.false');
+      const { data, error } = await q;
+      if (error) throw new Error(`${label} cards: ${error.message}`);
+      const ids = (data || []).map((r) => r.id);
+      for (let i = 0; i < ids.length; i += 100) {
+        const part = ids.slice(i, i + 100);
+        checked += part.length;
+        const found = await qdrant.retrieve(QDRANT.COLLECTION, { ids: part, with_payload: false, with_vector: false });
+        const inChat = new Set((found || []).map((p) => String(p.id)));
+        if (dup) {
+          const extra = part.filter((id) => inChat.has(String(id)));
+          if (extra.length) { await qdrant.delete(QDRANT.COLLECTION, { wait: true, points: extra }); removed += extra.length; }
+        } else {
+          for (const id of part.filter((x) => !inChat.has(String(x)))) if (await syncChangeToQdrant(id)) restored++;
+        }
+      }
+      if (!data || data.length < 500) break;
+    }
+  }
+  return { checked, removed, restored };
+}
+
 /** Retry job: pending changes that never reached Qdrant (server restart, Qdrant down...) */
 async function repairPendingChanges(limit = 50) {
   const cutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // leave very new ones to their own run
@@ -609,7 +648,7 @@ async function joinSplitCards(clientId, comp) {
       if (RANK[B.c.importance] > RANK[A.c.importance]) patch.importance = B.c.importance;
       if (A.c.confidence === 'low') patch.confidence = 'high';
       if (Object.keys(patch).length) await supabase.from('competitor_changes').update(patch).eq('id', A.c.id);
-      try { await qdrant.delete(QDRANT.COLLECTION, { wait: true, points: [B.c.id] }); } catch (e) { /* chat copy is removed by the repair job later */ }
+      try { await qdrant.delete(QDRANT.COLLECTION, { wait: true, points: [B.c.id] }); } catch (e) { /* removed by repairChatCopies (timer) */ }
       await refreshCardCounts(A.c.id); // card is written again (with all signals) by the card writer
       // A now carries B's facts too
       A.text += ` ${B.text}`; A.n += B.n; A.pubs.push(...B.pubs); A.days.push(...B.days);
@@ -746,7 +785,7 @@ async function saveChange({ clientId, comp, item, change, runId, country, noMerg
     confidence: OWN_SOURCES.has(item.section) ? 'high' : 'low',
     event_date: change.event_date,
     source_kind: item.section,
-    country: change.country || country || null,
+    country: standardCountry(change.country || country),   // CHANGED: same country names as the other modules
     status: 'pending',
     content_hash: contentHash(comp, change),
     run_id: runId || null,
@@ -778,4 +817,4 @@ async function saveChange({ clientId, comp, item, change, runId, country, noMerg
   return { outcome: 'saved', changeId: ins.id, verified };
 }
 
-module.exports = { loadKnownNews, findSameNews, rememberNews, dedupeCardSignals, joinSplitCards, refreshCardCounts, saveChange, syncChangeToQdrant, repairPendingChanges, buildChatText, contentHash, embed, cosine, pickSameEvent };
+module.exports = { loadKnownNews, findSameNews, rememberNews, dedupeCardSignals, joinSplitCards, refreshCardCounts, saveChange, syncChangeToQdrant, repairPendingChanges, repairChatCopies, standardCountry, buildChatText, contentHash, embed, cosine, pickSameEvent };
