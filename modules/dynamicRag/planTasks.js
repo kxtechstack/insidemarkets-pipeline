@@ -205,6 +205,28 @@ function withoutDateWords(items, removed) {
   return out;
 }
 
+// A need made only of words like "dates", "source", "impact", "latest items"
+// is not something to search for: every answer already shows the dates and
+// sources of its evidence. Such needs are removed (and recorded).
+const META_WORDS = new Set([
+  'date', 'dates', 'time', 'timeline', 'timelines', 'period', 'periods', 'data', 'figure', 'figures',
+  'information', 'info', 'source', 'sources', 'reference', 'references', 'citation', 'citations',
+  'detail', 'details', 'exact', 'fact', 'facts', 'impact', 'impacts', 'item', 'items', 'latest', 'recent',
+  'current', 'reliability', 'of', 'the', 'a', 'an', 'and', 'or', 'for', 'about', 'on', 'in', 'to', 'its', 'their',
+  'all', 'any', 'each', 'this', 'that', 'these', 'those', 'with',
+]);
+const isOnlyMetaWords = (text) => {
+  const words = String(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.every((w) => META_WORDS.has(w));
+};
+function withoutMetaNeeds(items, removed) {
+  return items.filter((item) => {
+    if (!isOnlyMetaWords(item)) return true;
+    removed.push({ what: 'information_needed', value: item, why: 'not something to search for (dates and sources come with every answer)' });
+    return false;
+  });
+}
+
 /**
  * Reads the AI reply and checks every part of it against the user's goals
  * and the job list. Never uses anything the AI made up.
@@ -241,10 +263,10 @@ function checkAiPlan(replyText, goals) {
       removed.push({ what: 'requirement', value: goal || '(no goal)', why: 'its goal is not one of the user goals' });
       continue;
     }
-    const needs = withoutDateWords(
+    const needs = withoutMetaNeeds(withoutDateWords(
       cleanList((Array.isArray(raw.information_needed) ? raw.information_needed : []).map((n) => (typeof n === 'string' ? plainNeed(n) : n)),
         MAX_NEEDS, removed, 'information_needed'),
-      removed);
+      removed), removed);
     if (needs.length === 0) {
       removed.push({ what: 'requirement', value: goal, why: 'it says no information is needed' });
       continue;
@@ -573,6 +595,7 @@ module.exports = {
   parseJsonLoose,
   buildMessage,
   withoutDateWords,
+  withoutMetaNeeds,
   mergeSameGoal,
   checkAiPlan,
   missingGoals,

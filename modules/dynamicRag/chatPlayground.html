@@ -69,6 +69,8 @@
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--blue); font-size: 13px; }
   pre { background: #0f1720; color: #d6e2ee; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; max-height: 420px; }
+  table.grid td, table.grid th { border: 1px solid var(--line); padding: 6px 8px; font-size: 14px; vertical-align: top; text-align: left; }
+  table.grid th { background: var(--grey-bg); font-size: 13px; color: var(--soft); font-weight: 600; }
   .error-box { background: var(--red-bg); color: var(--red); border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
   @media (max-width: 640px) { .row { grid-template-columns: 1fr; } td.k { width: 120px; } .body, .what { margin-left: 0; } }
 </style>
@@ -121,8 +123,8 @@ const STEPS = [
   { key: 'validateQuery', num: 3, title: 'Accept, reject or ask back', what: 'The AI decides if this is a business question we can work on.' },
   { key: null, num: 4, title: 'Remember earlier questions', what: 'Skipped for now.', skipped: true },
   { key: 'understandQuery', num: 5, title: 'Understand the question', what: 'The AI fills a form (goals, companies, places…). Code then removes anything not in the question, matches companies to the client list and works out the dates.' },
-  { key: null, num: 6, title: 'Plan what information is needed', what: 'Not built yet.', later: true },
-  { key: null, num: 7, title: 'Choose the sources', what: 'Not built yet.', later: true },
+  { key: 'planTasks', num: 6, title: 'Plan what information is needed', what: 'The AI writes a work plan: for each goal, what information is needed and what analysis to do. Code then checks it: one part per goal, only jobs from the job list, each goal keeps its key job, places / companies / dates copied from Step 5, date words taken out.' },
+  { key: null, num: 7, title: 'Build the workflow (which jobs, in which order)', what: 'Not built yet.', later: true },
   { key: null, num: 8, title: 'Check the plan', what: 'Not built yet.', later: true },
   { key: null, num: 9, title: 'Search and check the evidence', what: 'Not built yet.', later: true },
   { key: null, num: 10, title: 'Write the answer', what: 'Not built yet.', later: true },
@@ -165,7 +167,8 @@ function showStep2(r) {
     ['After cleaning', `<span class="${changed ? 'changed' : ''}">${esc(r.preprocessed_query)}</span>${changed ? '' : ' <span class="small">(no change)</span>'}`],
     ['Short forms swapped', tags(r.corrections_applied)],
     ['Words recognised', tags(termList)],
-    ['Date words found', tags((r.time_expressions || []).map((t) => t.text))],
+    ['Date words found', tags((r.time_expressions || []).map((t) => `${t.text} (${t.kind})`))],
+    ['Date words NOT understood', (r.time_unclear || []).length ? tags(r.time_unclear, 'bad') + ' <span class="small">the user is asked to write the date again</span>' : '<span class="none">none</span>'],
     ['Word list', r.word_list_loaded ? '<span class="chip ok">loaded</span>' : '<span class="chip bad">NOT loaded – short forms were not swapped</span>'],
   ]);
 }
@@ -193,8 +196,8 @@ function showStep5(r) {
     ? r.time.ranges.map((t) => `<div>"${esc(t.text)}" → <b>${niceDate(t.from)} to ${niceDate(t.to)}</b>${t.note ? ` <span class="small">(${esc(t.note)})</span>` : ''}</div>`).join('')
     : '<span class="none">no dates in the question</span>';
   const removed = (r.removed_by_check || []).length
-    ? r.removed_by_check.map((x) => `<div><span class="tag bad">${esc(x.value)}</span> <span class="small">removed from ${esc(x.field)}: ${esc(x.why)}</span></div>`).join('')
-    : '<span class="none">nothing removed</span>';
+    ? r.removed_by_check.map((x) => `<div><span class="tag bad">${esc(x.value)}</span> <span class="small">${esc(x.field)}: ${esc(x.why)}</span></div>`).join('')
+    : '<span class="none">nothing changed</span>';
 
   const pairs = [];
   if (r.status === 'clarification') {
@@ -206,18 +209,20 @@ function showStep5(r) {
     ['Main goal', r.primary_goal ? goal(r.primary_goal) : '<span class="none">none</span>'],
     ['Also wants', (r.secondary_goals || []).length ? r.secondary_goals.map(goal).join('<br>') : '<span class="none">nothing else</span>'],
     ['Companies', (r.companies || []).length ? r.companies.map(companyLine).join('<br>') : '<span class="none">none</span>'],
-    ['Places', tags(r.places)],
+    ['Places <span class="small">(standard names)</span>', tags(r.places)],
+    ['Places not in our place list', (r.places_not_in_list || []).length ? tags(r.places_not_in_list, 'warn') + ' <span class="small">kept, but our data may have nothing for them</span>' : '<span class="none">none</span>'],
     ['Industries', tags(r.industries)],
     ['Products', tags(r.products)],
     ['Topics', tags(r.topics)],
     ['Numbers asked for', tags(r.metrics)],
     ['Dates', time],
     ['About the client\'s own business?', yesNo(r.about_own_business)],
+    ['About the client\'s competitors in general?', yesNo(r.all_competitors) + (r.all_competitors ? ' <span class="small">(search all competitors on the client list)</span>' : '')],
     ['About their dashboard news / alerts?', yesNo(r.dashboard_request)],
     ['Limits the user set', tags(r.constraints)],
     ['Also needed (not said)', tags(r.implied)],
     ['Answer format asked for', r.answer_format ? esc(r.answer_format) : '<span class="none">none</span>'],
-    ['Removed by the code check', removed],
+    ['Changed or removed by the code check', removed],
   );
   if (r.checks_skipped) pairs.push(['Code checks skipped', `<span class="chip warn">${esc(r.checks_skipped)}</span>`]);
   if (r.client) {
@@ -225,11 +230,80 @@ function showStep5(r) {
     pairs.push(['Client\'s competitor list <span class="small">(active only – names are matched against this)</span>',
       (r.client.competitors || []).length ? tags(r.client.competitors) : '<span class="chip warn">empty – no competitors set up for this client</span>']);
   }
-  pairs.push(['AI calls', esc(r.attempts) + (r.attempts > 1 ? ' <span class="small">(first reply could not be used, AI asked again)</span>' : '')]);
+  pairs.push(['AI calls', esc(r.attempts) + (r.attempts > 1 ? ' <span class="small">(first reply could not be used, AI asked again)</span>' : '') +
+    (r.attempts === 0 ? ' <span class="small">(asked back before the AI was needed)</span>' : '')]);
+  if (r.ai_problem) pairs.push(['AI problem', `<span class="small">${esc(r.ai_problem)}</span>`]);
   return rows(pairs);
 }
 
-const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5 };
+// ── Step 6: the work plan ─────────────────────────────────────────────────
+const JOB_NAMES = {
+  extract_facts: 'Pull out facts / numbers', summarise: 'Summarise', compare: 'Compare side by side',
+  cluster: 'Group similar items', identify_patterns: 'Find patterns / trends', identify_gaps: 'Find gaps',
+  discover_opportunities: 'Find opportunities', analyse_risks: 'Find risks', validate_evidence: 'Check the evidence',
+  forecast: 'Number forecast', retrieve_data: 'Search', structured_search: 'Exact table read', filter_data: 'Filter',
+};
+const job = (j) => `<span class="tag">${esc(JOB_NAMES[j] || j)}</span> <span class="small">(${esc(j)})</span>`;
+
+function showStep6(r) {
+  const goal = (g) => `${esc(GOAL_NAMES[g] || g)} <span class="small">(${esc(g)})</span>`;
+  const reqs = r.requirements || [];
+  const first = reqs[0] || {};
+
+  // the plan, one row per goal
+  const table = reqs.length ? `<table class="grid">
+    <tr><th>Part</th><th>Goal</th><th>Information needed</th><th>Analysis</th><th>Waits for</th></tr>
+    ${reqs.map((q) => `<tr>
+      <td><b>${esc(q.requirement_id)}</b><br><span class="chip ${q.priority === 'essential' ? 'ok' : 'off'}">${esc(q.priority)}</span>${q.added_by_code ? '<br><span class="chip warn">added by code</span>' : ''}</td>
+      <td>${goal(q.goal)}</td>
+      <td>${(q.information_needed || []).map((n) => `<div>• ${esc(n)}</div>`).join('') || '<span class="none">none</span>'}</td>
+      <td>${(q.analysis || []).length ? q.analysis.map(job).join('<br>') : '<span class="none">none (shown as found)</span>'}</td>
+      <td>${(q.depends_on || []).length ? tags(q.depends_on) : '<span class="none">-</span>'}</td>
+    </tr>`).join('')}
+  </table>` : '<span class="none">no parts</span>';
+
+  // what every part searches in (copied from Step 5, the same for all parts)
+  const ts = first.time_scope;
+  const dates = ts
+    ? `<b>${niceDate(ts.from)} to ${niceDate(ts.to)}</b>` +
+      ((ts.ranges || []).length > 1 ? `<div class="small">kept apart: ${ts.ranges.map((x) => `"${esc(x.text)}" = ${niceDate(x.from)} to ${niceDate(x.to)}`).join(' | ')}</div>` : '')
+    : '<span class="none">no dates (all dates)</span>';
+  const companies = (first.companies || []).length
+    ? first.companies.map((c) => `<span class="tag ${c.type === 'competitor' ? 'ok' : c.type === 'own_company' ? 'info' : ''}">${esc(c.name)}</span> <span class="small">(${esc(c.type)})</span>`).join(' ')
+    : '<span class="none">none</span>';
+  const scope = rows([
+    ['Places', tags(first.geography)],
+    ['Places not in our place list', (first.places_not_in_list || []).length ? tags(first.places_not_in_list, 'warn') : '<span class="none">none</span>'],
+    ['Companies', companies],
+    ['Industry', `${tags(first.industry)} <span class="small">(from the ${esc(first.industry_from || '-')})</span>`],
+    ['Products', tags(first.products)],
+    ['Dates', dates],
+    ['About the client\'s own business?', yesNo(first.about_own_business)],
+    ['About the client\'s competitors in general?', yesNo(first.all_competitors)],
+  ]);
+
+  const removed = (r.removed_by_check || []).length
+    ? r.removed_by_check.map((x) => `<div><span class="tag bad">${esc(x.value)}</span> <span class="small">${esc(x.what)}: ${esc(x.why)}</span></div>`).join('')
+    : '<span class="none">nothing changed</span>';
+
+  const pairs = [
+    ['Result', r.built_by_code
+      ? '<span class="chip warn">Plan built by code</span> <span class="small">(the AI never gave a usable plan)</span>'
+      : '<span class="chip ok">Planned</span>'],
+    ['Goals to answer', (r.objectives || []).map(goal).join('<br>')],
+    ['The plan', table],
+    ['What every part searches in <span class="small">(copied from Step 5, never from the AI)</span>', scope],
+    ['All analysis, in order', (r.analysis_required || []).map(job).join(' → ')],
+    ['Answer sections', tags(r.output_sections)],
+    ['What the code added or changed', (r.notes || []).length ? r.notes.map((n) => `<div class="small">• ${esc(n)}</div>`).join('') : '<span class="none">nothing</span>'],
+    ['Removed or cut by the code check', removed],
+    ['AI calls', esc(r.attempts) + (r.attempts > 1 ? ' <span class="small">(a reply could not be used, AI asked again)</span>' : '')],
+  ];
+  if ((r.ai_problems || []).length) pairs.push(['Why an AI reply could not be used', r.ai_problems.map((p) => `<div class="small">• ${esc(p)}</div>`).join('')]);
+  return rows(pairs);
+}
+
+const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5, planTasks: showStep6 };
 
 // ── Draw the whole result ─────────────────────────────────────────────────
 function draw(question, httpStatus, json) {
@@ -253,10 +327,12 @@ function draw(question, httpStatus, json) {
     replyText = esc(json.answer);
   } else {
     replyChip = '<span class="chip ok">Accepted</span>';
-    replyText = '<span class="none">Question understood. The answer (Steps 6–10) is not built yet.</span>';
+    replyText = '<span class="none">Question understood and planned. The answer (Steps 7–10) is not built yet.</span>';
   }
+  const aiCalls = ['validateQuery', 'understandQuery', 'planTasks']
+    .reduce((sum, k) => sum + ((debug[k] && Number(debug[k].attempts)) || 0), 0);
   html += `<div class="card reply"><div class="step-head"><h2>What the user sees</h2>${replyChip}<span class="time">total ${secs(timings.total)}</span></div>
-    <div class="small" style="margin-top:4px">Question: ${esc(question)}</div>
+    <div class="small" style="margin-top:4px">Question: ${esc(question)} · AI calls so far: <b>${aiCalls}</b></div>
     <div class="msg">${replyText}</div></div>`;
 
   // Each step
@@ -310,7 +386,7 @@ async function ask(questionFromHistory) {
   if ($('sameChat').checked && conversationId) body.conversationId = conversationId;
 
   $('ask').disabled = true;
-  $('out').innerHTML = '<div class="card small">Working… (Steps 3 and 5 call the AI, this can take a few seconds)</div>';
+  $('out').innerHTML = '<div class="card small">Working… (Steps 3, 5 and 6 call the AI, this can take a few seconds)</div>';
 
   let httpStatus = 0, json = null;
   try {

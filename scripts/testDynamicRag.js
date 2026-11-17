@@ -1875,6 +1875,17 @@ async function testStep6() {
     const r = planner.withoutDateWords(['competitor launches between March and June 2025', "today's highlights", 'news from last week about fragrance'], []);
     return r.join('|') === 'competitor launches|highlights|news about fragrance' || r;
   });
+  await check('AI plan: needs that are not something to search ("dates", "source", "impact", "latest items") are removed', async () => {
+    const removed = [];
+    const r = planner.withoutMetaNeeds(['dates', 'source of the information', 'impact', 'latest items', 'exact facts',
+      'source of funding', 'impact of new rules on the client', 'competitor launches'], removed);
+    return (r.join('|') === 'source of funding|impact of new rules on the client|competitor launches' && removed.length === 5) || r;
+  });
+  await check('AI plan: "dates of the last 3 months" leaves nothing to search, so it is removed', async () => {
+    const removed = [];
+    const r = planner.withoutMetaNeeds(planner.withoutDateWords(['dates of the last 3 months', 'market performance of Lancôme'], removed), removed);
+    return r.join('|') === 'market performance of Lancôme' || r;
+  });
   await check('AI plan: the same need twice (after dates are taken out) is kept once', async () => {
     const r = planner.withoutDateWords(['inflation rate in Egypt last month', 'inflation rate in Egypt', 'Inflation rate in Egypt'], []);
     return r.length === 1 || r;
