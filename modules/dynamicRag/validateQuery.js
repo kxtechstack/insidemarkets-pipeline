@@ -19,6 +19,10 @@
  *      If it is still broken, tell the user to try again. Never guess.
  *   4. Code (not the AI) turns the label into the final result and picks
  *      the message the user sees.
+ *   5. "Ask back" means the question has NO topic. If Step 2 found a client
+ *      company, a competitor, a place or the word "competitors" in it, it
+ *      has a topic, so code turns the AI's "ask back" into "accept" (and
+ *      says so in the reason). Code never turns a reject into an accept.
  *
  * What Step 3 does NOT do: check if we have data for the question,
  * search anything, or answer the question.
@@ -115,7 +119,29 @@ function readAiReply(replyText) {
  *   ai_label : the raw label the AI gave
  * }
  */
-function decide(ai) {
+// What the question clearly names, found by code in Step 2 (no AI).
+function topicsFound(cleaned) {
+  const found = [];
+  for (const c of cleaned.companies_named || []) found.push(`${c.name} (${c.kind})`);
+  for (const p of cleaned.places_named || []) found.push(`${p} (place)`);
+  if (/\b(competitors?|rivals?|competition)\b/i.test(String(cleaned.preprocessed_query || ''))) found.push('competitors of the client');
+  return found;
+}
+
+function decide(ai, cleaned = {}) {
+  // "ask back" = no topic. A question naming a company, a place or the
+  // client's competitors HAS a topic: code decides accept.
+  const found = topicsFound(cleaned);
+  if (ai.label === 'clarification' && found.length) {
+    return {
+      status: 'accept',
+      reason: `code: the AI asked back (${ai.reason || 'no reason'}), but the question names ${found.join(', ')}, so it has a topic`,
+      message: null,
+      ai_label: ai.label,
+      changed_by_code: true,
+    };
+  }
+
   if (ai.label === 'accept') {
     return { status: 'accept', reason: ai.reason, message: null, ai_label: ai.label };
   }
@@ -146,6 +172,16 @@ function decide(ai) {
  * @returns the result from decide(), plus attempts (how many AI calls it took)
  * @throws ChatError 503 if the AI could not give a usable reply
  */
+// The question, plus what code already found in it and the client's
+// industry (for the example topics of an ask-back question).
+function userMessage(cleaned) {
+  const lines = [`Question to label:\n"""\n${cleaned.preprocessed_query}\n"""`];
+  const found = topicsFound(cleaned);
+  if (found.length) lines.push(`Named in the question (found by code): ${found.join(', ')}`);
+  if (cleaned.client_industry) lines.push(`Industry of the client: ${cleaned.client_industry}`);
+  return lines.join('\n');
+}
+
 async function validateQuery(cleaned) {
   // A message with no letters and no numbers at all ("...", "?!", "👍") has
   // nothing to label. No need to ask the AI: ask the user what they need.
@@ -165,7 +201,7 @@ async function validateQuery(cleaned) {
     { role: 'system', content: prompt },
     // The question is sent as separate text, fenced with """ marks, so the
     // AI treats it as something to label and not as an instruction.
-    { role: 'user', content: `Question to label:\n"""\n${cleaned.preprocessed_query}\n"""` },
+    { role: 'user', content: userMessage(cleaned) },
   ];
 
   let lastProblem = '';
@@ -181,7 +217,7 @@ async function validateQuery(cleaned) {
     }
 
     const ai = readAiReply(reply);
-    if (ai) return { ...decide(ai), attempts: attempt };
+    if (ai) return { ...decide(ai, cleaned), attempts: attempt };
 
     lastProblem = `AI reply could not be used: ${String(reply).slice(0, 200)}`;
     console.log(`[DynamicRAG] validateQuery attempt ${attempt}: ${lastProblem}`);
@@ -193,4 +229,4 @@ async function validateQuery(cleaned) {
   throw new ChatError(503, 'AI_UNAVAILABLE', 'I could not process your question right now. Please try again in a moment.');
 }
 
-module.exports = { validateQuery, readAiReply, decide };
+module.exports = { validateQuery, readAiReply, decide, userMessage, topicsFound };

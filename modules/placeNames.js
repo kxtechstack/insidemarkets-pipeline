@@ -157,6 +157,10 @@ function standardPlace(text) {
   // "Dubai, UAE" or "Riyadh (Saudi Arabia)": use the part we know
   const parts = k.split(/[,()]/).map((p) => p.trim()).filter(Boolean);
   for (const p of parts.reverse()) if (LOOKUP.has(p)) return LOOKUP.get(p);
+  // "the GCC region", "Gulf countries", "ASEAN markets": the place without
+  // the general word around it
+  const bare = k.replace(/^the\s+/, '').replace(/\s+(region|regions|area|countries|nations|states|zone|bloc|markets?|economies)$/, '').trim();
+  if (bare !== k && bare.length >= 3 && LOOKUP.has(bare)) return LOOKUP.get(bare);   // not "my market" -> MY
   return raw.replace(/\s+/g, ' ');
 }
 
@@ -183,4 +187,35 @@ function placeCovers(a, b) {
   return (REGION_MEMBERS[A] || []).includes(B) || (REGION_MEMBERS[B] || []).includes(A);
 }
 
-module.exports = { standardPlace, standardPlaces, placeCovers, isCountry, PLACES, REGIONS, REGION_MEMBERS };
+// ── "Korean", "Indian", "Qatari" -> the place ───────────────────────────
+// Only used by the chat, and only next to words like "market" or
+// "consumers" ("the Korean market" is a place, "Korean skincare" is a style).
+// Most adjectives are the place name with an ending added (Korea-n, Egypt-ian,
+// Japan-ese, Qatar-i, Europe-an); the few that are not are listed here.
+const PLACE_ADJECTIVES = {
+  chinese: 'China', emirati: 'United Arab Emirates', turkish: 'Turkey', british: 'United Kingdom',
+  english: 'United Kingdom', french: 'France', german: 'Germany', spanish: 'Spain', mexican: 'Mexico',
+  filipino: 'Philippines', thai: 'Thailand', lebanese: 'Lebanon', canadian: 'Canada', dutch: 'Netherlands',
+  swiss: 'Switzerland', italian: 'Italy', saudi: 'Saudi Arabia', gulf: 'GCC', irish: 'Ireland',
+  // (no "polish": in cosmetics it means nail polish)
+  portuguese: 'Portugal', greek: 'Greece', swedish: 'Sweden', danish: 'Denmark',
+  norwegian: 'Norway', finnish: 'Finland', peruvian: 'Peru', chilean: 'Chile', moroccan: 'Morocco',
+  latin: 'Latin America', arab: 'Middle East', arabian: 'Middle East',
+};
+const KNOWN_PLACES = new Set(Object.keys(PLACES));
+/** "korean" -> "South Korea", "egyptian" -> "Egypt", "skincare" -> null */
+function placeFromAdjective(word) {
+  const w = key(word);
+  if (!w || w.length < 4 || /\s/.test(w)) return null;
+  if (PLACE_ADJECTIVES[w]) return PLACE_ADJECTIVES[w];
+  for (const ending of ['n', 'an', 'ian', 'ese', 'i', 'ish']) {
+    if (!w.endsWith(ending)) continue;
+    const base = w.slice(0, -ending.length);
+    if (base.length < 4 || !LOOKUP.has(base)) continue;
+    const place = LOOKUP.get(base);
+    if (KNOWN_PLACES.has(place)) return place;
+  }
+  return null;
+}
+
+module.exports = { standardPlace, standardPlaces, placeCovers, isCountry, placeFromAdjective, PLACES, REGIONS, REGION_MEMBERS };

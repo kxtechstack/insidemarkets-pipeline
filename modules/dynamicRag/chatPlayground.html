@@ -124,8 +124,8 @@ const STEPS = [
   { key: null, num: 4, title: 'Remember earlier questions', what: 'Skipped for now.', skipped: true },
   { key: 'understandQuery', num: 5, title: 'Understand the question', what: 'The AI fills a form (goals, companies, places…). Code then removes anything not in the question, matches companies to the client list and works out the dates.' },
   { key: 'planTasks', num: 6, title: 'Plan what information is needed', what: 'The AI writes a work plan: for each goal, what information is needed and what analysis to do. Code then checks it: one part per goal, only jobs from the job list, each goal keeps its key job, places / companies / dates copied from Step 5, date words taken out.' },
-  { key: null, num: 7, title: 'Build the workflow (which jobs, in which order)', what: 'Not built yet.', later: true },
-  { key: null, num: 8, title: 'Check the plan', what: 'Not built yet.', later: true },
+  { key: 'buildWorkflow', num: 7, title: 'Build the workflow (which jobs, in which order)', what: 'The AI writes the searches (what to look for). Code adds the filters from Step 5 (dates, places, companies), gives a comparison one search per side, adds the analysis jobs from the Step 6 plan in a fixed order, the evidence check at the end, and keeps the limits.' },
+  { key: 'validateWorkflow', num: 8, title: 'Check the plan before anything runs', what: 'Code only, no AI. Checks the Step 7 list once more: real jobs with the right inputs, each job only uses earlier results, limits kept, dates / places / companies only from Step 5 (never past today), every goal has a search and its key job, the evidence check once at the end, no job twice. Then works out which jobs can run at the same time.' },
   { key: null, num: 9, title: 'Search and check the evidence', what: 'Not built yet.', later: true },
   { key: null, num: 10, title: 'Write the answer', what: 'Not built yet.', later: true },
 ];
@@ -303,7 +303,76 @@ function showStep6(r) {
   return rows(pairs);
 }
 
-const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5, planTasks: showStep6 };
+// ── Step 7: the workflow ──────────────────────────────────────────────────
+function inputsLine(t) {
+  const i = t.inputs || {};
+  const out = [];
+  const refList = (v) => (Array.isArray(v) ? v : [v]).map((r) => `<span class="tag info">${esc(String(r).replace('.output', ''))}</span>`).join('');
+  if (i.query) out.push(`<div>search for: <b>${esc(i.query)}</b></div>`);
+  if (t.capability === 'structured_search') out.push(`<div>newest ${i.order === 'impact' ? 'by impact ' : ''}records (no search words)</div>`);
+  if (i.modules) out.push(`<div class="small">modules: ${esc(i.modules.join(', '))}</div>`);
+  if (i.date_from || i.date_to) out.push(`<div class="small">dates: ${niceDate(i.date_from) || 'any'} to ${niceDate(i.date_to) || 'any'}</div>`);
+  if (i.countries) out.push(`<div class="small">places: ${esc(i.countries.join(', '))}</div>`);
+  if (i.companies) out.push(`<div class="small">companies: ${esc(i.companies.join(', '))}</div>`);
+  if (i.impact) out.push(`<div class="small">impact: ${esc(i.impact.join(', '))}</div>`);
+  if (i.sides) out.push(`<div>sides: ${i.sides.map((x) => `${esc(x.label)} = ${refList(x.ref)}`).join(' &nbsp;vs&nbsp; ')}</div>`);
+  for (const k of ['evidence', 'inputs', 'input', 'findings']) if (i[k]) out.push(`<div>uses: ${refList(i[k])}</div>`);
+  if (i.what_to_find) out.push(`<div class="small">find: ${esc(i.what_to_find.join('; '))}</div>`);
+  if (i.dimensions) out.push(`<div class="small">compare on: ${esc(i.dimensions.join('; '))}</div>`);
+  if (i.topic) out.push(`<div class="small">topic: ${esc(i.topic)}</div>`);
+  if (i.focus) out.push(`<div class="small">focus: ${esc(i.focus)}</div>`);
+  if (i.headings) out.push(`<div class="small">headings: ${esc(i.headings.join(', '))}</div>`);
+  return out.join('') || '<span class="none">-</span>';
+}
+
+function showStep7(r) {
+  const tasks = r.tasks || [];
+  const table = tasks.length ? `<table class="grid">
+    <tr><th>Job</th><th>What it does</th><th>Gets</th><th>Waits for</th><th>For</th></tr>
+    ${tasks.map((t) => `<tr>
+      <td><b>${esc(t.task_id)}</b>${t.added_by_code ? '<br><span class="chip warn">added by code</span>' : ''}</td>
+      <td>${job(t.capability)}</td>
+      <td>${inputsLine(t)}</td>
+      <td>${(t.depends_on || []).length ? tags(t.depends_on) : '<span class="none">- (can start at once)</span>'}</td>
+      <td>${tags(t.for_requirements)}</td>
+    </tr>`).join('')}
+  </table>` : '<span class="none">no jobs</span>';
+  const c = r.counts || {};
+  const removed = (r.removed_by_check || []).length
+    ? r.removed_by_check.map((x) => `<div><span class="tag bad">${esc(x.value)}</span> <span class="small">${esc(x.what)}: ${esc(x.why)}</span></div>`).join('')
+    : '<span class="none">nothing changed</span>';
+  const pairs = [
+    ['Result', r.built_by_code
+      ? '<span class="chip warn">Built by code</span> <span class="small">(the AI never gave usable searches)</span>'
+      : '<span class="chip ok">Built</span>'],
+    ['The jobs, in order', table],
+    ['Size', `${esc(c.tasks)} jobs (limit 12) · ${esc(c.searches)} searches (limit 6) · ${esc(c.ai_jobs)} jobs that may call the AI (${esc(r.ai_budget)} AI calls left for this question)`],
+    ['Over a limit', (r.over_limits || []).length ? tags(r.over_limits, 'bad') : '<span class="none">no</span>'],
+    ['Goals left out', (r.goals_left_out || []).length ? tags(r.goals_left_out, 'warn') + ' <span class="small">the answer must say so</span>' : '<span class="none">none</span>'],
+    ['What the code added or changed', (r.notes || []).length ? r.notes.map((n) => `<div class="small">• ${esc(n)}</div>`).join('') : '<span class="none">nothing</span>'],
+    ['Removed or cut by the code check', removed],
+    ['AI calls', esc(r.attempts) + (r.attempts > 1 ? ' <span class="small">(a reply could not be used, AI asked again)</span>' : '')],
+  ];
+  if ((r.ai_problems || []).length) pairs.push(['Why an AI reply could not be used', r.ai_problems.map((p) => `<div class="small">• ${esc(p)}</div>`).join('')]);
+  return rows(pairs);
+}
+
+function showStep8(r) {
+  const ok = r.status === 'approved';
+  const c = r.counts || {};
+  const pairs = [
+    ['Result', ok ? '<span class="chip ok">Approved</span>' : '<span class="chip bad">Refused</span> <span class="small">nothing runs, the user gets a message</span>'],
+    ['Rules broken', (r.problems || []).length ? r.problems.map((p) => `<div class="small">• ${esc(p)}</div>`).join('') : '<span class="none">none</span>'],
+    ['Run order', (r.batches || []).length
+      ? r.batches.map((b, k) => `<div class="small">${k + 1}. ${tags(b)} ${b.length > 1 ? '<span class="small">(at the same time)</span>' : ''}</div>`).join('')
+      : '<span class="none">-</span>'],
+    ['Size', `${esc(c.tasks)} jobs · ${esc(c.searches)} searches · ${esc(c.ai_jobs)} AI jobs (${esc(c.ai_budget)} AI calls left)`],
+    ['Jobs whose code is not ready yet (Step 9)', (r.not_ready || []).length ? tags(r.not_ready, 'warn') : '<span class="none">none</span>'],
+  ];
+  return rows(pairs);
+}
+
+const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5, planTasks: showStep6, buildWorkflow: showStep7, validateWorkflow: showStep8 };
 
 // ── Draw the whole result ─────────────────────────────────────────────────
 function draw(question, httpStatus, json) {
@@ -325,11 +394,14 @@ function draw(question, httpStatus, json) {
   } else if (json.status === 'clarification') {
     replyChip = '<span class="chip warn">Asked back</span>';
     replyText = esc(json.answer);
+  } else if (json.status === 'plan_failed') {
+    replyChip = '<span class="chip bad">Plan refused</span>';
+    replyText = esc(json.answer);
   } else {
     replyChip = '<span class="chip ok">Accepted</span>';
-    replyText = '<span class="none">Question understood and planned. The answer (Steps 7–10) is not built yet.</span>';
+    replyText = '<span class="none">Question understood, planned, turned into jobs and checked. The answer (Steps 9–10) is not built yet.</span>';
   }
-  const aiCalls = ['validateQuery', 'understandQuery', 'planTasks']
+  const aiCalls = ['validateQuery', 'understandQuery', 'planTasks', 'buildWorkflow']
     .reduce((sum, k) => sum + ((debug[k] && Number(debug[k].attempts)) || 0), 0);
   html += `<div class="card reply"><div class="step-head"><h2>What the user sees</h2>${replyChip}<span class="time">total ${secs(timings.total)}</span></div>
     <div class="small" style="margin-top:4px">Question: ${esc(question)} · AI calls so far: <b>${aiCalls}</b></div>
@@ -348,7 +420,8 @@ function draw(question, httpStatus, json) {
       body = SHOW[s.key](result) + raw(result);
       const stopsHere =
         (s.key === 'validateQuery' && result.status !== 'accept') ||
-        (s.key === 'understandQuery' && result.status === 'clarification');
+        (s.key === 'understandQuery' && result.status === 'clarification') ||
+        (s.key === 'validateWorkflow' && result.status !== 'approved');
       if (stopsHere) { chip = '<span class="chip warn">chat stops here</span>'; stopped = true; }
     } else if (json && json.failed_step === s.key && !stopped) {
       chip = '<span class="chip bad">failed here</span>';
@@ -386,7 +459,7 @@ async function ask(questionFromHistory) {
   if ($('sameChat').checked && conversationId) body.conversationId = conversationId;
 
   $('ask').disabled = true;
-  $('out').innerHTML = '<div class="card small">Working… (Steps 3, 5 and 6 call the AI, this can take a few seconds)</div>';
+  $('out').innerHTML = '<div class="card small">Working… (Steps 3, 5, 6 and 7 call the AI, this can take a few seconds)</div>';
 
   let httpStatus = 0, json = null;
   try {

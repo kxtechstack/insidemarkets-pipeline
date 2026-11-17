@@ -38,7 +38,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { ChatError } = require('./chatError');
 const { preprocessText } = require('./preprocessQuery');   // only to spot date words
-const { standardPlace, PLACES } = require('../placeNames');  // the same place names the news pipeline saves
+const { standardPlace, placeFromAdjective, PLACES } = require('../placeNames');  // the same place names the news pipeline saves
 const {
   UNDERSTAND_PROMPT_ID,
   PROMPT_REFRESH_MS,
@@ -527,7 +527,9 @@ function readRange(text, today) {
   return range(start.from, end.to);
 }
 
-function resolveOne(expr, today) {
+// yearHint: the year the user gave elsewhere in the question, for a month /
+// quarter / half written without one ("September and October 2025").
+function resolveOne(expr, today, yearHint = null) {
   const t = expr.text.toLowerCase();
   const years = (t.match(/\d{4}|'?\d{2}\b/g) || []).map((x) => x.replace("'", ''));
 
@@ -555,8 +557,8 @@ function resolveOne(expr, today) {
       const qm = t.match(/q([1-4])/) || t.match(/(first|second|third|fourth|1st|2nd|3rd|4th)/);
       const q = qm ? Number(word[qm[1]] || qm[1]) : 1;
       if (years.length === 0) {
-        const p = readPoint(`q${q}`, today);
-        return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
+        const p = readPoint(`q${q}`, today, yearHint);
+        return { ...range(p.from, p.to), note: yearHint ? `year ${yearHint} taken from the question` : 'no year given: the most recent one' };
       }
       const y = toYear(years[years.length - 1]);
       return range(monthStart(y, (q - 1) * 3), monthEnd(y, (q - 1) * 3 + 2));
@@ -564,8 +566,8 @@ function resolveOne(expr, today) {
     case 'half_year': {
       const h = t.includes('h2') ? 2 : 1;
       if (years.length === 0) {
-        const p = readPoint(`h${h}`, today);
-        return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
+        const p = readPoint(`h${h}`, today, yearHint);
+        return { ...range(p.from, p.to), note: yearHint ? `year ${yearHint} taken from the question` : 'no year given: the most recent one' };
       }
       const y = toYear(years[years.length - 1]);
       return range(monthStart(y, h === 1 ? 0 : 6), monthEnd(y, h === 1 ? 5 : 11));
@@ -589,10 +591,10 @@ function resolveOne(expr, today) {
       }
       const since = /^since\s/.test(t);
       const word = t.match(/[a-z]+\.?$/);
-      const p = word ? readPoint(word[0], today) : null;
+      const p = word ? readPoint(word[0], today, yearHint) : null;
       if (!p) return null;
       if (since) return range(p.from, today);
-      return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
+      return { ...range(p.from, p.to), note: yearHint ? `year ${yearHint} taken from the question` : 'no year given: the most recent one' };
     }
     case 'current_period': {
       if (t === 'today') return range(today, today);
@@ -626,15 +628,46 @@ function resolveOne(expr, today) {
  * @param today            a Date (UTC midnight). Given by the tests; normally todayIn(CHAT_TIMEZONE)
  * @returns { ranges: [{ text, kind, from, to, note? }], from, to } or null if no dates
  */
+// The year a date phrase names, if it names exactly one ("October 2025",
+// "2025", "this year", "last year"). Used for months written without a year.
+function yearOf(expr, r, today) {
+  const t = expr.text.toLowerCase();
+  const y = today.getUTCFullYear();
+  if (['month_year', 'day', 'fiscal_year'].includes(expr.kind) && r.from.slice(0, 4) === r.to.slice(0, 4)) return Number(r.from.slice(0, 4));
+  if (['quarter', 'half_year'].includes(expr.kind) && /\d/.test(t)) return Number(r.from.slice(0, 4));
+  if (expr.kind === 'year') return Number(r.from.slice(0, 4));
+  if (/^(this|current) year$/.test(t)) return y;
+  if (/^(last|previous) year$/.test(t)) return y - 1;
+  if (/^next year$/.test(t)) return y + 1;
+  return null;
+}
+// A phrase that only says the year ("2025", "this year"): when it gives its
+// year to months in the same question, it is not a date range of its own.
+const isYearOnly = (expr) => expr.kind === 'year' || /^(this|current|last|previous|next) year$/i.test(expr.text);
+
 function resolveTime(timeExpressions, today) {
+  const exprs = timeExpressions || [];
+  const first = exprs.map((expr) => {
+    try { return resolveOne(expr, today); } catch (err) { return null; }
+  });
+  // "September and October 2025", "Q1 and Q2 2025", "March and April this year":
+  // a month / quarter without a year takes the ONE year the question names.
+  const noYear = exprs.map((e, i) => Boolean(first[i] && first[i].note && first[i].note.startsWith('no year given')));
+  const years = [...new Set(exprs.map((e, i) => (first[i] && !noYear[i] ? yearOf(e, first[i], today) : null)).filter((y) => y !== null))];
+  const sharedYear = noYear.some(Boolean) && years.length === 1 ? years[0] : null;
+
   const ranges = [];
   const unread = [];
-  for (const expr of timeExpressions || []) {
-    let r = null;
-    try { r = resolveOne(expr, today); } catch (err) { r = null; }
+  exprs.forEach((expr, i) => {
+    let r = first[i];
+    if (sharedYear !== null && noYear[i]) {
+      try { r = resolveOne(expr, today, sharedYear); } catch (err) { r = null; }
+    }
+    // the year phrase itself was only the year of those months
+    if (sharedYear !== null && isYearOnly(expr) && r) return;
     if (r && r.from && r.to) ranges.push({ text: expr.text, kind: expr.kind, ...r });
     else unread.push(expr.text);
-  }
+  });
   if (ranges.length === 0 && unread.length === 0) return null;
   return {
     ranges,
@@ -701,8 +734,16 @@ const KIND_WORDS = new Set([
 ]);
 // words that make a "place" a market or topic, not a place: "beauty market", "my market"
 const NOT_PLACE_WORDS = new Set([
-  'market', 'markets', 'industry', 'industries', 'sector', 'sectors', 'segment', 'segments',
+  'market', 'markets', 'mkt', 'mkts', 'industry', 'industries', 'sector', 'sectors', 'segment', 'segments',
   'category', 'categories', 'business', 'space', 'channel', 'channels',
+]);
+// Next to these words an adjective is a PLACE: "the Korean market", "Indian
+// consumers", "Saudi regulation". Next to anything else it is a style or
+// origin, not a place: "Korean skincare", "French perfume".
+const PLACE_CONTEXT_WORDS = new Set([
+  ...NOT_PLACE_WORDS, 'consumer', 'consumers', 'shopper', 'shoppers', 'customer', 'customers', 'buyer', 'buyers',
+  'retail', 'retailers', 'economy', 'government', 'regulation', 'regulations', 'regulator', 'regulators', 'rules',
+  'law', 'laws', 'policy', 'policies', 'tax', 'taxes', 'sales', 'demand', 'population',
 ]);
 const plainWords = (text) => normalise(text).split(' ').filter(Boolean);
 const STANDARD_PLACES = new Set(Object.keys(PLACES));
@@ -750,10 +791,33 @@ function companyKind(item, question, checkCapitals) {
 //   'own'   my market / our region -> the client's own business, not a place
 //   'topic' beauty market          -> a topic, not a place
 //   'place' { standard, known }    -> known = in the standard place list
+// A place hiding in a market phrase: "Korean market" -> South Korea,
+// "UAE beauty market" -> United Arab Emirates. Only next to market words.
+function placeInMarketPhrase(item) {
+  const raw = String(item).split(/\s+/).filter(Boolean);
+  if (!plainWords(item).some((w) => PLACE_CONTEXT_WORDS.has(w))) return null;
+  for (let size = Math.min(3, raw.length); size >= 1; size -= 1) {
+    for (let start = 0; start + size <= raw.length; start += 1) {
+      const piece = raw.slice(start, start + size).join(' ');
+      const std = standardPlace(piece);
+      if (STANDARD_PLACES.has(std) && piece.length >= 2) return { place: std, word: piece };
+      if (size === 1) {
+        const adj = placeFromAdjective(piece);
+        if (adj) return { place: adj, word: piece };
+      }
+    }
+  }
+  return null;
+}
+
 function placeKind(item) {
   const words = plainWords(item);
   if (words.some((w) => OWN_WORDS.has(w))) return { kind: 'own' };
-  if (words.some((w) => NOT_PLACE_WORDS.has(w))) return { kind: 'topic' };
+  if (words.some((w) => NOT_PLACE_WORDS.has(w))) {
+    const hidden = placeInMarketPhrase(item);
+    if (hidden) return { kind: 'place_and_topic', standard: hidden.place, known: true };
+    return { kind: 'topic' };
+  }
   for (const tryName of [item, normalise(item)]) {
     const standard = standardPlace(tryName);
     if (STANDARD_PLACES.has(standard)) return { kind: 'place', standard, known: true };
@@ -855,6 +919,10 @@ function checkForm(form, question, names) {
       removed.push({ field: 'places', value: asked, why: 'a market or topic, not a place: moved to topics' });
       continue;
     }
+    if (p.kind === 'place_and_topic') {
+      movedToTopics.push(asked);
+      removed.push({ field: 'places', value: asked, why: `a market phrase: the place "${p.standard}" kept, the phrase moved to topics` });
+    }
     if (places.includes(p.standard)) {
       removed.push({ field: 'places', value: asked, why: `the same place as ${p.standard}` });
       continue;
@@ -883,14 +951,17 @@ function checkForm(form, question, names) {
   // "competitors" / "rivals" with no company named = the client's own
   // competitors ("Competitor activity since March"). With a company named
   // ("Nike's competitors") it is about that company instead.
+  // ("How is <our company> doing against competitors?" = our own competitors too)
+  const onlyOwnNamed = companiesOut.length > 0 && companiesOut.every((c) => c.matched && c.matched.type === 'own_company');
   const ownCompetitors = rivalsByName ||
-    (/\b(competitors?|rivals?)\b/i.test(String(question)) && companiesOut.length === 0);
+    // ("the competition" = our competitors; "compare on demand and competition" = a topic)
+    (/\b(competitors?|rivals?|the competition)\b/i.test(String(question)) && (companiesOut.length === 0 || onlyOwnNamed));
   // Dates are worked out by code (resolveTime), so date words the AI put in
   // topics or metrics are taken out: metrics ["last 3 months"] -> [],
   // topics ["sales since 2020"] -> ["sales"]. (Product names are left alone:
   // some have years in them.)
   const withoutDates = (field) => form[field].flatMap((item) => {
-    const p = preprocessText(item);
+    const p = preprocessText(item, [], [], { fixWords: false });
     if (p.time_expressions.length === 0) return [item];
     let rest = p.preprocessed_query;
     for (const t of p.time_expressions) rest = rest.split(t.text).join(' ');
@@ -910,6 +981,16 @@ function checkForm(form, question, names) {
 
   const topics = withoutDates('topics');
   for (const t of movedToTopics) if (!topics.some((x) => x.toLowerCase() === t.toLowerCase())) topics.push(t);
+  // a place hiding in a topic ("Korean market"), when the user really wrote it
+  if (!skipChecks) {
+    for (const t of topics) {
+      const hidden = placeInMarketPhrase(t);
+      if (hidden && !places.includes(hidden.place) && isInQuestion(hidden.word, question)) {
+        places.push(hidden.place);
+        removed.push({ field: 'places', value: hidden.place, why: `found in the topic "${t}" ("${hidden.word}")` });
+      }
+    }
+  }
 
   const { cut_by_limit: cutByLimit, ...rest } = form;   // already recorded in removed
   const checked = {
@@ -1002,9 +1083,17 @@ async function understandQuery(request, cleaned, options = {}) {
     });
   }
 
+  // Step 2 may have fixed spelling. The AI also sees the question exactly as
+  // typed, so a name that was "fixed" by mistake ("careem" -> "career") is
+  // still seen. Code checks accept names from either version.
+  const original = cleaned.original_query && String(cleaned.original_query).trim();
+  const changedBySpelling = original && (cleaned.corrections_applied || []).length > 0 && original !== question;
+  const asTyped = changedBySpelling ? `\nThe same question exactly as the user typed it (names may be written only here):\n"""\n${original}\n"""` : '';
+  const checkText = changedBySpelling ? `${question}\n${original}` : question;
+
   const messages = [
     { role: 'system', content: prompt },
-    { role: 'user', content: `Question:\n"""\n${question}\n"""` },
+    { role: 'user', content: `Question:\n"""\n${question}\n"""` + asTyped },
   ];
 
   // Ask the AI. If its reply cannot be used, ask once more and tell it
@@ -1063,17 +1152,20 @@ async function understandQuery(request, cleaned, options = {}) {
     return askBack(NO_TOPIC_MESSAGE, names, { attempts, ai_problem: lastProblem });
   }
 
-  const { checked, removed, checks_skipped } = checkForm(form, question, names);
+  const { checked, removed, checks_skipped } = checkForm(form, checkText, names);
   const result = {
     status: 'understood',
     message: null,
     ...checked,
     time,
+    today: ymd(today),   // the day the dates were worked out from, as text (Step 7 never searches past it)
     client: { ...names.client, competitors: (names.competitors || []).map((c) => c.name) },
     removed_by_check: removed,
     checks_skipped,
     attempts,
   };
+
+  addComparisonGoal(result, checkText);
 
   if (!hasSomethingToWorkOn(checked) || onlyGeneralWords(question, cleaned)) {
     result.status = 'clarification';
@@ -1082,8 +1174,29 @@ async function understandQuery(request, cleaned, options = {}) {
   return result;
 }
 
+// "compared to", "vs", "versus": the user asked for a comparison, even when
+// the AI did not list it as a goal ("trends in Qatar and Kuwait compared to
+// Saudi" -> trends AND comparison). Only when there are two or more things
+// to compare (places, companies, dates, or one company and the client).
+const COMPARE_WORDS = /\b(compare|compares|compared|comparing|comparison|vs|versus|relative to|benchmark(ed)? against)\b/i;
+const ALREADY_COMPARES = ['comparison', 'competitor_analysis', 'framework'];
+function addComparisonGoal(result, questionText) {
+  if (!COMPARE_WORDS.test(String(questionText || ''))) return;
+  const goals = [result.primary_goal, ...(result.secondary_goals || [])];
+  if (goals.some((g) => ALREADY_COMPARES.includes(g))) return;
+  const companies = result.companies || [];
+  const notOwn = companies.filter((c) => !(c.matched && c.matched.type === 'own_company'));
+  const ranges = (result.time && result.time.ranges) || [];
+  const twoThings = (result.places || []).length >= 2 || companies.length >= 2 || ranges.length >= 2 ||
+    (notOwn.length === 1 && result.about_own_business);
+  if (!twoThings) return;
+  result.secondary_goals = [...(result.secondary_goals || []), 'comparison'];
+  result.removed_by_check.push({ field: 'secondary_goals', value: 'comparison', why: 'added by code: the question asks to compare ("compared", "vs") two or more things' });
+}
+
 module.exports = {
   understandQuery,
+  addComparisonGoal,
   // parts, exported for the test file
   GOAL_TYPES,
   readAiReply,

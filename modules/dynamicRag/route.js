@@ -15,7 +15,9 @@
  *   Step 4  (skipped for now)    remembering earlier questions in the chat
  *   Step 5  understandQuery.js   goals, companies, places, dates... (AI + code checks)
  *   Step 6  planTasks.js         work plan: what info each goal needs + what analysis (AI + code checks)
- *   Step 7+ not built yet
+ *   Step 7  buildWorkflow.js     the numbered list of jobs (searches + analysis), in order (AI + code)
+ *   Step 8  validateWorkflow.js  checks that list before anything runs; approved list + run order (code only)
+ *   Step 8+ not built yet
  *
  * Helpers (not steps):
  *   capabilityRegistry.js the job list the planner may use (Steps 6-9)
@@ -34,26 +36,31 @@
  * FOR TESTING ONLY (to be switched off before real clients use the chat):
  *   - "debug" in the reply shows what every step produced, and
  *     debug.timings how long each step took (milliseconds).
- *   - body.stopAfterStep = 1, 2, 3 or 5 stops the chat after that step, so the
+ *   - body.stopAfterStep = 1, 2, 3, 5, 6 or 7 stops the chat after that step, so the
  *     test file can check each step alone (Steps 1 and 2 without the AI).
  *   - GET /dynamic-rag/playground opens the playground page, only when the
- *     .env file has DR_PLAYGROUND=on.
+ *     .env file has DR_PLAYGROUND=on (and, on the test server, with
+ *     ?key=<DR_PLAYGROUND_KEY> in the link).
  */
 
 const path = require('path');
 const { ChatError } = require('./chatError');
-const { PLAYGROUND_ON } = require('./chatConfig');
+const { PLAYGROUND_ON, PLAYGROUND_KEY, PLAN_FAILED_MESSAGE } = require('./chatConfig');
 const { receiveQuestion } = require('./receiveQuestion');   // Step 1
 const { preprocessQuery } = require('./preprocessQuery');   // Step 2
 const { validateQuery } = require('./validateQuery');       // Step 3
 const { understandQuery } = require('./understandQuery');   // Step 5
 const { planTasks } = require('./planTasks');               // Step 6
-const { traceChat, traceStep, traceChatResult } = require('./chatTracing'); // Phoenix records (off on the server)
+const { buildWorkflow } = require('./buildWorkflow');       // Step 7
+const { validateWorkflow } = require('./validateWorkflow'); // Step 8
+const { traceChat, traceStep, traceChatResult } = require('./chatTracing'); // Phoenix records (off unless PHOENIX_COLLECTOR_ENDPOINT is set)
 
 function registerDynamicRagRoute(app) {
   // ── Test page: type a question, see every step ─────────────────────────
   app.get('/dynamic-rag/playground', (req, res) => {
-    if (!PLAYGROUND_ON) {
+    // off, or (on the test server) the secret key in the link is missing/wrong:
+    // the same answer, so nobody can tell the page exists
+    if (!PLAYGROUND_ON || (PLAYGROUND_KEY && req.query.key !== PLAYGROUND_KEY)) {
       return res.status(404).send('The playground is off. Add DR_PLAYGROUND=on to the .env file and restart the server.');
     }
     return res.sendFile(path.join(__dirname, 'chatPlayground.html'));
@@ -157,7 +164,37 @@ async function handleChat(req, res) {
       `removed=${plan.removed_by_check.length} aiCalls=${plan.attempts} | ${Date.now() - startedAt}ms`
     );
 
-    // ── Step 7 onwards will be added here ──────────────────────────
+    if (stopAfterStep === 6) return reply('accept', null);
+
+    // ── Step 7: the list of jobs, in order (AI + code) ─────────────
+    currentStep = 'buildWorkflow';
+    const aiCallsSoFar = (validation.attempts || 0) + (understood.attempts || 0) + (plan.attempts || 0);
+    const workflow = await traceStep('Step 7 – buildWorkflow', { cleaned, understood, plan },
+      () => buildWorkflow(cleaned, understood, plan, { aiCallsSoFar }));
+    stepDone('buildWorkflow', workflow);
+    console.log(
+      `[DynamicRAG] buildWorkflow ok | jobs=${workflow.counts.tasks} searches=${workflow.counts.searches} ` +
+      `aiJobs=${workflow.counts.ai_jobs}/${workflow.ai_budget} leftOut=${workflow.goals_left_out.length} ` +
+      `builtByCode=${workflow.built_by_code} aiCalls=${workflow.attempts} | ${Date.now() - startedAt}ms`
+    );
+
+    if (stopAfterStep === 7) return reply('accept', null);
+
+    // ── Step 8: check the list of jobs before anything runs (code) ──
+    currentStep = 'validateWorkflow';
+    const checkedPlan = await traceStep('Step 8 – validateWorkflow', { workflow, understood, plan },
+      async () => validateWorkflow(workflow, understood, plan));
+    stepDone('validateWorkflow', checkedPlan);
+    console.log(
+      `[DynamicRAG] validateWorkflow ${checkedPlan.status} | problems=${checkedPlan.problems.length} ` +
+      `batches=${checkedPlan.batches.length} notReady=${checkedPlan.not_ready.length} | ${Date.now() - startedAt}ms`
+    );
+    if (checkedPlan.status !== 'approved') {
+      console.log(`[DynamicRAG] plan refused: ${checkedPlan.problems.join(' | ')}`);
+      return reply('plan_failed', PLAN_FAILED_MESSAGE);
+    }
+
+    // ── Step 9 onwards will be added here ──────────────────────────
 
     return reply('accept', null);
 

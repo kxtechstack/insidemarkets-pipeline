@@ -70,10 +70,28 @@ module.exports = {
   // Which row of the prompts table holds the Step 6 instruction for the AI.
   PLAN_PROMPT_ID: 'dynamic_rag_plan_tasks_v1',
 
+  // ── Step 7 (buildWorkflow.js) ──────────────────────────────────────────
+  // Which row of the prompts table holds the Step 7 instruction for the AI.
+  WORKFLOW_PROMPT_ID: 'dynamic_rag_build_workflow_v1',
+
+  // ── Step 8 (validateWorkflow.js) ───────────────────────────────────────
+  // What the user sees when the list of jobs breaks a rule (nothing runs).
+  PLAN_FAILED_MESSAGE:
+    'I could not put together a safe way to answer this question. Please try asking it in a simpler way, ' +
+    'for example one company, market or topic at a time.',
+  // true = Step 8 also refuses jobs whose real code (Step 9) is not ready.
+  // Off until Step 9 is built; then switch it on.
+  REQUIRE_READY_JOBS: false,
+
   // ── Test tools ─────────────────────────────────────────────────────────
   // The chat playground page (/dynamic-rag/playground) shows what every
   // step did with a question. Only for testing on our own laptop: it opens
   // only when the .env file has DR_PLAYGROUND=on. Keep it OFF on the live
   // server.
   PLAYGROUND_ON: process.env.DR_PLAYGROUND === 'on',
+  // On the TEST server the playground also needs a secret key in the link:
+  //   http://<server>/dynamic-rag/playground?key=<DR_PLAYGROUND_KEY>
+  // Without the right key the page says it is off. On the laptop leave
+  // DR_PLAYGROUND_KEY out and the page opens without a key, as before.
+  PLAYGROUND_KEY: process.env.DR_PLAYGROUND_KEY || '',
 };

@@ -143,7 +143,9 @@ const plainNeed = (text) => String(text).replace(/_+/g, ' ').replace(/\s+/g, ' '
  * @returns the parsed value, or undefined when it still cannot be read
  */
 function parseJsonLoose(text) {
-  const base = [text, text.replace(/,\s*([}\]])/g, '$1')];
+  // also: a comma missing between two items ("} {" or "\"a\" \"b\"")
+  const commas = (t) => t.replace(/}\s*{/g, '},{').replace(/"\s*\n\s*"/g, '",\n"');
+  const base = [text, text.replace(/,\s*([}\]])/g, '$1'), commas(text), commas(text).replace(/,\s*([}\]])/g, '$1')];
   const tries = [...base];
   // the closing brackets at the very end, e.g. "]]}" or "]}}": try taking out
   // one of them, then two of them
@@ -157,10 +159,33 @@ function parseJsonLoose(text) {
       for (let j = 0; j < one.length; j++) tries.push(head + one.slice(0, j) + one.slice(j + 1));
     }
   }
+  // a reply cut short or missing its last brackets: add the missing ones
+  for (const t of base) tries.push(t + missingClosers(t));
   for (const t of tries) {
     try { return JSON.parse(t); } catch (err) { /* try the next one */ }
   }
   return undefined;
+}
+
+// The closing brackets a JSON text still needs ("{"a": [1" -> "]}"),
+// ignoring brackets inside strings.
+function missingClosers(text) {
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (const ch of String(text)) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if ((ch === '}' || ch === ']') && stack[stack.length - 1] === ch) stack.pop();
+  }
+  return (inString ? '"' : '') + stack.reverse().join('');
 }
 
 /**
@@ -179,7 +204,7 @@ function withoutDateWords(items, removed) {
   const out = [];
   const keep = (text) => { if (!out.some((o) => o.toLowerCase() === text.toLowerCase())) out.push(text); };
   for (const item of items) {
-    const p = preprocessText(item);
+    const p = preprocessText(item, [], [], { fixWords: false });   // find dates only, never change names
     if (p.time_expressions.length === 0) { keep(item); continue; }
     let rest = p.preprocessed_query;
     for (const t of p.time_expressions) rest = rest.split(t.text).join(' ');
@@ -189,7 +214,7 @@ function withoutDateWords(items, removed) {
       .replace(DATE_GLUE, ' ')
       .replace(/\s+/g, ' ').trim();
     // drop little words left hanging at either end: "trends over the" -> "trends"
-    const EDGE = /^(?:in|of|for|over|during|the|from|to|since|and|by|at|on|about|,|-)\s+|\s+(?:in|of|for|over|during|the|from|to|since|and|by|at|on|about|,|-)$/i;
+    const EDGE = /^(?:in|of|for|over|during|the|from|to|since|and|by|at|on|about|vs|versus|compared to|than|,|-)\s+|\s+(?:in|of|for|over|during|the|from|to|since|and|by|at|on|about|vs|versus|compared to|than|,|-)$/i;
     while (EDGE.test(rest)) rest = rest.replace(EDGE, '').trim();
     // "news from about fragrance" -> "news about fragrance": the middle words left alone are fine,
     // but two little words in a row are not.

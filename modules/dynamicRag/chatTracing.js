@@ -11,8 +11,13 @@
  * So when an answer is wrong, you can see which step went wrong.
  *
  * ON / OFF:
- *   ON  only when the .env file has  PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
- *   OFF when that line is missing (the server .env does NOT have it).
+ *   ON  only when the .env file has PHOENIX_COLLECTOR_ENDPOINT:
+ *         laptop:       PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
+ *         TEST server:  PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
+ *                       PHOENIX_API_KEY=<system key made in Phoenix>
+ *       (the server's Phoenix has a login, so records are sent with that
+ *        key; the Phoenix package reads PHOENIX_API_KEY by itself)
+ *   OFF when that line is missing. The LIVE server never gets it.
  *   When OFF, every function below just runs the step as normal and does
  *   nothing else, and the Phoenix package is not even loaded.
  *
