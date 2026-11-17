@@ -59,6 +59,17 @@ module.exports = {
     'What should I look at? Tell me a company, market, product or topic, for example ' +
     '"competitor launches this month" or "skincare trends in the UAE".',
 
+  // What the user sees when the question has a date we could not read
+  // (for example "03/04/2025", which is March 4 or April 3 by country).
+  // {words} is replaced by the date words that were not understood.
+  TIME_UNCLEAR_MESSAGE:
+    'I could not read the date in your question ({words}). Please write it like ' +
+    '"March 2025", "Q1 2025", "1 March 2025", "March to June 2025" or "last 6 months".',
+
+  // ── Step 6 (planTasks.js) ──────────────────────────────────────────────
+  // Which row of the prompts table holds the Step 6 instruction for the AI.
+  PLAN_PROMPT_ID: 'dynamic_rag_plan_tasks_v1',
+
   // ── Test tools ─────────────────────────────────────────────────────────
   // The chat playground page (/dynamic-rag/playground) shows what every
   // step did with a question. Only for testing on our own laptop: it opens

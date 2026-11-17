@@ -38,11 +38,13 @@ const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { ChatError } = require('./chatError');
 const { preprocessText } = require('./preprocessQuery');   // only to spot date words
+const { standardPlace, PLACES } = require('../placeNames');  // the same place names the news pipeline saves
 const {
   UNDERSTAND_PROMPT_ID,
   PROMPT_REFRESH_MS,
   CHAT_TIMEZONE,
   NO_TOPIC_MESSAGE,
+  TIME_UNCLEAR_MESSAGE,
 } = require('./chatConfig');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -66,7 +68,7 @@ const GOAL_TYPES = [
 ];
 
 const MAX_ATTEMPTS = 2;        // ask the AI at most twice
-const MAX_ITEMS = 10;          // per list (companies, places...)
+const MAX_ITEMS = 20;          // per list (companies, places...). Anything past this is recorded, never dropped silently
 const MAX_ITEM_CHARS = 100;
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -119,7 +121,8 @@ async function loadClientNames(clientId) {
 // ═════════════════════════════════════════════════════════════════════════
 const cleanItem = (v) => String(v).replace(/\s+/g, ' ').trim().slice(0, MAX_ITEM_CHARS);
 
-function cleanList(value) {
+// cut: optional list. Items past MAX_ITEMS are written there as { field, value }.
+function cleanList(value, field = null, cut = null) {
   if (!Array.isArray(value)) return [];
   const out = [];
   for (const v of value) {
@@ -127,8 +130,12 @@ function cleanList(value) {
     // "corrected spelling: Nike" is a note the AI wrote, not a name
     if (v.includes(':')) continue;
     const item = cleanItem(v);
-    if (item && !out.some((o) => o.toLowerCase() === item.toLowerCase())) out.push(item);
-    if (out.length >= MAX_ITEMS) break;
+    if (!item || out.some((o) => o.toLowerCase() === item.toLowerCase())) continue;
+    if (out.length >= MAX_ITEMS) {
+      if (cut) cut.push({ field, value: item });
+      continue;
+    }
+    out.push(item);
   }
   return out;
 }
@@ -168,15 +175,17 @@ function buildForm(p, primary) {
     .map((g) => g.toLowerCase())
     .filter((g) => GOAL_TYPES.includes(g) && g !== primary);
 
+  const cut = [];
   return {
     primary_goal: primary,
     secondary_goals: secondary,
-    companies: cleanList(p.companies),
-    places: cleanList(p.places),
-    industries: cleanList(p.industries),
-    products: cleanList(p.products),
-    topics: cleanList(p.topics),
-    metrics: cleanList(p.metrics),
+    companies: cleanList(p.companies, 'companies', cut),
+    places: cleanList(p.places, 'places', cut),
+    industries: cleanList(p.industries, 'industries', cut),
+    products: cleanList(p.products, 'products', cut),
+    topics: cleanList(p.topics, 'topics', cut),
+    metrics: cleanList(p.metrics, 'metrics', cut),
+    cut_by_limit: cut,
     about_own_business: p.about_own_business === true,
     dashboard_request: p.dashboard_request === true,
     constraints: cleanList(p.constraints),
@@ -358,6 +367,15 @@ function findListedCompaniesInQuestion(question, companyList) {
 //   next 3 years / coming quarter  -> from today forward
 //   this month / this year / YTD   -> from its first day up to today
 //   2024 / March 2025 / Q1 2025    -> that whole year / month / quarter
+//   3 March 2025 / 2025-03-03      -> that one day
+//   March / Q1 (no year)           -> the most recent one that has started
+//   March to June 2025, Jan-Mar 2025, between Q1 and Q3 2025, Nov 2024 - Feb 2025
+//                                  -> from the start of the first to the end of
+//                                     the second. A missing year is taken from
+//                                     the other side ("Nov to Feb 2025" = Nov 2024).
+//                                     No year at all: the most recent such range
+//                                     that has started.
+//   since March                    -> from the start of that month up to today
 //   since 2020                     -> from 1 Jan 2020 up to today
 //   FY2024                         -> treated as calendar year 2024 for now
 //                                     (each company's own financial year
@@ -430,6 +448,85 @@ function calendarUnit(today, unit, offset) {
   return range(utc(y + offset, 0, 1), utc(y + offset, 11, 31));
 }
 
+// ── One point in time, in any form ("March", "3 March 2025", "Q1", "FY24") ──
+// Returns { from, to, hasYear } as Dates, or null if it cannot be read.
+// yearHint: the year to use when the text has none (null = the most recent
+// one that has already started).
+function readPoint(text, today, yearHint = null) {
+  const t = text.toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) { const d = utc(+iso[1], +iso[2] - 1, +iso[3]); return { from: d, to: d, hasYear: true }; }
+  const isoMonth = t.match(/^(\d{4})-(\d{2})$/);
+  if (isoMonth) { const y = +isoMonth[1]; const m = +isoMonth[2] - 1; return { from: monthStart(y, m), to: monthEnd(y, m), hasYear: true }; }
+
+  const yearMatch = t.match(/(?:^|\s|fy\s?'?)(\d{4}|'\d{2})$|^fy\s?'?(\d{2,4})$/);
+  const fy = t.match(/^fy\s?'?(\d{2,4})$/);
+  let year = null;
+  if (fy) year = toYear(fy[1]);
+  else if (yearMatch && yearMatch[1]) year = toYear(yearMatch[1].replace("'", ''));
+  const body = (fy ? '' : t.replace(/\s*(?:fy\s?)?'?(\d{4}|'\d{2})$/, '')).trim();
+
+  // what the point is, without its year: [startMonth, endMonth, day]
+  let shape = null;
+  const mon = (w) => MONTHS[w.slice(0, 3)];
+  let m;
+  if (fy || body === '') shape = [0, 11, null];                                    // a year
+  else if ((m = body.match(/^q([1-4])$/))) shape = [(m[1] - 1) * 3, (m[1] - 1) * 3 + 2, null];
+  else if ((m = body.match(/^q([1-4]) fy$/))) shape = [(m[1] - 1) * 3, (m[1] - 1) * 3 + 2, null];
+  else if ((m = body.match(/^h([12])$/))) shape = m[1] === '1' ? [0, 5, null] : [6, 11, null];
+  else if ((m = body.match(/^([a-z]+)$/)) && mon(m[1]) !== undefined) shape = [mon(m[1]), mon(m[1]), null];
+  else if ((m = body.match(/^([a-z]+) ?(\d{1,2})(?:st|nd|rd|th)?$/)) && mon(m[1]) !== undefined) shape = [mon(m[1]), mon(m[1]), +m[2]];
+  else if ((m = body.match(/^(\d{1,2})(?:st|nd|rd|th)? (?:of )?([a-z]+)$/)) && mon(m[2]) !== undefined) shape = [mon(m[2]), mon(m[2]), +m[1]];
+  if (!shape) return null;
+  const [m1, m2, day] = shape;
+
+  const hasYear = year !== null;
+  if (!hasYear) {
+    if (body === '') return null;
+    year = yearHint !== null ? yearHint : today.getUTCFullYear();
+    // no year and no hint: the most recent one that has already started
+    if (yearHint === null && utc(year, m1, day || 1) > today) year -= 1;
+  }
+  if (day !== null) {
+    const d = utc(year, m1, day);
+    if (d.getUTCMonth() !== m1) return null;                                     // "31 June"
+    return { from: d, to: d, hasYear };
+  }
+  return { from: monthStart(year, m1), to: monthEnd(year, m2), hasYear };
+}
+
+// "between March and June 2025", "Jan-Mar 2025", "from Q1 to Q3 2025"
+function readRange(text, today) {
+  const t = text.replace(/^\s*(?:between|from)\s+/i, '');
+  const parts =
+    t.split(/\s+(?:and|to|through|till|until)\s+/i).length === 2 ? t.split(/\s+(?:and|to|through|till|until)\s+/i)
+      : t.split(/\s*[–—]\s*|\s+-\s+/).length === 2 ? t.split(/\s*[–—]\s*|\s+-\s+/)
+        : t.split(/-(?=[A-Za-z])|(?<=[A-Za-z.])-/).length === 2 ? t.split(/-(?=[A-Za-z])|(?<=[A-Za-z.])-/)
+          : null;
+  if (!parts) return null;
+
+  let end = readPoint(parts[1], today);
+  if (!end) return null;
+  let start = readPoint(parts[0], today, end.hasYear ? end.to.getUTCFullYear() : null);
+  if (!start) return null;
+  if (!end.hasYear && !start.hasYear) {
+    // "October to December", no year at all: the most recent such range that
+    // has started (asked in Nov 2026 = Oct 2026 to Dec 2026)
+    start = readPoint(parts[0], today);
+    end = readPoint(parts[1], today, start.from.getUTCFullYear());
+    if (end.to < start.from) end = readPoint(parts[1], today, start.from.getUTCFullYear() + 1);
+  } else if (!end.hasYear && start.hasYear) {
+    // "March 2024 to June": the end takes the start's year
+    end = readPoint(parts[1], today, start.from.getUTCFullYear());
+    if (end.to < start.from) end = readPoint(parts[1], today, start.from.getUTCFullYear() + 1);
+  } else if (!start.hasYear && start.from > end.to) {
+    // "Nov to Feb 2025": November is in the year before
+    start = readPoint(parts[0], today, start.from.getUTCFullYear() - 1);
+  }
+  if (!start || !end || start.from > end.to) return null;
+  return range(start.from, end.to);
+}
+
 function resolveOne(expr, today) {
   const t = expr.text.toLowerCase();
   const years = (t.match(/\d{4}|'?\d{2}\b/g) || []).map((x) => x.replace("'", ''));
@@ -457,11 +554,19 @@ function resolveOne(expr, today) {
       const word = { first: 1, second: 2, third: 3, fourth: 4, '1st': 1, '2nd': 2, '3rd': 3, '4th': 4 };
       const qm = t.match(/q([1-4])/) || t.match(/(first|second|third|fourth|1st|2nd|3rd|4th)/);
       const q = qm ? Number(word[qm[1]] || qm[1]) : 1;
+      if (years.length === 0) {
+        const p = readPoint(`q${q}`, today);
+        return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
+      }
       const y = toYear(years[years.length - 1]);
       return range(monthStart(y, (q - 1) * 3), monthEnd(y, (q - 1) * 3 + 2));
     }
     case 'half_year': {
       const h = t.includes('h2') ? 2 : 1;
+      if (years.length === 0) {
+        const p = readPoint(`h${h}`, today);
+        return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
+      }
       const y = toYear(years[years.length - 1]);
       return range(monthStart(y, h === 1 ? 0 : 6), monthEnd(y, h === 1 ? 5 : 11));
     }
@@ -469,6 +574,25 @@ function resolveOne(expr, today) {
       const m = MONTHS[t.slice(0, 3)];
       const y = Number(years[0]);
       return range(monthStart(y, m), monthEnd(y, m));
+    }
+    case 'range':
+      return readRange(expr.text, today);
+    case 'day': {
+      const p = readPoint(expr.text, today);
+      return p ? range(p.from, p.to) : null;
+    }
+    case 'month': {
+      // "in October", "since March", "end of September", "March", "2026-10"
+      if (/^\d{4}-\d{2}$/.test(t)) {
+        const p = readPoint(t, today);
+        return p ? range(p.from, p.to) : null;
+      }
+      const since = /^since\s/.test(t);
+      const word = t.match(/[a-z]+\.?$/);
+      const p = word ? readPoint(word[0], today) : null;
+      if (!p) return null;
+      if (since) return range(p.from, today);
+      return { ...range(p.from, p.to), note: 'no year given: the most recent one' };
     }
     case 'current_period': {
       if (t === 'today') return range(today, today);
@@ -504,16 +628,19 @@ function resolveOne(expr, today) {
  */
 function resolveTime(timeExpressions, today) {
   const ranges = [];
+  const unread = [];
   for (const expr of timeExpressions || []) {
     let r = null;
     try { r = resolveOne(expr, today); } catch (err) { r = null; }
     if (r && r.from && r.to) ranges.push({ text: expr.text, kind: expr.kind, ...r });
+    else unread.push(expr.text);
   }
-  if (ranges.length === 0) return null;
+  if (ranges.length === 0 && unread.length === 0) return null;
   return {
     ranges,
-    from: ranges.map((r) => r.from).sort()[0],
-    to: ranges.map((r) => r.to).sort().slice(-1)[0],
+    from: ranges.length ? ranges.map((r) => r.from).sort()[0] : null,
+    to: ranges.length ? ranges.map((r) => r.to).sort().slice(-1)[0] : null,
+    unread,          // found as a date, but could not be turned into dates
   };
 }
 
@@ -532,6 +659,20 @@ const GENERAL_WORDS = new Set([
 ]);
 const hasRealWord = (item) => meaningfulWords(item).some((w) => !GENERAL_WORDS.has(w));
 
+// A question made ONLY of general words ("market", "show me market trends")
+// is too vague, whatever the AI marked: the AI may guess "own business",
+// but the user named nothing. Words that ask something ("what happened"),
+// own words (we, my), rival words and dates make it a real question.
+const ASK_FILLER = new Set(['show', 'give', 'tell', 'me', 'please', 'pls', 'plz', 'about', 'any', 'some', 'all', 'get']);
+function onlyGeneralWords(question, cleaned) {
+  if (isMostlyNonLatin(question)) return false;
+  if (cleaned && cleaned.time_expressions && cleaned.time_expressions.length) return false;
+  const ws = meaningfulWords(question);
+  if (ws.length === 0) return true;
+  return ws.every((w) => GENERAL_WORDS.has(w) || ASK_FILLER.has(w)) &&
+    !ws.some((w) => (OWN_WORDS.has(w) && !ASK_FILLER.has(w)) || RIVAL_WORDS.has(w));
+}
+
 function hasSomethingToWorkOn(form) {
   if (form.companies.length || form.places.length) return true;
   if (form.about_own_business || form.dashboard_request) return true;
@@ -547,9 +688,107 @@ function hasSomethingToWorkOn(form) {
  * @param names      { client: {company_name, industry}, competitors: [...] }
  * @returns the checked form + list of what was removed and why
  */
+// ── Names only: words that point at someone instead of naming them ──────
+// "we", "our brand", "my company"  -> the client's own company
+const OWN_WORDS = new Set(['we', 'us', 'our', 'ours', 'my', 'mine', 'i', 'me', 'myself', 'ourselves']);
+// "competitors", "rivals", "the competition" -> the client's competitor list
+const RIVAL_WORDS = new Set(['competitor', 'competitors', 'competition', 'rival', 'rivals']);
+// words that describe a KIND of company, not one company: "premium skincare brand"
+const KIND_WORDS = new Set([
+  'brand', 'brands', 'company', 'companies', 'firm', 'firms', 'player', 'players', 'business', 'businesses',
+  'retailer', 'retailers', 'startup', 'startups', 'manufacturer', 'manufacturers', 'label', 'labels',
+  'supplier', 'suppliers', 'competitor', 'competitors', 'rival', 'rivals', 'others', 'leaders',
+]);
+// words that make a "place" a market or topic, not a place: "beauty market", "my market"
+const NOT_PLACE_WORDS = new Set([
+  'market', 'markets', 'industry', 'industries', 'sector', 'sectors', 'segment', 'segments',
+  'category', 'categories', 'business', 'space', 'channel', 'channels',
+]);
+const plainWords = (text) => normalise(text).split(' ').filter(Boolean);
+const STANDARD_PLACES = new Set(Object.keys(PLACES));
+
+// Did the user type any word of this item with a capital letter (not the
+// first word of the question)? Real names usually have one ("Huda Beauty"),
+// descriptions do not ("premium skincare brand").
+function typedWithCapital(item, question) {
+  const q = String(question);
+  const firstWordEnd = (q.match(/^\s*\S+/) || [''])[0].length;
+  return String(item).split(/\s+/).some((word) => {
+    const w = word.replace(/[^\p{L}\p{N}&'-]/gu, '');
+    if (w.length < 2) return false;
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeForRegex(w)}(?![\\p{L}\\p{N}])`, 'giu');
+    let m;
+    while ((m = re.exec(q)) !== null) {
+      if (m.index >= firstWordEnd && /\p{Lu}/u.test(m[0][0])) return true;
+    }
+    return false;
+  });
+}
+const escapeForRegex = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// What kind of thing did the AI put in "companies"?
+//   'own'   we / our brand / my company      -> the client's own company
+//   'rivals' competitors / rivals             -> the client's competitor list
+//   'kind'  premium skincare brand            -> a description, goes to topics
+//   'name'  a real company name
+//   'rivals+' cheaper competitors          -> the competitor list, and "cheaper competitors" to topics
+function companyKind(item, question, checkCapitals) {
+  const words = plainWords(item);
+  const capital = checkCapitals ? typedWithCapital(item, question) : /\p{Lu}/u.test(String(item));
+  if (capital) return 'name';          // "Lumiere Brands", "XYZ Company" are names
+  if (words.some((w) => RIVAL_WORDS.has(w))) {
+    const plain = words.every((w) => RIVAL_WORDS.has(w) || OWN_WORDS.has(w) || FILLER_WORDS.has(w) ||
+      ['main', 'top', 'all', 'other', 'key', 'big', 'biggest', 'direct', 'closest'].includes(w));
+    return plain ? 'rivals' : 'rivals+';
+  }
+  if (words.some((w) => OWN_WORDS.has(w))) return 'own';
+  if (words.some((w) => KIND_WORDS.has(w))) return 'kind';
+  return 'name';
+}
+
+// What kind of thing did the AI put in "places"?
+//   'own'   my market / our region -> the client's own business, not a place
+//   'topic' beauty market          -> a topic, not a place
+//   'place' { standard, known }    -> known = in the standard place list
+function placeKind(item) {
+  const words = plainWords(item);
+  if (words.some((w) => OWN_WORDS.has(w))) return { kind: 'own' };
+  if (words.some((w) => NOT_PLACE_WORDS.has(w))) return { kind: 'topic' };
+  for (const tryName of [item, normalise(item)]) {
+    const standard = standardPlace(tryName);
+    if (STANDARD_PLACES.has(standard)) return { kind: 'place', standard, known: true };
+  }
+  return { kind: 'place', standard: item, known: false };
+}
+
+// Is a known place hiding in a company entry? "China" -> a place, "UAE retail"
+// -> the place UAE + the topic "UAE retail". "Emirates NBD" and "Saudi Aramco"
+// stay names: the other word was typed with a capital letter.
+function placeInCompany(item, question, checkCapitals) {
+  const words = String(item).split(/\s+/).filter(Boolean);
+  for (let size = Math.min(3, words.length); size >= 1; size -= 1) {
+    for (let start = 0; start + size <= words.length; start += 1) {
+      const piece = words.slice(start, start + size).join(' ');
+      const p = placeKind(piece);
+      if (p.kind !== 'place' || !p.known) continue;
+      const rest = [...words.slice(0, start), ...words.slice(start + size)].join(' ');
+      if (!rest) return { place: piece, topic: null };
+      const restIsName = checkCapitals ? typedWithCapital(rest, question) : /\p{Lu}/u.test(rest);
+      if (!restIsName) return { place: piece, topic: item };
+      return null;
+    }
+  }
+  return null;
+}
+
 function checkForm(form, question, names) {
   const removed = [];
   const skipChecks = isMostlyNonLatin(question);
+
+  // Nothing is cut silently: items past the per-list limit are recorded.
+  for (const c of form.cut_by_limit || []) {
+    removed.push({ field: c.field, value: c.value, why: `over the limit of ${MAX_ITEMS} per list (kept the first ${MAX_ITEMS})` });
+  }
 
   // Companies and places decide WHAT we search, so they must really be in
   // the question. (Topics and industries may be reworded by the AI —
@@ -559,11 +798,73 @@ function checkForm(form, question, names) {
     removed.push({ field, value: item, why: 'not in the question' });
     return false;
   });
-  const companies = keepIfAsked('companies');
-  const places = keepIfAsked('places');
+  const askedCompanies = keepIfAsked('companies');
+  const askedPlaces = keepIfAsked('places');
+  const movedToTopics = [];
+  let ownByName = false;
+  let rivalsByName = false;
+
+  // Companies hold NAMES only. A name on the client's list always stays.
+  const companyList = buildCompanyList(names);
+  const ownEntry = companyList.find((e) => e.type === 'own_company');
+  const companies = [];
+  const placesFromCompanies = [];
+  for (const asked of askedCompanies) {
+    if (matchCompany(asked, companyList)) { companies.push(asked); continue; }
+    const hidden = placeInCompany(asked, question, !skipChecks);
+    if (hidden) {
+      placesFromCompanies.push(hidden.place);
+      if (hidden.topic) movedToTopics.push(hidden.topic);
+      removed.push({ field: 'companies', value: asked, why: hidden.topic
+        ? `a place and a topic, not a company: "${hidden.place}" moved to places, "${hidden.topic}" to topics`
+        : 'a place, not a company: moved to places' });
+      continue;
+    }
+    const kind = companyKind(asked, question, !skipChecks);
+    if (kind === 'name') { companies.push(asked); continue; }
+    if (kind === 'own') {
+      ownByName = true;
+      if (ownEntry) companies.push(ownEntry.name);
+      removed.push({ field: 'companies', value: asked, why: ownEntry ? `means the client own company, written as "${ownEntry.name}"` : 'means the client own company' });
+    } else if (kind === 'rivals' || kind === 'rivals+') {
+      rivalsByName = true;
+      if (kind === 'rivals+') movedToTopics.push(asked);
+      removed.push({ field: 'companies', value: asked, why: kind === 'rivals'
+        ? 'means the client competitors (all_competitors)'
+        : 'means the client competitors (all_competitors), the description is moved to topics' });
+    } else {
+      movedToTopics.push(asked);
+      removed.push({ field: 'companies', value: asked, why: 'a description, not a company name: moved to topics' });
+    }
+  }
+
+  // Places: every place gets the standard name the news pipeline saves.
+  // Markets and "my market" are not places. A place not in the standard
+  // list is kept and marked, never dropped.
+  const places = [];
+  const placesNotInList = [];
+  for (const asked of [...askedPlaces, ...placesFromCompanies]) {
+    const p = placeKind(asked);
+    if (p.kind === 'own') {
+      ownByName = true;
+      removed.push({ field: 'places', value: asked, why: 'means the client own market, not a place' });
+      continue;
+    }
+    if (p.kind === 'topic') {
+      movedToTopics.push(asked);
+      removed.push({ field: 'places', value: asked, why: 'a market or topic, not a place: moved to topics' });
+      continue;
+    }
+    if (places.includes(p.standard)) {
+      removed.push({ field: 'places', value: asked, why: `the same place as ${p.standard}` });
+      continue;
+    }
+    if (p.standard !== asked) removed.push({ field: 'places', value: asked, why: `written with the standard name "${p.standard}"` });
+    places.push(p.standard);
+    if (!p.known) placesNotInList.push(p.standard);
+  }
 
   // Match companies to the client's list; add listed names the AI missed.
-  const companyList = buildCompanyList(names);
   const matched = companies.map((asked) => ({ name: asked, matched: matchCompany(asked, companyList) }));
   for (const entry of findListedCompaniesInQuestion(question, companyList)) {
     const already = matched.some((c) => c.matched && c.matched.name === entry.name && c.matched.type === entry.type);
@@ -582,7 +883,8 @@ function checkForm(form, question, names) {
   // "competitors" / "rivals" with no company named = the client's own
   // competitors ("Competitor activity since March"). With a company named
   // ("Nike's competitors") it is about that company instead.
-  const ownCompetitors = /\b(competitors?|rivals?)\b/i.test(String(question)) && companiesOut.length === 0;
+  const ownCompetitors = rivalsByName ||
+    (/\b(competitors?|rivals?)\b/i.test(String(question)) && companiesOut.length === 0);
   // Dates are worked out by code (resolveTime), so date words the AI put in
   // topics or metrics are taken out: metrics ["last 3 months"] -> [],
   // topics ["sales since 2020"] -> ["sales"]. (Product names are left alone:
@@ -606,17 +908,29 @@ function checkForm(form, question, names) {
     return keep ? [rest] : [];
   });
 
+  const topics = withoutDates('topics');
+  for (const t of movedToTopics) if (!topics.some((x) => x.toLowerCase() === t.toLowerCase())) topics.push(t);
+
+  const { cut_by_limit: cutByLimit, ...rest } = form;   // already recorded in removed
   const checked = {
-    ...form,
+    ...rest,
     companies: companiesOut,
     places,
-    topics: withoutDates('topics'),
+    places_not_in_list: placesNotInList,
+    topics,
     metrics: withoutDates('metrics'),
-    about_own_business: form.about_own_business || ownWords || ownCompetitors ||
+    // the question is about the client's competitors in general (search all of them)
+    all_competitors: ownCompetitors,
+    about_own_business: form.about_own_business || ownWords || ownCompetitors || ownByName ||
       companiesOut.some((c) => c.matched && c.matched.type === 'own_company'),
   };
   return { checked, removed, checks_skipped: skipChecks ? 'question is mostly not in Latin letters' : null };
 }
+
+// Companies and places written in a non-Latin script (Hindi "भारत", Arabic "السعودية").
+// (Latin letters with accents, like "L'Oréal" or "Türkiye", are fine.)
+const isForeignWord = (text) => [...String(text)].some((ch) => /\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch));
+const nonEnglishNames = (form) => [...form.companies, ...form.places].filter(isForeignWord);
 
 // ═════════════════════════════════════════════════════════════════════════
 // Step 5 main
@@ -630,20 +944,63 @@ function checkForm(form, question, names) {
  *   message,            (only for clarification)
  *   primary_goal, secondary_goals,
  *   companies: [{ name, matched: { type: 'competitor'|'own_company', id, name } | null }],
- *   places, industries, products, topics, metrics,
+ *              names only: "we/our brand" -> own company, "rivals" -> all_competitors,
+ *              descriptions ("premium skincare brand") -> topics
+ *   places     standard names (placeNames.js), markets ("beauty market") -> topics
+ *   places_not_in_list   places kept but not in the standard list ("Atlantis")
+ *   all_competitors      true = about the client competitors in general
+ *   industries, products, topics, metrics,
  *   about_own_business, dashboard_request,
  *   time: { ranges, from, to } | null,
  *   constraints, implied, answer_format,
  *   client: { company_name, industry, competitors: [names on the client's list] },
  *   removed_by_check, checks_skipped, attempts
  * }
- * @throws ChatError 503 if the AI could not give a usable reply
+ * If the AI answered twice but its form could still not be used (for
+ * example the question is just "A"), the user is asked back (status
+ * 'clarification'), never shown an error. ChatError 503 only when the AI
+ * could not be reached at all.
+ *
+ * @throws ChatError 503 if the AI could not be reached
  */
+// The answer when we must ask the user back before understanding the question.
+// Same shape as a normal answer, with everything empty.
+function askBack(message, names, extra) {
+  return {
+    status: 'clarification',
+    message,
+    primary_goal: null, secondary_goals: [], companies: [], places: [], industries: [], products: [],
+    places_not_in_list: [], all_competitors: false,
+    topics: [], metrics: [], about_own_business: false, dashboard_request: false, constraints: [], implied: [],
+    answer_format: '', time: null,
+    client: { ...names.client, competitors: (names.competitors || []).map((c) => c.name) },
+    removed_by_check: [], checks_skipped: null,
+    ...extra,
+  };
+}
+
+// Date words that could not be read: from Step 2 (never matched as a date)
+// and from the date reader here (matched, but not a real date, e.g. "31 June").
+function unreadDates(cleaned, time) {
+  return [...new Set([...(cleaned.time_unclear || []), ...((time && time.unread) || [])])];
+}
+
 async function understandQuery(request, cleaned, options = {}) {
   const question = cleaned.preprocessed_query;
   const today = options.today || todayIn(CHAT_TIMEZONE);
 
   const [prompt, names] = await Promise.all([loadPrompt(), loadClientNames(request.client_id)]);
+
+  // A date we could not read is never guessed: a wrong date gives a wrong
+  // answer that looks right. Ask the user first (this costs no AI call).
+  const time = resolveTime(cleaned.time_expressions, today);
+  const unclear = unreadDates(cleaned, time);
+  if (unclear.length) {
+    console.log(`[DynamicRAG] understandQuery: could not read the date (${unclear.join(', ')}), asking the user back`);
+    return askBack(TIME_UNCLEAR_MESSAGE.replace('{words}', unclear.join(', ')), names, {
+      attempts: 0, time_unclear: unclear,
+    });
+  }
 
   const messages = [
     { role: 'system', content: prompt },
@@ -656,6 +1013,7 @@ async function understandQuery(request, cleaned, options = {}) {
   let form = null;
   let attempts = 0;
   let lastProblem = '';
+  let aiReplied = false;        // did the AI answer at all (even with an unusable form)?
   let conversation = messages;
   while (!form && attempts < MAX_ATTEMPTS) {
     attempts += 1;
@@ -666,16 +1024,27 @@ async function understandQuery(request, cleaned, options = {}) {
       lastProblem = `AI call failed: ${err.message}`;
     }
     if (reply !== null) {
+      aiReplied = true;
       const checkedReply = checkAiReply(reply);
+      let problem = checkedReply.problem;
       form = checkedReply.form;
+      // Names must be in English ("India", not "भारत"), or the search later
+      // cannot match them with our data. Ask once more; on the last try the
+      // form is kept as it is.
+      const foreign = form ? nonEnglishNames(form) : [];
+      if (form && foreign.length && attempts < MAX_ATTEMPTS) {
+        problem = `these companies or places are not written in English: ${foreign.join(', ')}. ` +
+          'Write every company and place in English (for example India, Saudi Arabia, United Arab Emirates)';
+        form = null;
+      }
       if (!form) {
-        lastProblem = `AI reply could not be used because ${checkedReply.problem}. Reply was: ${String(reply).slice(0, 300)}`;
+        lastProblem = `AI reply could not be used because ${problem}. Reply was: ${String(reply).slice(0, 300)}`;
         conversation = [
           ...messages,
           { role: 'assistant', content: String(reply) },
           {
             role: 'user',
-            content: `That reply cannot be used because ${checkedReply.problem}. ` +
+            content: `That reply cannot be used because ${problem}. ` +
               'Reply again with ONLY the JSON object, and use only goals from the GOAL LIST.',
           },
         ];
@@ -683,9 +1052,15 @@ async function understandQuery(request, cleaned, options = {}) {
     }
     if (!form) console.log(`[DynamicRAG] understandQuery attempt ${attempts}: ${lastProblem}`);
   }
-  if (!form) {
+  if (!form && !aiReplied) {
     console.error(`[DynamicRAG] understandQuery gave up after ${attempts} attempts. ${lastProblem}`);
     throw new ChatError(503, 'AI_UNAVAILABLE', 'I could not process your question right now. Please try again in a moment.');
+  }
+  if (!form) {
+    // The AI answered, but twice with nothing usable: the question gives too
+    // little to work on ("A"). Ask the user back instead of showing an error.
+    console.log(`[DynamicRAG] understandQuery: no usable form after ${attempts} attempts, asking the user back. ${lastProblem}`);
+    return askBack(NO_TOPIC_MESSAGE, names, { attempts, ai_problem: lastProblem });
   }
 
   const { checked, removed, checks_skipped } = checkForm(form, question, names);
@@ -693,14 +1068,14 @@ async function understandQuery(request, cleaned, options = {}) {
     status: 'understood',
     message: null,
     ...checked,
-    time: resolveTime(cleaned.time_expressions, today),
+    time,
     client: { ...names.client, competitors: (names.competitors || []).map((c) => c.name) },
     removed_by_check: removed,
     checks_skipped,
     attempts,
   };
 
-  if (!hasSomethingToWorkOn(checked)) {
+  if (!hasSomethingToWorkOn(checked) || onlyGeneralWords(question, cleaned)) {
     result.status = 'clarification';
     result.message = NO_TOPIC_MESSAGE;
   }
@@ -718,5 +1093,8 @@ module.exports = {
   buildCompanyList,
   checkForm,
   resolveTime,
+  unreadDates,
   hasSomethingToWorkOn,
+  onlyGeneralWords,
+  nonEnglishNames,
 };

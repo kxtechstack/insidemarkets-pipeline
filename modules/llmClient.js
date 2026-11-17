@@ -13,6 +13,9 @@
 const axios = require('axios');
 
 const { apiUrl, apiKey, model } = require('./llmConfig');
+// Records each AI call in Phoenix, but ONLY during a DI chat question and
+// ONLY when the .env has PHOENIX_COLLECTOR_ENDPOINT. Otherwise it does nothing.
+const { traceLLM } = require('./dynamicRag/chatTracing');
 
 const LLM_API_URL = apiUrl;
 const LLM_MODEL = model;
@@ -39,19 +42,20 @@ const callLLM = async (messages, options = {}) => {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await axios.post(LLM_API_URL, {
+      const requestBody = {
         model: LLM_MODEL,
         messages,
         temperature,
         max_tokens,
         reasoning_effort: 'low',
-      }, {
+      };
+      const response = await traceLLM(requestBody, () => axios.post(LLM_API_URL, requestBody, {
         timeout,
         headers: {
           'Content-Type': 'application/json',
           ...(LLM_API_KEY ? { 'Authorization': `Bearer ${LLM_API_KEY}` } : {}),
         },
-      });
+      }));
 
       const content = response.data.choices[0].message.content;
       if (!content || content.trim() === '') {

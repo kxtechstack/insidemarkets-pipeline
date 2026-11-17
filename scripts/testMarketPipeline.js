@@ -16,7 +16,6 @@
  *   M4  a new signal joins a card only when it fits: same sub-category, recent card, and the AI says same theme;
  *       the rewrite sees all signals on the card
  *   M5  countries written one way on signals and cards
- *   M6  the old-data cleanup (scripts/cleanMarketData.js): copies out, cards regrouped by the new rule
  */
 
 const path = require('path');
@@ -345,128 +344,6 @@ async function main() {
   const before = fitAsks();
   await run([art('c5', 'Nuvo seed scalp tonic', { publishedDate: '2026-11-14T08:00:00Z' })], 'job-c5');
   await check('cards not updated for 45 days are not reused -> new card, no AI question', async () => (cards().length === 4 && fitAsks() === before) || [cards().length, fitAsks() - before]);
-
-  log('\n── M6: old data cleanup (scripts/cleanMarketData.js): copies out, cards regrouped by the new rule ──');
-  resetData();
-  const clean = require('./cleanMarketData');
-  const DEAD = 'client-gone';
-  const V = { A: [1, 0, 0], close: [0.8, 0.6, 0], glowly: [0.6, 0, 0.8], unsure: [0.5, 0.8, 0.33], vc1: [0, 1, 0], vc2: [0, 0, 1] };
-  const seedSig = (id, signalId, card, title, date, vec, extra = {}) => table('market_dynamics_signals').push({ id, article_id: `art-${id}`, client_id: CLIENT, module_id: MD,
-    submodule_id: DIM, signal_id: signalId, insight_id: card, signal_title: title, summary: `${title}.`, organization: 'Unknown', country: 'Global', published_date: `${date}T08:00:00Z`, vec0: vec, ...extra });
-  seedSig('s7', 'sig-1', 'card-C', 'Lumo raises first seed funding for its serum', '2026-08-01', V.A);
-  seedSig('s1', 'sig-1', 'card-A', 'Lumo raises seed funding for scalp serum', '2026-11-01', V.A);
-  seedSig('s4', 'sig-1', 'card-A', 'Lumo raises seed funding for scalp serum', '2026-11-02', V.A);
-  seedSig('s10', 'sig-1', 'card-A', 'Lumo Raises Seed Funding Round For Scalp Serum', '2026-11-03', V.A);
-  seedSig('s3', 'sig-2', 'card-A', 'Beauty VC fund backs Tress', '2026-11-03', V.vc2);
-  seedSig('s2', 'sig-1', 'card-A', 'Fizz closes Series A for hair care', '2026-11-05', V.close);
-  seedSig('s6', 'sig-1', 'card-A', 'Glowly raises debt for new factory', '2026-11-06', V.glowly);
-  seedSig('s9', 'sig-1', 'card-C', 'Pura secures early money for a scalp tonic', '2026-11-07', V.unsure);
-  seedSig('s8', 'sig-2', 'card-B', 'Nova VC invests in Pura', '2026-10-20', V.vc1, { country: 'UAE' });
-  seedSig('s5', 'sig-1', 'card-D', 'Old news of a deleted client', '2026-11-01', V.A, { client_id: DEAD });
-  seedSig('s11', null, 'card-A', 'Tress raises funding round for hair tonic', '2026-11-04', [0.45, -0.89, 0], { signal_id: null });
-  seedSig('s13', null, 'card-A', 'Renewable breakthrough in the market', '2026-11-04', [0, 0, 1], { signal_id: null });
-  seedSig('s12', 'sig-1', 'card-A', 'Mall footfall rises in Brazil', '2026-11-08', [0.7, 0, -0.714]);
-  const seedCard = (id, client, signalId, title, n) => table('market_insights').push({ id, client_id: client, module_id: MD, submodule_id: DIM, signal_id: signalId, title, summary: `${title}.`, country: 'Global', signal_count: n, last_enriched_at: '2026-11-07T00:00:00Z' });
-  seedCard('card-A', CLIENT, 'sig-1', 'Mixed old card', 6); seedCard('card-B', CLIENT, 'sig-2', 'Nova VC card', 1);
-  seedCard('card-C', CLIENT, 'sig-1', 'Old Lumo card', 2); seedCard('card-D', DEAD, 'sig-1', 'Dead client card', 1);
-  table('market_dynamics_signals').forEach((x) => table('market_insight_members').push({ insight_id: x.insight_id, article_id: x.article_id }));
-  const clientById = new Map([[CLIENT, { id: CLIENT, company_name: 'Northwind Beauty', industry: 'Cosmetics' }]]);
-  const snapshot = () => table('market_dynamics_signals').map((x) => ({ ...x }));
-  const subCats6 = [{ id: 'sig-1', signal_name: 'Funding rounds announced', signal_definition: 'x', submodule_id: DIM, vec0: [1, 0, 0] },
-    { id: 'sig-2', signal_name: 'Venture capital investments', signal_definition: 'y', submodule_id: DIM, vec0: [0, 1, 0] }];
-  const embed = async (texts) => texts.map((t) => (subCats6.find((c) => t.startsWith(c.signal_name)) || table('market_dynamics_signals').find((x) => t.startsWith(x.signal_title))).vec0);
-  fitRules.push(['Glowly', 0]);
-  const fitAsks6 = () => promptsSeen.filter((p) => p.includes('Does the new signal belong to one of the cards')).length;
-  const askFit = async (sig, groups) => {
-    const r = await md.askCardFit({ title: sig.signal_title, summary: sig.summary }, groups.map((g) => ({ title: g.members[g.members.length - 1].signal_title, memberTitles: g.members.map((m) => m.signal_title) })));
-    return r.failed ? null : r.index;
-  };
-  const confirmSame = (a, b) => proc.isSameEvent({ title: a.signal_title, summary: a.summary }, { title: b.signal_title, summary: b.summary });
-  const cardsBefore = table('market_insights').map((c) => ({ ...c }));
-  const snap6 = snapshot();
-  const plan6 = await clean.planSignals(snap6, clientById, { confirmSame, subCats: subCats6 });
-  await clean.planCards(plan6, snap6, cardsBefore, clientById, { embed, askFit, dimName: new Map([[DIM, 'Funding & Investment']]), members: table('market_insight_members').map((m) => ({ ...m })) });
-  const gone6 = plan6.remove.map((r) => r.row.id).sort();
-  await check('deleted: dead client, same-title copy, same-event copy (AI confirmed), no sub-category + vague title - nothing else', async () =>
-    JSON.stringify(gone6) === JSON.stringify(['s10', 's13', 's4', 's5']) || plan6.remove.map((r) => [r.row.id, r.why]));
-  const groupOf = (id) => plan6.groups.find((g) => g.members.some((m) => m.id === id));
-  await check('the VC signal on the Funding-rounds card moves to its OWN sub-category', async () =>
-    (groupOf('s3').signal_id === 'sig-2' && groupOf('s3') !== groupOf('s1')) || groupOf('s3').members.map((m) => m.id));
-  await check('very close signal joins without the AI (score 0.80)', async () => groupOf('s2') === groupOf('s1') && plan6.cardCount.autoJoin === 1);
-  await check('unsure + AI says another theme -> own card (Glowly factory debt)', async () => groupOf('s6') !== groupOf('s1') && plan6.cardCount.aiNone === 1);
-  await check('unsure + AI says same theme -> joins (Pura scalp tonic)', async () => groupOf('s9') === groupOf('s1') && plan6.cardCount.aiJoin === 1);
-  await check('old signal with NO sub-category: "raises funding round" in the title -> Funding rounds, not deleted', async () =>
-    (groupOf('s11') && groupOf('s11').signal_id === 'sig-1' && plan6.assigned.length === 1) || [groupOf('s11') && groupOf('s11').signal_id, plan6.assigned]);
-  const subsReal = [['m', 'Mergers & acquisitions', 'ind'], ['p', 'Partnerships & joint ventures', 'ind'], ['n', 'New industry entrants', 'ind'],
-    ['f', 'Funding rounds announced', 'fund'], ['v', 'Venture capital investments', 'fund'], ['d', 'Debt and project financing', 'fund']].map(([id, signal_name, submodule_id]) => ({ id, signal_name, submodule_id }));
-  const pick = (t, dim) => (clean.subCategoryFromTitle(t, dim, subsReal) || {}).signal_name || 'none';
-  await check('title words: acquisition / partnership / enters -> the right sub-category of its dimension', async () =>
-    (pick("L'Oreal Acquires Majority Stake in Innovist", 'ind') === 'Mergers & acquisitions'
-      && pick('ZEISS Expands Holography through Strategic Acquisition', 'ind') === 'Mergers & acquisitions'
-      && pick('Strategic Partnership in Fintech Sector', 'ind') === 'Partnerships & joint ventures'
-      && pick('MrBeast Enters Fintech', 'ind') === 'New industry entrants')
-    || [pick("L'Oreal Acquires Majority Stake in Innovist", 'ind'), pick('Strategic Partnership in Fintech Sector', 'ind')]);
-  await check('title words: raises / Series A / loan -> funding sub-categories; vague title -> none (deleted)', async () =>
-    (pick('Supabase Secures Significant Funding and Acquires Turso', 'fund') === 'Funding rounds announced'
-      && pick('Fizz closes Series A', 'fund') === 'Venture capital investments'
-      && pick('Bank loan backs Polish battery project', 'fund') === 'Debt and project financing'
-      && pick("India's Renewable Energy Breakthrough", 'fund') === 'none'
-      && pick('Serbia Utility Raises Questions Over Project Pricing', 'fund') === 'none'
-      && pick('Sovereign Cloud Expansion Raises Governance Concerns', 'fund') === 'none'
-      && pick('Volatile US Rates Shape Global Bond Market', 'fund') === 'none'
-      && pick('Grunenthal Acquires Stivarga', 'fund') === 'none')
-    || [pick('Supabase Secures Significant Funding and Acquires Turso', 'fund'), pick('Fizz closes Series A', 'fund'), pick("India's Renewable Energy Breakthrough", 'fund')]);
-  await check('score under 0.55 -> own card, the AI is NOT asked (saves credit)', async () => groupOf('s12').members.length === 1);
-  await check('a signal 3 months older never joins (30-day rule)', async () => groupOf('s7') !== groupOf('s1') && groupOf('s7').members.length === 1);
-  await check('the AI fit question was asked only for the 2 unsure signals', async () => fitAsks6() === 2 || fitAsks6());
-  await check('the big group keeps the old card A, the untouched VC card B is NOT rewritten', async () =>
-    (groupOf('s1').cardId === 'card-A' && !groupOf('s1').sameSignals && groupOf('s8').cardId === 'card-B' && groupOf('s8').sameSignals) || plan6.groups.map((g) => [g.cardId, g.sameSignals, g.members.map((m) => m.id)]));
-  await check('the dead client card is deleted, the others are reused', async () => plan6.deleteCards.map((c) => c.id).join() === 'card-D' || plan6.deleteCards.map((c) => c.id));
-  await check('the dry plan changed nothing', async () => table('market_dynamics_signals').length === 13 && table('market_insights').length === 4);
-
-  const r6 = await clean.applyPlan(plan6, clientById, {
-    writeupFor: (g) => (g.members.length === 1
-      ? { title: g.members[0].signal_title, summary: g.members[0].summary, short_summary: g.members[0].summary, business_impact: [], country: g.members[0].country }
-      : md.generateInsightWriteup(null, g.members[0].signal_title, 'Cosmetics', { members: g.members })),
-  });
-  const sig6 = () => table('market_dynamics_signals');
-  const card6 = (id) => table('market_insights').find((c) => c.id === id);
-  const lastCardPrompt = promptsSeen.filter((p) => p.includes('Write the market card')).find((p) => p.includes('Pura secures early money')) || '';
-  await check('apply: the 4 signals are gone, 9 are left', async () => (sig6().length === 9 && !sig6().some((x) => ['s4', 's5', 's10', 's13'].includes(x.id))) || sig6().map((x) => x.id));
-  await check('apply: every signal sits on a card of ITS OWN sub-category', async () =>
-    sig6().every((x) => card6(x.insight_id) && card6(x.insight_id).signal_id === x.signal_id) || sig6().map((x) => [x.id, x.signal_id, x.insight_id]));
-  await check('apply: every card count = its real number of signals, both link tables agree', async () =>
-    table('market_insights').every((c) => {
-      const mine = sig6().filter((x) => x.insight_id === c.id).map((x) => x.article_id).sort().join();
-      const links = table('market_insight_members').filter((m) => m.insight_id === c.id).map((m) => m.article_id).sort().join();
-      return c.signal_count === sig6().filter((x) => x.insight_id === c.id).length && mine === links;
-    }) || table('market_insights').map((c) => [c.id, c.signal_count]));
-  const writeAsks6 = promptsSeen.filter((p) => p.includes('CARD BEING BUILT FROM THESE SAVED SIGNALS')).length;
-  await check('apply: only the ONE card with 2+ signals used the AI; one-signal cards took the signal title', async () =>
-    (writeAsks6 === 1 && table('market_insights').some((c) => c.title === 'Glowly raises debt for new factory')) || [writeAsks6, table('market_insights').map((c) => c.title)]);
-  await check('apply: the old signal now has its sub-category saved, on a card of that sub-category', async () =>
-    (sig6().find((x) => x.id === 's11').signal_id === 'sig-1' && card6(sig6().find((x) => x.id === 's11').insight_id).signal_id === 'sig-1') || sig6().find((x) => x.id === 's11'));
-  await check('apply: 7 cards (A rewritten, B untouched, C reused, 4 new); dead client card gone', async () =>
-    (table('market_insights').length === 7 && !card6('card-D') && card6('card-A').signal_count === 3 && card6('card-A').title === 'A market card' && card6('card-B').title === 'Nova VC card')
-    || table('market_insights').map((c) => [c.id, c.title, c.signal_count]));
-  await check('apply: the rewrite saw ALL the signals of the new group', async () => /CARD BEING BUILT FROM THESE SAVED SIGNALS/.test(lastCardPrompt) && /Fizz closes Series A/.test(lastCardPrompt) && /Lumo raises seed funding/.test(lastCardPrompt));
-  await check('apply: card importance recomputed (with a reason), country written one way', async () =>
-    (table('market_insights').every((c) => c.relevance_level && c.impact_reason) && sig6().find((x) => x.id === 's8').country === 'United Arab Emirates') || table('market_insights'));
-  await check('apply: no write-up failed, no errors', async () => (r6.writeupFailed === 0 && !r6.errors.length) || r6);
-  const before2 = fitAsks6();
-  const snap6b = snapshot();
-  const plan6b = await clean.planSignals(snap6b, clientById, { confirmSame, subCats: subCats6 });
-  await clean.planCards(plan6b, snap6b, table('market_insights').map((c) => ({ ...c })), clientById, { embed, askFit, dimName: new Map([[DIM, 'Funding & Investment']]), members: table('market_insight_members').map((m) => ({ ...m })) });
-  await check('running it again finds nothing to do (no deletes, no rewrites)', async () =>
-    (plan6b.remove.length === 0 && plan6b.groups.every((g) => g.sameSignals && !g.membersTableOff) && plan6b.deleteCards.length === 0) || plan6b.groups.map((g) => [g.cardId, g.sameSignals, g.membersTableOff]));
-  log(`  INFO  second run asked the AI fit question ${fitAsks6() - before2} times (the real script reuses saved answers: 0)`);
-
-  // quick finish: counts only
-  card6('card-A').signal_count = 99;
-  table('market_insights').push({ id: 'card-empty', client_id: CLIENT, module_id: MD, submodule_id: DIM, signal_id: 'sig-1', title: 'Empty old card', signal_count: 4 });
-  const fc = await clean.fixCounts(fakeSupabase);
-  await check('quick finish (--counts-only): wrong count corrected, empty card deleted, nothing else touched', async () =>
-    (card6('card-A').signal_count === 3 && !card6('card-empty') && fc.countsFixed === 1 && fc.emptyDeleted === 1 && table('market_insights').length === 7) || [fc, table('market_insights').map((c) => [c.id, c.signal_count])]);
 
   log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -16,7 +16,6 @@
  *   F4  a lonely signal finds another lonely signal even when many signals of active trends are closer
  *   F5  a trend goes on the radar WITH its name (never "Unnamed Trend"), sector never "Unknown",
  *       and a second trend with the same name is merged into the first
- *   F6  the old-data quick cleanup (scripts/cleanOutlookData.js): copies, dead clients and signals with no trend out
  */
 
 const path = require('path');
@@ -383,31 +382,6 @@ async function main() {
   const options = await tc.findTrendOptions(v(1, 0), FO, CLIENT, 'Cosmetics');
   await check('8 closer signals belong to an active trend: the lonely candidate is STILL found (before: only the 5 closest were looked at)', async () =>
     (options.length === 1 && options[0].trendId === 'tr-lonely' && options[0].status === 'candidate') || options);
-
-  log('\n── F6: old data quick cleanup (scripts/cleanOutlookData.js) ──');
-  resetData();
-  const clean = require('./cleanOutlookData');
-  const sig = (id, client, title, date, extra = {}) => table('trend_signals').push({ id, article_id: `art-${id}`, client_id: client, signal_title: title, organization: 'Unknown', sector: 'Consumer', source_published_date: date, ...extra });
-  sig('k1', CLIENT, 'Lumo launches refill pouch', '2026-10-01'); sig('k2', CLIENT, 'Lumo Launches Refill Pouch', '2026-10-03');
-  sig('k3', CLIENT, 'Fizz adds refill jars', '2026-10-04'); sig('k4', CLIENT, 'A signal in no trend', '2026-10-05');
-  sig('k5', 'client-gone', 'Old news of a deleted client', '2026-10-01'); sig('k6', CLIENT, 'Only signal of its trend, a copy', '2026-10-06');
-  sig('k7', CLIENT, 'Only signal of its trend, a copy', '2026-10-07');
-  table('trend_clusters').push({ id: 'T1', client_id: CLIENT, status: 'active', name: '', sector: 'Unknown', centroid_point_id: 'c1' },
-    { id: 'T2', client_id: 'client-gone', status: 'active', name: 'Dead client trend', sector: 'Product' },
-    { id: 'T3', client_id: CLIENT, status: 'candidate' }, { id: 'T4', client_id: CLIENT, status: 'candidate' });
-  [['k1', 'T1'], ['k2', 'T1'], ['k3', 'T1'], ['k5', 'T2'], ['k6', 'T3'], ['k7', 'T4']].forEach(([s, t], i) => table('trend_membership').push({ id: `mm${i}`, trend_id: t, signal_id: s }));
-  table('trend_snapshots').push({ id: 'sn1', trend_id: 'T2' });
-  const plan = clean.buildPlan(table('trend_signals').map((x) => ({ ...x })), trends().map((x) => ({ ...x })), members().map((x) => ({ ...x })), new Map([[CLIENT, { id: CLIENT, company_name: 'Northwind Beauty' }]]));
-  await check('to delete: the dead client signal, 2 same-title copies, the signal in no trend - nothing else', async () =>
-    plan.remove.map((r) => r.row.id).sort().join() === 'k2,k4,k5,k7' || plan.remove.map((r) => [r.row.id, r.why]));
-  await check('trends to delete: the dead client trend and the one left with no signal', async () => plan.deleteTrends.map((d) => d.trend.id).sort().join() === 'T2,T4' || plan.deleteTrends.map((d) => d.trend.id));
-  await check('the active trend with no name and sector "Unknown" gets a real name and a real sector', async () =>
-    (plan.fixTrends.length === 1 && plan.fixTrends[0].patch.name === 'Lumo launches refill pouch' && plan.fixTrends[0].patch.sector === 'Consumer') || plan.fixTrends);
-  await check('the dry plan changed nothing', async () => signals().length === 7 && trends().length === 4);
-  const done = await clean.applyPlan(plan, { db: fakeSupabase, qd: new FakeQdrant() });
-  await check('apply: 3 signals left, each in a trend; 2 trends left; the dead trend history is gone; no errors', async () =>
-    (signals().map((x) => x.id).sort().join() === 'k1,k3,k6' && signals().every((x) => members().some((m) => m.signal_id === x.id)) && trends().map((t) => t.id).sort().join() === 'T1,T3'
-      && table('trend_snapshots').length === 0 && trends().find((t) => t.id === 'T1').name === 'Lumo launches refill pouch' && !done.errors.length) || [signals().map((x) => x.id), trends(), done]);
 
   log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

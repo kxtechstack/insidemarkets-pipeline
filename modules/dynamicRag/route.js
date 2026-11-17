@@ -14,12 +14,16 @@
  *   Step 3  validateQuery.js     accept / reject / ask the user back (AI)
  *   Step 4  (skipped for now)    remembering earlier questions in the chat
  *   Step 5  understandQuery.js   goals, companies, places, dates... (AI + code checks)
- *   Step 6+ not built yet
+ *   Step 6  planTasks.js         work plan: what info each goal needs + what analysis (AI + code checks)
+ *   Step 7+ not built yet
  *
  * Helpers (not steps):
+ *   capabilityRegistry.js the job list the planner may use (Steps 6-9)
  *   chatConfig.js        settings
  *   chatError.js         a clear error message for the user
  *   chatPlayground.html  test page that shows what every step did
+ *   chatTracing.js       sends a step-by-step record of each question to
+ *                        Phoenix (only when .env has PHOENIX_COLLECTOR_ENDPOINT)
  *
  * Reply on success : { ok: true, request_id, conversation_id, status, answer, debug }
  *     status = accept         -> answer is null for now (later steps will fill it)
@@ -30,7 +34,7 @@
  * FOR TESTING ONLY (to be switched off before real clients use the chat):
  *   - "debug" in the reply shows what every step produced, and
  *     debug.timings how long each step took (milliseconds).
- *   - body.stopAfterStep = 1, 2 or 3 stops the chat after that step, so the
+ *   - body.stopAfterStep = 1, 2, 3 or 5 stops the chat after that step, so the
  *     test file can check each step alone (Steps 1 and 2 without the AI).
  *   - GET /dynamic-rag/playground opens the playground page, only when the
  *     .env file has DR_PLAYGROUND=on.
@@ -43,6 +47,8 @@ const { receiveQuestion } = require('./receiveQuestion');   // Step 1
 const { preprocessQuery } = require('./preprocessQuery');   // Step 2
 const { validateQuery } = require('./validateQuery');       // Step 3
 const { understandQuery } = require('./understandQuery');   // Step 5
+const { planTasks } = require('./planTasks');               // Step 6
+const { traceChat, traceStep, traceChatResult } = require('./chatTracing'); // Phoenix records (off on the server)
 
 function registerDynamicRagRoute(app) {
   // ── Test page: type a question, see every step ─────────────────────────
@@ -54,114 +60,132 @@ function registerDynamicRagRoute(app) {
   });
 
   // ── The chat ───────────────────────────────────────────────────────────
-  app.post('/dynamic-rag/chat', async (req, res) => {
-    const startedAt = Date.now();
-    const stopAfterStep = Number(req.body && req.body.stopAfterStep) || null;
+  // traceChat makes one Phoenix record per question (does nothing when off).
+  app.post('/dynamic-rag/chat', (req, res) => traceChat(req.body, () => handleChat(req, res)));
+}
 
-    // What every step produced, and how long it took. Filled in as we go,
-    // so on an error we can still show the steps that worked.
-    const debug = { timings: {} };
-    let currentStep = 'receiveQuestion';
-    let stepStartedAt = Date.now();
-    const stepDone = (name, result) => {
-      debug[name] = result;
-      debug.timings[name] = Date.now() - stepStartedAt;
-      stepStartedAt = Date.now();
+async function handleChat(req, res) {
+  const startedAt = Date.now();
+  const stopAfterStep = Number(req.body && req.body.stopAfterStep) || null;
+
+  // What every step produced, and how long it took. Filled in as we go,
+  // so on an error we can still show the steps that worked.
+  const debug = { timings: {} };
+  let currentStep = 'receiveQuestion';
+  let stepStartedAt = Date.now();
+  const stepDone = (name, result) => {
+    debug[name] = result;
+    debug.timings[name] = Date.now() - stepStartedAt;
+    stepStartedAt = Date.now();
+  };
+
+  try {
+    // ── Step 1: receive the question ───────────────────────────────
+    const request = await traceStep('Step 1 – receiveQuestion', req.body, () => receiveQuestion(req.body));
+    stepDone('receiveQuestion', request);
+    console.log(
+      `[DynamicRAG] receiveQuestion ok | request=${request.request_id} ` +
+      `conversation=${request.conversation_id}${request.is_new_conversation ? ' (new)' : ''} ` +
+      `| ${Date.now() - startedAt}ms`
+    );
+
+    const reply = (status, answer) => {
+      debug.timings.total = Date.now() - startedAt;
+      traceChatResult(status, answer, request.conversation_id);
+      return res.json({
+        ok: true,
+        request_id: request.request_id,
+        conversation_id: request.conversation_id,
+        status,
+        answer,
+        debug,
+      });
     };
 
-    try {
-      // ── Step 1: receive the question ───────────────────────────────
-      const request = await receiveQuestion(req.body);
-      stepDone('receiveQuestion', request);
-      console.log(
-        `[DynamicRAG] receiveQuestion ok | request=${request.request_id} ` +
-        `conversation=${request.conversation_id}${request.is_new_conversation ? ' (new)' : ''} ` +
-        `| ${Date.now() - startedAt}ms`
-      );
+    if (stopAfterStep === 1) return reply('stopped_for_test', null);
 
-      const reply = (status, answer) => {
-        debug.timings.total = Date.now() - startedAt;
-        return res.json({
-          ok: true,
-          request_id: request.request_id,
-          conversation_id: request.conversation_id,
-          status,
-          answer,
-          debug,
-        });
-      };
+    // ── Step 2: clean the question (no AI) ─────────────────────────
+    currentStep = 'preprocessQuery';
+    const cleaned = await traceStep('Step 2 – preprocessQuery', request, () => preprocessQuery(request));
+    stepDone('preprocessQuery', cleaned);
+    console.log(
+      `[DynamicRAG] preprocessQuery ok | changes=${cleaned.corrections_applied.length} ` +
+      `dates=${cleaned.time_expressions.length} ` +
+      `wordList=${cleaned.word_list_loaded ? 'loaded' : 'NOT loaded'} ` +
+      `| ${Date.now() - startedAt}ms`
+    );
 
-      if (stopAfterStep === 1) return reply('stopped_for_test', null);
+    if (stopAfterStep === 2) return reply('stopped_for_test', null);
 
-      // ── Step 2: clean the question (no AI) ─────────────────────────
-      currentStep = 'preprocessQuery';
-      const cleaned = await preprocessQuery(request);
-      stepDone('preprocessQuery', cleaned);
-      console.log(
-        `[DynamicRAG] preprocessQuery ok | changes=${cleaned.corrections_applied.length} ` +
-        `dates=${cleaned.time_expressions.length} ` +
-        `wordList=${cleaned.word_list_loaded ? 'loaded' : 'NOT loaded'} ` +
-        `| ${Date.now() - startedAt}ms`
-      );
+    // ── Step 3: accept / reject / ask back (AI) ────────────────────
+    currentStep = 'validateQuery';
+    const validation = await traceStep('Step 3 – validateQuery', cleaned, () => validateQuery(cleaned));
+    stepDone('validateQuery', validation);
+    console.log(
+      `[DynamicRAG] validateQuery ok | status=${validation.status} label=${validation.ai_label} ` +
+      `aiCalls=${validation.attempts} | ${Date.now() - startedAt}ms`
+    );
 
-      if (stopAfterStep === 2) return reply('stopped_for_test', null);
+    // Reject or clarification: the chat stops here and replies.
+    // (Saving this reply in the chat history comes with Step 10.)
+    if (validation.status !== 'accept') return reply(validation.status, validation.message);
 
-      // ── Step 3: accept / reject / ask back (AI) ────────────────────
-      currentStep = 'validateQuery';
-      const validation = await validateQuery(cleaned);
-      stepDone('validateQuery', validation);
-      console.log(
-        `[DynamicRAG] validateQuery ok | status=${validation.status} label=${validation.ai_label} ` +
-        `aiCalls=${validation.attempts} | ${Date.now() - startedAt}ms`
-      );
+    if (stopAfterStep === 3) return reply('accept', null);
 
-      // Reject or clarification: the chat stops here and replies.
-      // (Saving this reply in the chat history comes with Step 10.)
-      if (validation.status !== 'accept') return reply(validation.status, validation.message);
+    // ── Step 5: understand the question (AI + code checks) ─────────
+    currentStep = 'understandQuery';
+    const understood = await traceStep('Step 5 – understandQuery', { request, cleaned }, () => understandQuery(request, cleaned));
+    stepDone('understandQuery', understood);
+    console.log(
+      `[DynamicRAG] understandQuery ok | status=${understood.status} goal=${understood.primary_goal} ` +
+      `companies=${understood.companies.length} places=${understood.places.length} ` +
+      `removed=${understood.removed_by_check.length} aiCalls=${understood.attempts} ` +
+      `| ${Date.now() - startedAt}ms`
+    );
 
-      if (stopAfterStep === 3) return reply('accept', null);
+    if (understood.status === 'clarification') return reply('clarification', understood.message);
 
-      // ── Step 5: understand the question (AI + code checks) ─────────
-      currentStep = 'understandQuery';
-      const understood = await understandQuery(request, cleaned);
-      stepDone('understandQuery', understood);
-      console.log(
-        `[DynamicRAG] understandQuery ok | status=${understood.status} goal=${understood.primary_goal} ` +
-        `companies=${understood.companies.length} places=${understood.places.length} ` +
-        `removed=${understood.removed_by_check.length} aiCalls=${understood.attempts} ` +
-        `| ${Date.now() - startedAt}ms`
-      );
+    if (stopAfterStep === 5) return reply('accept', null);
 
-      if (understood.status === 'clarification') return reply('clarification', understood.message);
+    // ── Step 6: work plan (AI + code checks) ───────────────────────
+    currentStep = 'planTasks';
+    const plan = await traceStep('Step 6 – planTasks', { cleaned, understood }, () => planTasks(cleaned, understood));
+    stepDone('planTasks', plan);
+    console.log(
+      `[DynamicRAG] planTasks ok | goals=${plan.objectives.join(',')} requirements=${plan.requirements.length} ` +
+      `analysis=${plan.analysis_required.join(',')} addedByCode=${plan.requirements.filter((r) => r.added_by_code).length} ` +
+      `removed=${plan.removed_by_check.length} aiCalls=${plan.attempts} | ${Date.now() - startedAt}ms`
+    );
 
-      // ── Step 6 onwards will be added here ──────────────────────────
+    // ── Step 7 onwards will be added here ──────────────────────────
 
-      return reply('accept', null);
+    return reply('accept', null);
 
-    } catch (err) {
-      debug.timings.total = Date.now() - startedAt;
+  } catch (err) {
+    debug.timings.total = Date.now() - startedAt;
 
-      if (err instanceof ChatError) {
-        console.log(`[DynamicRAG] stopped at ${currentStep}: ${err.code} — ${err.message}`);
-        return res.status(err.httpStatus).json({
-          ok: false,
-          error: { code: err.code, message: err.message },
-          failed_step: currentStep,
-          debug,
-        });
-      }
-
-      // Anything else is our bug or a database problem: log the real reason,
-      // show the user a plain message.
-      console.error(`[DynamicRAG] error at ${currentStep}:`, err.message);
-      return res.status(500).json({
+    if (err instanceof ChatError) {
+      console.log(`[DynamicRAG] stopped at ${currentStep}: ${err.code} — ${err.message}`);
+      traceChatResult(`stopped: ${err.code}`, err.message);
+      return res.status(err.httpStatus).json({
         ok: false,
-        error: { code: 'SERVER_ERROR', message: 'Something went wrong. Please try again.' },
+        error: { code: err.code, message: err.message },
         failed_step: currentStep,
         debug,
       });
     }
-  });
+
+    // Anything else is our bug or a database problem: log the real reason,
+    // show the user a plain message.
+    console.error(`[DynamicRAG] error at ${currentStep}:`, err.message);
+    traceChatResult('error', err.message);
+    return res.status(500).json({
+      ok: false,
+      error: { code: 'SERVER_ERROR', message: 'Something went wrong. Please try again.' },
+      failed_step: currentStep,
+      debug,
+    });
+  }
 }
 
 module.exports = { registerDynamicRagRoute };
