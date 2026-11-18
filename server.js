@@ -22,6 +22,7 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { extractContent } = require('./modules/customSourceExtractor');
 const { processCustomSource } = require('./modules/customSourceProcessor');
 const { startStaleJobWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
+const { registerVoiceOfMarketRoute } = require('./modules/voiceOfMarket/route');
 // Decision Intelligence chat (Dynamic RAG) — the only chat in this server.
 // The old chats (decisionIntelligence, decisionIntelligenceV2, ragChat.js)
 // have been removed.
@@ -1216,6 +1217,7 @@ const PORT = process.env.PORT || 3000;
 registerDynamicRagRoute(app);
 registerCompetitiveRadarRoute(app);
 registerEmailAlertsRoute(app);
+registerVoiceOfMarketRoute(app);
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
