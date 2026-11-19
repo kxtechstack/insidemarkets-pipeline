@@ -21,11 +21,12 @@
  *  GET    /voice-of-market/posts/:clientId                     published posts + categories with counts  ?categoryId=
  *
  *  Every file comes back with a temporary "url" (see vomFiles.js).
+ *  *  PATCH  /voice-of-market/admin/posts/:postId/attachments/order   body {order: [file ids]}: save the order of the files
  */
 
 const {
   listCategories, listPostsForAdmin, getPost, createPost, updatePost,
-  setStatus, deletePost, addAttachment, removeAttachment, listPublishedForClient,
+  setStatus, deletePost, addAttachment, removeAttachment, reorderAttachments, listPublishedForClient,
 } = require('./vomPosts');
 const { addTemporaryLinks, addTemporaryLinksToPost } = require('./vomFiles');
 
@@ -107,6 +108,11 @@ function registerVoiceOfMarketRoute(app) {
 
   app.delete('/voice-of-market/admin/attachments/:attachmentId', handle(async (req, res) => {
     return res.json({ ok: true, ...(await removeAttachment(req.params.attachmentId)) });
+  }));
+
+    app.patch('/voice-of-market/admin/posts/:postId/attachments/order', handle(async (req, res) => {
+    const post = await reorderAttachments(req.params.postId, (req.body || {}).order);
+    return res.json({ ok: true, post: withPublishedDay(await addTemporaryLinksToPost(post)) });
   }));
 
   // ---------------- client dashboard ----------------

@@ -213,6 +213,31 @@ async function removeAttachment(attachmentId) {
   return { deleted: true, id: attachmentId };
 }
 
+// Saves a new order for the files of a post.
+// orderedIds = the ids of ALL files of the post, in the order they should have (the first one gets 1).
+async function reorderAttachments(postId, orderedIds) {
+  const post = await getPost(postId);
+  if (!Array.isArray(orderedIds) || !orderedIds.length) throw fail('Please send the list of file ids in the new order');
+  if (orderedIds.length !== post.attachments.length) throw fail('Please send every file of the post in the new order');
+
+  const mine = new Set(post.attachments.map((a) => a.id));
+  const seen = new Set();
+  for (const id of orderedIds) {
+    needId(id, 'attachment id');
+    if (!mine.has(id)) throw fail('One of the files does not belong to this post');
+    if (seen.has(id)) throw fail('A file is listed twice');
+    seen.add(id);
+  }
+
+  for (let i = 0; i < orderedIds.length; i++) {
+    const { error } = await supabase.from('vom_post_attachments')
+      .update({ sort_order: i + 1 }).eq('id', orderedIds[i]).eq('post_id', postId);
+    check(error);
+  }
+  await supabase.from('vom_posts').update({ updated_at: new Date().toISOString() }).eq('id', postId);
+  return getPost(postId);
+}
+
 // ---------- client dashboard side ----------
 
 // Published posts of ONE client, newest first. Also the category list with a count for each one.
@@ -246,5 +271,6 @@ module.exports = {
   deletePost,
   addAttachment,
   removeAttachment,
+  reorderAttachments,
   listPublishedForClient,
 };

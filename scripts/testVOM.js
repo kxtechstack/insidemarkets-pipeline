@@ -1,12 +1,13 @@
 /**
- * scripts/testVoiceOfMarket.js
+ * scripts/testVOM.js
  *
  * Tests the whole Voice of Market backend with dummy data:
  * categories, create / edit / publish / unpublish / delete, files, video links,
- * temporary links, private files, and "a client only sees its own posts".
+ * temporary links, private files, changing the order of files,
+ * and "a client only sees its own posts".
  *
- * Run:  node scripts/testVoiceOfMarket.js
- * It uses the first 2 clients in the database. Every dummy post is called "[TEST] ..." and is deleted at the end.
+ * Run:  node scripts/testVOM.js
+ * It uses the first 2 active clients in the database. Every dummy post is called "[TEST] ..." and is deleted at the end.
  */
 
 require('dotenv').config();
@@ -57,9 +58,9 @@ async function main() {
   // ---------- setup ----------
   console.log('\n1. Setup');
   const { data: clients, error: clientErr } = await supabase.schema('admin').from('clients')
-  .select('id, company_name').eq('status', 'active').limit(2);
-if (clientErr) throw new Error(`Could not read admin.clients: ${clientErr.message}`);
-if (!clients || clients.length < 2) throw new Error('Need at least 2 active clients in admin.clients to run this test');
+    .select('id, company_name').eq('status', 'active').limit(2);
+  if (clientErr) throw new Error(`Could not read admin.clients: ${clientErr.message}`);
+  if (!clients || clients.length < 2) throw new Error('Need at least 2 active clients in admin.clients to run this test');
   const [clientA, clientB] = clients;
   console.log(`  Client A: ${clientA.company_name}   Client B: ${clientB.company_name}`);
 
@@ -209,6 +210,24 @@ if (!clients || clients.length < 2) throw new Error('Need at least 2 active clie
   check('its files are gone from storage', (await folderFiles(folder)).length === 0);
   await expectError('deleting a post that does not exist', () => posts.deletePost(randomUUID()), 'not found');
   createdPostIds.splice(createdPostIds.indexOf(draft.id), 1);
+
+  // ---------- reorder ----------
+  console.log('\n13. Change the order of files');
+  const orderPost = await posts.createPost({ clientId: clientA.id, categoryId: catA.id, title: '[TEST] Order post', body: '<p>x</p>' });
+  createdPostIds.push(orderPost.id);
+  const v1 = await posts.addAttachment(orderPost.id, { type: 'video_link', fileUrl: 'https://a.com/1' });
+  const v2 = await posts.addAttachment(orderPost.id, { type: 'video_link', fileUrl: 'https://a.com/2' });
+  const v3 = await posts.addAttachment(orderPost.id, { type: 'video_link', fileUrl: 'https://a.com/3' });
+  const wanted = [v3.id, v1.id, v2.id].join();
+  const reordered = await posts.reorderAttachments(orderPost.id, [v3.id, v1.id, v2.id]);
+  check('new order is saved', reordered.attachments.map((a) => a.id).join() === wanted);
+  const reloaded = await posts.getPost(orderPost.id);
+  check('new order is still there after reloading', reloaded.attachments.map((a) => a.id).join() === wanted);
+  await expectError('empty list is refused', () => posts.reorderAttachments(orderPost.id, []), 'list');
+  await expectError('list with a missing file is refused', () => posts.reorderAttachments(orderPost.id, [v1.id, v2.id]), 'every file');
+  await expectError('list with a file twice is refused', () => posts.reorderAttachments(orderPost.id, [v1.id, v1.id, v2.id]), 'twice');
+  await expectError('file of another post is refused', () => posts.reorderAttachments(orderPost.id, [v1.id, v2.id, randomUUID()]), 'does not belong');
+  await expectError('bad file id is refused', () => posts.reorderAttachments(orderPost.id, [v1.id, v2.id, 'abc']), 'id');
 }
 
 async function cleanUp() {
