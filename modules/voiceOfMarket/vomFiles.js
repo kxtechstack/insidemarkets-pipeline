@@ -6,6 +6,10 @@
  * Video links (YouTube etc.) are normal web addresses, so they are passed on as they are.
  *
  * How long a link works: admin.app_settings, key 'vom_link_hours' (default 3 hours, 24 at most).
+ *
+ * Address of the links: the backend talks to Supabase on SUPABASE_URL (maybe http and a port),
+ * but the browser needs the public https address. SUPABASE_PUBLIC_URL in .env is that address.
+ * If it is not set, the links are given as they come.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -15,6 +19,15 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const BUCKET = 'vom-files';
 const DEFAULT_HOURS = 3;
 const MAX_HOURS = 24;
+
+const INTERNAL_BASE = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+const PUBLIC_BASE = (process.env.SUPABASE_PUBLIC_URL || '').replace(/\/+$/, '');
+
+// Changes the start of a link from the backend address to the public https address
+function toPublicUrl(url) {
+  if (!url || !PUBLIC_BASE || !INTERNAL_BASE || PUBLIC_BASE === INTERNAL_BASE) return url;
+  return url.startsWith(INTERNAL_BASE) ? PUBLIC_BASE + url.slice(INTERNAL_BASE.length) : url;
+}
 
 // How many hours a link works. Falls back to 3 if the setting is missing.
 async function getLinkHours() {
@@ -51,7 +64,7 @@ async function addTemporaryLinks(posts) {
       paths.forEach((p) => errorByPath.set(p, 'Could not make a link for this file'));
     } else {
       (data || []).forEach((item) => {
-        if (item.signedUrl) linkByPath.set(item.path, item.signedUrl);
+        if (item.signedUrl) linkByPath.set(item.path, toPublicUrl(item.signedUrl));
         else errorByPath.set(item.path, item.error || 'File not found');
       });
     }

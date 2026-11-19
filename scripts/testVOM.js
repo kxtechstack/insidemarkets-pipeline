@@ -174,6 +174,7 @@ async function main() {
   check('PDF gets a temporary link', !!goodPdf.url && goodPdf.url.startsWith('http'));
   const opened = await fetch(goodPdf.url);
   check('temporary link opens the file', opened.status === 200, `status ${opened.status}`);
+    if (process.env.SUPABASE_PUBLIC_URL) check('link uses the public address', goodPdf.url.startsWith(process.env.SUPABASE_PUBLIC_URL.replace(/\/+$/, '')));
   const direct = await fetch(`${process.env.SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${pdfPath}`);
   check('the file does NOT open without a temporary link (private)', direct.status !== 200, `status ${direct.status}`);
   check('a missing file only fails itself', !lostPdf.url && !!lostPdf.url_error && !!goodPdf.url && !!vid.url);
