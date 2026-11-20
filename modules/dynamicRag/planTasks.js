@@ -45,7 +45,7 @@ const { requirePrompt } = require('../promptStore');
 const { ChatError } = require('./chatError');
 const { PLAN_PROMPT_ID } = require('./chatConfig');
 const { preprocessText } = require('./preprocessQuery');   // only to spot date words
-const { CAPABILITIES, GOAL_GUIDE, GOAL_KEY_JOB, SEARCH_JOBS } = require('./capabilityRegistry');
+const { CAPABILITIES, GOAL_GUIDE, GOAL_KEY_JOB, SEARCH_JOBS, FRAMEWORKS } = require('./capabilityRegistry');
 
 const MAX_ATTEMPTS = 2;          // ask the AI at most twice
 const MAX_REQUIREMENTS = 6;
@@ -460,6 +460,34 @@ function finishPlan(plan, understood) {
     if (key && !r.analysis.includes(key)) {
       r.analysis = [...r.analysis, key];
       notes.push(`${r.requirement_id}: key job "${key}" for "${r.goal}" was missing, added by code`);
+    }
+  }
+
+  // A framework part looks for the headings of EVERY framework the question
+  // names: "a SWOT and a PESTLE" planned only SWOT points, and a PESTLE
+  // planned as "market attractiveness; regulation; ..." had no PESTLE
+  // points at all. A framework is covered when its needs already talk about
+  // at least half of its headings; otherwise its headings are added as one
+  // need (said in the notes; a need over the limit is listed as removed).
+  const question = String(understood.question_text || '');
+  const named = FRAMEWORKS.map((f) => ({ f, at: question.search(f.match) })).filter((x) => x.at >= 0)
+    .sort((a, b) => a.at - b.at).map((x) => x.f);
+  for (const r of requirements.filter((x) => x.goal === 'framework')) {
+    r.information_needed = [...(r.information_needed || [])];
+    for (const f of named) {
+      const needs = r.information_needed.join(' ').toLowerCase();
+      const talkedAbout = f.headings.filter((h) => {
+        const last = h.toLowerCase().split(' ').pop();
+        return new RegExp(`\\b${last.slice(0, Math.max(5, last.length - 3))}`).test(needs);
+      }).length;
+      if (talkedAbout * 2 >= f.headings.length) continue;
+      const need = `${f.name}: ${f.headings.join(', ').toLowerCase()}`;
+      if (r.information_needed.length < MAX_NEEDS) {
+        r.information_needed.push(need);
+        notes.push(`${r.requirement_id}: the question asks for a ${f.name}, so its headings were added to the information needed`);
+      } else {
+        notes.push(`${r.requirement_id}: the question asks for a ${f.name}, but the part already has ${MAX_NEEDS} needs, so its headings were not added as a need (the summary still uses them)`);
+      }
     }
   }
 

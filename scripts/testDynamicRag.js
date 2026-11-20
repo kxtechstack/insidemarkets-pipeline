@@ -1115,6 +1115,43 @@ async function testStep5() {
     });
   }
 
+  // 20 Nov: the language is the language the user TYPED. Step 2 "fixes"
+  // "Tendenze" -> "Tendency", then the fixed text looked English and the
+  // place was removed (big test: Italia / España questions had no place).
+  for (const [typedQ, fixedQ, places, want] of [
+    ['Tendenze della cosmetica in Italia', 'Tendency della cosmetica in Italia', ['Italy'], 'Italy'],
+    ['Compara Sephora y Douglas en Italia', 'Compare Sephora y Douglas en Italia', ['Italy'], 'Italy'],
+    ['Compara Sephora y Douglas en España', 'Compare Sephora y Douglas en España', ['Spain'], 'Spain'],
+    // must NOT change: an English question with a spelling fix still loses a place not typed
+    ['wats Sephora doing in Germny?', 'whats Sephora doing in Germany?', ['Germany', 'France'], 'Germany'],
+    ['Compare riyadh and jedah for salons', 'Compare riyadh and jeddah for salons', ['Riyadh', 'Jeddah', 'Dubai'], 'Riyadh,Jeddah'],
+  ]) {
+    await check(`Check: language from the typed question: "${typedQ}" (fixed: "${fixedQ}") -> places [${want}]`, async () => {
+      const r = understand.checkForm(form({ places }), `${fixedQ}\n${typedQ}`, names, { original: typedQ, spellingFixed: ['x -> y'] });
+      return r.checked.places.join() === want || r.checked.places;
+    });
+  }
+
+  // 20 Nov: a typo fixed into an ordinary word is not a company
+  // ("frgrance risks egypt??" -> companies [fragrance] filtered every search)
+  await check('Check: "frgrance risks egypt??" -> the AI\'s company "fragrance" (made by the spelling fix) moves to topics', async () => {
+    const r = understand.checkForm(form({ primary_goal: 'risks', companies: ['fragrance'], places: ['Egypt'] }),
+      'fragrance risks egypt?\nfrgrance risks egypt??', names, { original: 'frgrance risks egypt??', spellingFixed: ['frgrance -> fragrance'] });
+    return (r.checked.companies.length === 0 && r.checked.topics.includes('fragrance') && r.checked.places.join() === 'Egypt' &&
+      r.removed.some((x) => x.value === 'fragrance' && /spelling of "frgrance"/.test(x.why))) || r;
+  });
+  for (const [q, original, fixes, companies, want] of [
+    // must NOT change: names typed by the user stay, even with a fix elsewhere
+    ['compare nykaa n purplle', 'cmpare nykaa n purplle', ['cmpare -> compare'], ['Nykaa', 'Purplle'], 'Nykaa,Purplle'],
+    ['Lancme announcements in Dubai', 'Lancme anouncements in Dubai', ['anouncements -> announcements'], ['Lancme'], 'Lancme'],
+    ['fragrance news from Boots', 'frgrance news from Boots', ['frgrance -> fragrance'], ['Boots'], 'Boots'],
+  ]) {
+    await check(`Check (must not change): "${original}" keeps the companies [${want}]`, async () => {
+      const r = understand.checkForm(form({ primary_goal: 'list', companies }), `${q}\n${original}`, names, { original, spellingFixed: fixes });
+      return r.checked.companies.map((c) => c.name || c).join() === want || r.checked.companies;
+    });
+  }
+
   // ---- companies hold NAMES only (whole groups of reference words) ----
   const formCheck = (name, question, extra, test) => check(`Names only: ${name}`, async () => {
     const r = understand.checkForm(form(extra), question, names);
@@ -2728,6 +2765,20 @@ function judgeWorkflow(u, p, w) {
   }
   if (p.requirements[0] && leftOut.includes(`(${p.requirements[0].requirement_id})`)) serious.push('the main goal was left out');
 
+  // 5b. every framework the question names has its headings (20 Nov: "a
+  // SWOT and a PESTLE" got SWOT headings only), or is said to be left out
+  const fwNamed = registry.FRAMEWORKS.filter((f) => f.match.test(String(u.question_text || w.question_text || '')));
+  for (const r of p.requirements.filter((x) => x.goal === 'framework' && !leftOut.includes(`(${x.requirement_id})`))) {
+    const sum = tasks.find((t) => t.capability === 'summarise' && (t.for_requirements || []).includes(r.requirement_id));
+    if (!sum) continue;
+    const heads = (sum.inputs.headings || []).join(' | ');
+    for (const f of fwNamed) {
+      if (f.headings.every((h) => heads.includes(h))) continue;
+      if ((w.notes || []).some((n) => n.startsWith(`${r.requirement_id}:`) && n.includes(f.name) && n.includes('left out'))) continue;
+      serious.push(`${sum.task_id}: the question asks for a ${f.name}, but the summary has no ${f.name} headings`);
+    }
+  }
+
   // 6. filters come from Step 5 only
   const t5 = u.time;
   const ranges = (t5 && t5.ranges) || [];
@@ -3782,6 +3833,102 @@ async function testStep7() {
     const judge = ok(u, wf);
     return (r.status === 'rejected' && r.problems.some((p) => p.includes('left out')) && judge !== true) || { s8: r.problems, judge };
   });
+  // 9b. a search the AI tagged with one side but naming BOTH sides
+  await check('Side search: "skincare or makeup in the GCC" with the AI tagging "skincare makeup GCC" as the makeup side -> the makeup search never names skincare', async () => {
+    const u = und({ primary_goal: 'comparison', secondary_goals: [], industries: [], topics: ['skincare', 'makeup'], places: ['GCC'] });
+    const list = [['skincare market size GCC', 'skincare'], ['skincare regulation GCC', null], ['makeup market size GCC', null], ['makeup regulation GCC', null], ['skincare makeup GCC', 'makeup'], ['skincare vs makeup GCC', null]];
+    const q = 'Which is growing faster, skincare or makeup, in the GCC?';
+    const ai = list.map(([words, side]) => ({ for: ['IR1'], words, side }));
+    const c = w.checkAiSearches(JSON.stringify({ searches: ai }), planFor(u), { ...u, question_text: q });
+    const wf = { ...w.finishWorkflow(planFor(u), u, q, c.searches, 11, c.removed || [], c.side_names), ai_budget: 11, removed_by_check: [], attempts: 1 };
+    const cmp = wf.tasks.find((t) => t.capability === 'compare');
+    const s = wf.tasks.filter((t) => t.capability === 'retrieve_data').map((t) => t.inputs.query.toLowerCase());
+    return (cmp && s.some((x) => x.startsWith('makeup') && !x.includes('skincare')) && s.some((x) => x.startsWith('skincare') && !x.includes('makeup')) && ok(u, wf) === true && step8(u, wf).status === 'approved') || { s, judge: ok(u, wf), s8: step8(u, wf).problems };
+  });
+  // 9c. "Compare online and stores": the AI's sides "online stores" and
+  // "stores" were merged as "the same thing", so nothing was compared
+  await check('Sides: "Compare online and stores in Kuwait" with AI sides "online stores" / "stores" -> two sides "online" and "stores", compared', async () => {
+    const u = und({ primary_goal: 'comparison', secondary_goals: ['opportunities'], topics: ['online', 'stores'], places: ['Kuwait'] });
+    const q = 'Compare online and stores in Kuwait and find opportunities';
+    const ai = [['online store market performance Kuwait', 'online stores', 'IR1'], ['store market performance Kuwait', 'stores', 'IR1'],
+      ['regulation Kuwait online stores', null, 'IR1'], ['market gaps Kuwait', null, 'IR2']].map(([words, side, id]) => ({ for: [id], words, side }));
+    const c = w.checkAiSearches(JSON.stringify({ searches: ai }), planFor(u), { ...u, question_text: q });
+    const wf = { ...w.finishWorkflow(planFor(u), { ...u, question_text: q }, q, c.searches, 11, c.removed || [], c.side_names), ai_budget: 11, removed_by_check: [], attempts: 1 };
+    const cmp = wf.tasks.find((t) => t.capability === 'compare');
+    const labels = cmp ? cmp.inputs.sides.map((x) => x.label).join() : '';
+    return (labels === 'online,stores' && ok(u, wf) === true && step8(u, wf).status === 'approved') || { labels, judge: ok(u, wf), s8: step8(u, wf).problems, notes: wf.notes };
+  });
+  for (const [q, sides, want] of [
+    // must NOT change: two names for ONE thing are still one side
+    ['Compare UAE retail with the region', [['UAE retail market', 'uae retail market size'], ['UAE retail', 'uae retail growth']], 'one side'],
+    ['How do premium and mass skincare compare in India?', [['premium skincare', 'premium skincare market India'], ['mass skincare', 'mass skincare market India']], 'premium,mass'],
+  ]) {
+    await check(`Sides (must not change): "${q}" -> ${want}`, async () => {
+      const u = und({ primary_goal: 'comparison', places: [] });
+      const ai = sides.map(([side, words]) => ({ for: ['IR1'], words, side }));
+      const c = w.checkAiSearches(JSON.stringify({ searches: ai }), planFor(u), { ...u, question_text: q });
+      const wf = w.finishWorkflow(planFor(u), { ...u, question_text: q }, q, c.searches, 11, c.removed || [], c.side_names);
+      const cmp = wf.tasks.find((t) => t.capability === 'compare');
+      const got = cmp ? cmp.inputs.sides.map((x) => x.label).join() : 'one side';
+      return got === want || { got, notes: wf.notes };
+    });
+  }
+
+  // 9d. a search word list over 150 characters is never cut in the middle
+  // of a word or a name ("regulation in United Arab E", then "arab e")
+  await check('Search words: an AI search over 150 characters keeps whole points, never half a name; the rest is listed as removed', async () => {
+    const u = und({ primary_goal: 'list', places: ['United Arab Emirates'] });
+    const long = 'market activity in United Arab Emirates, demand signals in United Arab Emirates, competitor moves in United Arab Emirates, regulation in United Arab Emirates';
+    const c = w.checkAiSearches(JSON.stringify({ searches: [{ for: ['IR1'], words: long, side: null }] }), planFor(u), { ...u, question_text: 'UAE news' });
+    const got = c.searches[0].words;
+    return (got.length <= 150 && /Emirates$/.test(got) && !/Arab E$/.test(got) &&
+      (c.removed || []).some((x) => x.what === 'search words' && /^regulation in United Arab Emirates$/.test(x.value))) || { got, removed: c.removed };
+  });
+  await check('Search words (must not change): a search under 150 characters is kept as it is', async () => {
+    const u = und({ primary_goal: 'list' });
+    const c = w.checkAiSearches(JSON.stringify({ searches: [{ for: ['IR1'], words: 'skincare launches, haircare launches', side: null }] }), planFor(u), { ...u, question_text: 'launches' });
+    return (c.searches[0].words === 'skincare launches, haircare launches' && !(c.removed || []).some((x) => x.what === 'search words')) || c;
+  });
+
+  // 9e. two frameworks in one question: both are done
+  await check('Frameworks: "a SWOT, a PESTLE and a forecast" -> the PESTLE is planned (need added) and summarised (10 headings), the SWOT is not added twice', async () => {
+    const u = und({ primary_goal: 'framework', secondary_goals: ['forecast'], places: ['Egypt', 'Morocco'], question_text: 'Give me a SWOT, a PESTLE and a forecast for Egypt and Morocco' });
+    const plan = planner.finishPlan({ requirements: [
+      { requirement_id: 'IR1', goal: 'framework', information_needed: ['Strengths of Egypt', 'Weaknesses of Egypt', 'Opportunities in Egypt and Morocco', 'Threats to Egypt and Morocco'], analysis: ['cluster', 'summarise'], priority: 'essential', depends_on: [] },
+      { requirement_id: 'IR2', goal: 'forecast', information_needed: ['past developments in Egypt and Morocco'], analysis: ['identify_patterns'], priority: 'optional', depends_on: [] },
+    ], output_sections: [] }, u);
+    const needs = plan.requirements[0].information_needed;
+    const h = w.frameworkHeadings(u.question_text);
+    return (needs.length === 5 && /^PESTLE: political/.test(needs[4]) && !needs.some((n) => /^SWOT:/.test(n)) &&
+      h.headings.length === 10 && h.headings[0] === 'SWOT: Strengths' && h.headings[4] === 'PESTLE: Political' && h.left_out.length === 0) || { needs, h };
+  });
+  await check('Frameworks: a "SWOT and PESTLE" workflow with SWOT headings only is refused by Step 8 and by the judge', async () => {
+    const q = 'Give me a SWOT and a PESTLE for Egypt';
+    const u = und({ primary_goal: 'framework', places: ['Egypt'], question_text: q });
+    const c = w.checkAiSearches(JSON.stringify({ searches: [{ for: ['IR1'], words: 'Egypt strengths weaknesses', side: null }] }), planFor(u), u);
+    const good = { ...w.finishWorkflow(planFor(u), u, q, c.searches, 11, c.removed || [], c.side_names), ai_budget: 11, removed_by_check: [], attempts: 1 };
+    const bad = JSON.parse(JSON.stringify(good));
+    const sum = bad.tasks.find((t) => t.capability === 'summarise');
+    sum.inputs.headings = ['Strengths', 'Weaknesses', 'Opportunities', 'Threats'];
+    return (step8(u, good).status === 'approved' && ok(u, good) === true && step8(u, bad).status === 'rejected' && ok(u, bad) !== true)
+      || { good: step8(u, good).problems, bad: step8(u, bad).problems, judgeBad: ok(u, bad) };
+  });
+  await check('Frameworks: SWOT + PESTLE + Five Forces -> two fit the 12 headings, the third is listed as left out', async () => {
+    const h = w.frameworkHeadings('SWOT, PESTLE and five forces for the UAE');
+    return (h.headings.length === 10 && h.left_out.join() === 'Five Forces') || h;
+  });
+  await check('Frameworks (must not change): "SWOT of Nykaa" with SWOT needs -> nothing added, 4 plain headings', async () => {
+    const u = und({ primary_goal: 'framework', companies: [{ name: 'Nykaa', matched: null }], question_text: 'SWOT of Nykaa' });
+    const plan = planner.finishPlan({ requirements: [{ requirement_id: 'IR1', goal: 'framework', information_needed: ["Nykaa's strengths", "Nykaa's weaknesses", "Nykaa's opportunities", "Nykaa's threats"], analysis: ['cluster', 'summarise'], priority: 'essential', depends_on: [] }], output_sections: [] }, u);
+    return (plan.requirements[0].information_needed.length === 4 && w.headingsFor('SWOT of Nykaa').join() === 'Strengths,Weaknesses,Opportunities,Threats') || plan.requirements[0];
+  });
+  await check('Frameworks: "PESTLE for the beauty market in Morocco" planned as market-entry needs -> the PESTLE headings are added as a need', async () => {
+    const u = und({ primary_goal: 'framework', places: ['Morocco'], question_text: 'PESTLE for the beauty market in Morocco' });
+    const plan = planner.finishPlan({ requirements: [{ requirement_id: 'IR1', goal: 'framework', information_needed: ['market attractiveness', 'regulation', 'competition', 'customer segments', 'entry barriers'], analysis: ['cluster', 'summarise'], priority: 'essential', depends_on: [] }], output_sections: [] }, u);
+    const needs = plan.requirements[0].information_needed;
+    return (needs.length === 6 && /^PESTLE: political/.test(needs[5])) || needs;
+  });
+
   // 10. a SWOT / profile of OUR company keeps every search on our company
   await check('Own SWOT: "SWOT analysis of Test Co" (needs say only "Strengths") -> every search stays on Test Co', async () => {
     const u = und({ primary_goal: 'framework', secondary_goals: [], industries: [], topics: [], companies: [OWNC], about_own_business: true });

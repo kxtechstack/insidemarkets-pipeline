@@ -863,7 +863,9 @@ function placeInCompany(item, question, checkCapitals) {
   return null;
 }
 
-function checkForm(form, question, names) {
+// `typed`: { original, spellingFixed } from Step 2 — the question exactly as
+// the user typed it, and the spelling fixes ("frgrance -> fragrance").
+function checkForm(form, question, names, typed = {}) {
   const removed = [];
   const skipChecks = isMostlyNonLatin(question);
 
@@ -882,7 +884,11 @@ function checkForm(form, question, names) {
   // Hindi questions). Companies are still checked.
   const leaveOut = [...form.places, ...form.companies, ...((names && names.competitors) || []).map((c) => (c && c.name) || c),
     (names && names.client && names.client.company_name) || ''];
-  const otherLanguage = !skipChecks && !looksEnglish(question, leaveOut);
+  // The language is the language the user TYPED: Step 2's spelling fixes
+  // assume English and turn "Tendenze della cosmetica in Italia" into
+  // "Tendency della cosmetica ...", which then looked English, so "Italy"
+  // was taken out as "not in the question".
+  const otherLanguage = !skipChecks && !looksEnglish(typed.original || question, leaveOut);
   const keepIfAsked = (field) => form[field].filter((item) => {
     if (skipChecks || isInQuestion(item, question)) return true;
     if (field === 'places' && otherLanguage) return true;
@@ -945,6 +951,22 @@ function checkForm(form, question, names) {
       removed.push({ field: 'companies', value: asked, why: hidden.topic
         ? `a place and a topic, not a company: "${hidden.place}" moved to places, "${hidden.topic}" to topics`
         : 'a place, not a company: moved to places' });
+      continue;
+    }
+    // A "company" that is in the question only because Step 2 fixed a typo
+    // into an ordinary English word is that word, not a name: "frgrance
+    // risks egypt" -> companies [fragrance] filtered every search to a
+    // company called "fragrance". (Spelling fixes only ever give dictionary
+    // words; names are never "fixed", and names in the word list are swaps,
+    // not spelling fixes.)
+    const fixedTo = (typed.spellingFixed || []).map((c) => String(c).split(' -> '));
+    const fixedWords = new Set(fixedTo.map((x) => normalise(x[1] || '')).filter(Boolean));
+    const askedWords = plainWords(asked);
+    const typedWords = new Set(plainWords(typed.original || ''));
+    if (typed.original && askedWords.length && askedWords.every((w) => fixedWords.has(w) && !typedWords.has(w))) {
+      const from = fixedTo.filter((x) => askedWords.includes(normalise(x[1] || ''))).map((x) => `"${x[0]}"`).join(', ');
+      movedToTopics.push(asked);
+      removed.push({ field: 'companies', value: asked, why: `an ordinary word (Step 2 fixed the spelling of ${from} to it), not a company name: moved to topics` });
       continue;
     }
     const kind = companyKind(asked, question, !skipChecks);
@@ -1192,7 +1214,8 @@ async function understandQuery(request, cleaned, options = {}) {
     return askBack(NO_TOPIC_MESSAGE, names, { attempts, ai_problem: lastProblem });
   }
 
-  const { checked, removed, checks_skipped } = checkForm(form, checkText, names);
+  const { checked, removed, checks_skipped } = checkForm(form, checkText, names,
+    { original: original || question, spellingFixed: cleaned.spelling_fixed || [] });
   const result = {
     status: 'understood',
     message: null,

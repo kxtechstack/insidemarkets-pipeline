@@ -165,7 +165,7 @@ const CAPABILITIES = [
     inputs: {
       input: { type: 'array_of_refs', required: true, min: 1, max: 6 },
       focus: { type: 'text', required: false, max_chars: 200, note: 'what the summary should be about' },
-      headings: { type: 'array_of_text', required: false, max: 8, note: 'fixed headings, e.g. SWOT: Strengths, Weaknesses, Opportunities, Threats' },
+      headings: { type: 'array_of_text', required: false, max: 12, note: 'fixed headings, e.g. SWOT: Strengths, Weaknesses, Opportunities, Threats (two frameworks: "SWOT: Strengths", "PESTLE: Political", ...)' },
     },
     output: 'FindingList',
     needs_earlier_tasks: true,

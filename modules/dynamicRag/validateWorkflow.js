@@ -34,7 +34,7 @@
  */
 
 const {
-  getCapability, RUN_LIMITS, MODULES, GOAL_KEY_JOB, SEARCH_JOBS,
+  getCapability, RUN_LIMITS, MODULES, GOAL_KEY_JOB, SEARCH_JOBS, FRAMEWORKS,
 } = require('./capabilityRegistry');
 const { REQUIRE_READY_JOBS } = require('./chatConfig');
 const { searchDates } = require('./buildWorkflow');
@@ -342,6 +342,20 @@ function validateWorkflow(workflow, understood, plan) {
     }
   }
   if (requirements[0] && leftOut.includes(`(${requirements[0].requirement_id})`)) problems.push('the main goal was left out');
+
+  // 6. every framework the question names (SWOT, PESTLE, Five Forces) has
+  // its headings in the framework summary, or is said to be left out
+  const named = FRAMEWORKS.filter((f) => f.match.test(String((understood && understood.question_text) || '')));
+  for (const r of requirements.filter((x) => x.goal === 'framework' && !leftOut.includes(`(${x.requirement_id})`))) {
+    const sum = tasks.find((t) => t && t.capability === 'summarise' && (t.for_requirements || []).includes(r.requirement_id));
+    if (!sum) continue;   // the key job is checked above
+    const heads = ((sum.inputs && sum.inputs.headings) || []).join(' | ');
+    for (const f of named) {
+      if (f.headings.every((h) => heads.includes(h))) continue;
+      if (notes.some((n) => String(n).startsWith(`${r.requirement_id}:`) && String(n).includes(f.name) && String(n).includes('left out'))) continue;
+      problems.push(`${sum.task_id}: the question asks for a ${f.name}, but the summary has no ${f.name} headings`);
+    }
+  }
 
   if (REQUIRE_READY_JOBS && notReady.length) {
     problems.push(`these jobs cannot run yet (their code is not ready): ${notReady.join(', ')}`);

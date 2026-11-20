@@ -67,6 +67,28 @@ const GOAL_LABELS = {
 
 const cleanText = (v, max) => String(v == null ? '' : v).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 const same = (a, b) => cleanText(a, 300).toLowerCase() === cleanText(b, 300).toLowerCase();
+// Search words kept under a length limit WITHOUT cutting a word or a point in
+// half: whole comma parts are kept while they fit ("regulation in United
+// Arab E" was a cut name, then searched for the other side as "arab e").
+// One part that is too long alone is cut at a space, with no small word left
+// hanging at the end. Returns the words kept and the words left out.
+function cutWords(v, max) {
+  const t = cleanText(v, 100000);
+  if (t.length <= max) return { text: t, cut: '' };
+  let out = '';
+  for (const part of t.split(/\s*,\s*/).filter(Boolean)) {
+    const next = out ? `${out}, ${part}` : part;
+    if (next.length > max) break;
+    out = next;
+  }
+  if (!out) {
+    out = t.slice(0, max);
+    const space = out.lastIndexOf(' ');
+    if (space > 0) out = out.slice(0, space);
+    out = out.replace(/(\s+\S{1,3})+$/, '').trim() || out;
+  }
+  return { text: out, cut: t.slice(out.length).replace(/^[\s,]+/, '') };
+}
 const uniq = (list) => [...new Set(list)];
 
 // AI calls a job may make (worst case, for the limit).
@@ -103,11 +125,31 @@ function impactAsked(question) {
   return null;
 }
 
-// Fixed headings for SWOT / PESTLE / Five Forces.
-function headingsFor(question) {
+// Fixed headings for SWOT / PESTLE / Five Forces. Every framework the
+// question names is kept, in the order it is named ("a SWOT and a PESTLE"
+// was SWOT only: PESTLE was lost without a word). With two or more, each
+// heading says its framework ("SWOT: Strengths"). Frameworks that do not fit
+// the heading limit are listed in `left_out` (said in the notes).
+const MAX_HEADINGS = 12;
+function frameworksNamed(question) {
   const q = String(question || '');
-  const f = FRAMEWORKS.find((x) => x.match.test(q));
-  return f ? [...f.headings] : null;
+  return FRAMEWORKS.map((f) => ({ f, at: q.search(f.match) })).filter((x) => x.at >= 0)
+    .sort((a, b) => a.at - b.at).map((x) => x.f);
+}
+function frameworkHeadings(question) {
+  const named = frameworksNamed(question);
+  if (!named.length) return { headings: null, left_out: [] };
+  if (named.length === 1) return { headings: [...named[0].headings], left_out: [] };
+  const headings = [];
+  const left = [];
+  for (const f of named) {
+    if (headings.length + f.headings.length > MAX_HEADINGS) { left.push(f.name); continue; }
+    headings.push(...f.headings.map((h) => `${f.name}: ${h}`));
+  }
+  return { headings, left_out: left };
+}
+function headingsFor(question) {
+  return frameworkHeadings(question).headings;
 }
 
 // Words that say "the newest things", not WHAT to look for.
@@ -447,6 +489,24 @@ function sidesFromSearches(searches, question, ownName, understood = null) {
     labels.filter((l) => l !== label).map(wordsOf).join(' '))) ? found : [];
 }
 
+// Does the question set these words against the other side's words with
+// "and" / "or" / "vs" ("Compare online and stores", "stores versus online")?
+// Plain grammar words only, a few words apart.
+const AGAINST_WORDS = new Set(['and', 'or', 'vs', 'versus', 'against', 'than']);
+function setAgainst(extra, core, question) {
+  const t = plain(question).split(' ').map(singular);
+  const coreWords = core.split(' ').filter(Boolean);
+  const at = (list) => t.map((w, i) => (list.includes(w) ? i : -1)).filter((i) => i >= 0);
+  for (const i of at(extra)) {
+    for (const j of at(coreWords)) {
+      if (Math.abs(i - j) < 2 || Math.abs(i - j) > 4) continue;
+      const between = t.slice(Math.min(i, j) + 1, Math.max(i, j));
+      if (between.some((w) => AGAINST_WORDS.has(w)) && !between.some((w) => extra.includes(w) || coreWords.includes(w))) return true;
+    }
+  }
+  return false;
+}
+
 // Is this side the same as that one? ("UAE" = "United Arab Emirates",
 // "Estee Lauder" = "Estée Lauder", "our company" = the client's own company)
 function sameSide(a, b, ownName = null) {
@@ -642,7 +702,11 @@ function checkAiSearches(replyText, plan, understood) {
     const forList = (Array.isArray(raw.for) ? raw.for : [raw.for])
       .map((x) => String(x || '').trim().toUpperCase())
       .filter((x) => partIds.includes(x));
-    const wordsRaw = cleanText(raw.words || raw.query, MAX_WORDS_CHARS);
+    const cutRaw = cutWords(raw.words || raw.query, MAX_WORDS_CHARS);
+    const wordsRaw = cutRaw.text;
+    if (cutRaw.cut && forList.length) {
+      removed.push({ what: 'search words', value: cutRaw.cut, why: `over ${MAX_WORDS_CHARS} characters (whole points kept: "${wordsRaw.slice(0, 60)}")` });
+    }
     if (forList.length === 0) {
       removed.push({ what: 'search', value: wordsRaw || '(no words)', why: 'not for any part of the plan' });
       continue;
@@ -709,7 +773,7 @@ function checkAiSearches(replyText, plan, understood) {
 function wordsFromNeeds(part) {
   const needs = part.information_needed || [];
   const text = needs.slice(0, 3).join(', ');
-  return cleanText(text || GOAL_LABELS[part.goal] || part.goal, MAX_WORDS_CHARS);
+  return cutWords(text || GOAL_LABELS[part.goal] || part.goal, MAX_WORDS_CHARS).text;
 }
 
 // Several searches become one: their words joined (each kept once), for all
@@ -826,6 +890,8 @@ function completeSearches(aiSearches, plan, understood, notes) {
         for (const x of mine().filter((m) => m.side && sideCore(m.side, ownName) === OWN_CORE && m.side !== ownName)) {
           searches[searches.indexOf(x)] = { ...x, side: ownName };
         }
+        const question = understood.question_text || '';
+        const proven = new Set();   // sides the question itself sets against each other
         const named = uniq(mine().filter((s) => s.side).map((s) => s.side));
         for (const a of named) {
           for (const b of named) {
@@ -835,6 +901,18 @@ function completeSearches(aiSearches, plan, understood, notes) {
             const pa = sideCore(a, ownName);
             const pb = sideCore(b, ownName);
             if (pa.length <= pb.length && (` ${pb} `).includes(` ${pa} `)) {
+              // ...unless the extra words are what the user compares WITH the
+              // shorter side: "Compare online and stores" -> the AI's sides
+              // "online stores" and "stores" are "online" and "stores"
+              const extra = pb.split(' ').filter((x) => x && !pa.split(' ').includes(x));
+              if (pa !== OWN_CORE && pb !== OWN_CORE && extra.length && setAgainst(extra, pa, question)) {
+                const label = extra.join(' ');
+                for (const x of mine().filter((m) => m.side === b)) searches[searches.indexOf(x)] = { ...x, side: label };
+                proven.add(label);
+                proven.add(a);
+                notes.push(`${id}: the sides "${b}" and "${a}" differ by "${label}", which the question compares with "${a}": the sides are "${label}" and "${a}"`);
+                continue;
+              }
               for (const x of mine().filter((m) => m.side === b)) searches[searches.indexOf(x)] = { ...x, side: a };
               notes.push(`${id}: the sides "${a}" and "${b}" are the same thing, so they are one side`);
             }
@@ -846,9 +924,9 @@ function completeSearches(aiSearches, plan, understood, notes) {
         }
         // the words that make each side different must be in the user's
         // question; a side the user never asked about is not a side
-        const question = understood.question_text || '';
         const kept = uniq(mine().filter((x) => x.side).map((x) => x.side));
         for (const label of kept) {
+          if (proven.has(label)) continue;
           const otherWords = mine().filter((m) => m.side && m.side !== label).map((m) => m.words).join(' ');
           if (sideInQuestion(label, kept.filter((o) => o !== label), question, ownName, otherWords)) continue;
           for (const x of mine().filter((m) => m.side === label)) searches[searches.indexOf(x)] = { ...x, side: null };
@@ -921,6 +999,26 @@ function completeSearches(aiSearches, plan, understood, notes) {
   // launches". Any point one side's search has (other side names taken
   // out) is added to the searches of the other sides. Nothing is removed.
   const ownNameForSides = understood.client && understood.client.company_name;
+  // A side's search never names another side - whatever way the sides were
+  // decided (fixed, named by the AI, or found by code). The AI can tag a
+  // search naming both things with one side ("skincare makeup GCC" as the
+  // makeup side); the fixed-sides path already cleaned this, the others
+  // did not. One pass for every comparing part, after all sides are known.
+  for (const part of plan.requirements) {
+    if (!comparesSides(part)) continue;
+    const id = part.requirement_id;
+    const mine = searches.filter((x) => x.side && x.for.includes(id));
+    const labels = uniq(mine.map((x) => x.side));
+    if (labels.length < 2) continue;
+    const labelSides = labels.map((label) => ({ label }));
+    for (const x of mine) {
+      const cleaned = wordsForSide(x.words, labelSides, x.side, ownNameForSides);
+      if (cleaned && cleaned !== wordsForSide(x.words, [], x.side, ownNameForSides)) {
+        searches[searches.indexOf(x)] = { ...x, words: cleaned };
+        notes.push(`${id}: the "${x.side}" search named another side; that name was taken out ("${String(x.words).slice(0, 60)}")`);
+      }
+    }
+  }
   for (const part of plan.requirements) {
     if (!comparesSides(part)) continue;
     const id = part.requirement_id;
@@ -1283,8 +1381,9 @@ function analysisTasks(part, E, U, sideRefs, question, notes) {
       inputs = { inputs: take([done.identify_patterns, done.identify_gaps, done.compare, ...E, ...U], 4) };
     } else if (job === 'summarise') {
       inputs = { input: take([...Object.values(done), ...E, ...U], 6), focus: `${GOAL_LABELS[part.goal]}: ${topic}`.slice(0, 200) };
-      const headings = part.goal === 'framework' ? headingsFor(question) : null;
-      if (headings) inputs.headings = headings;
+      const fh = part.goal === 'framework' ? frameworkHeadings(question) : { headings: null, left_out: [] };
+      if (fh.headings) inputs.headings = fh.headings;
+      if (fh.left_out.length) notes.push(`${part.requirement_id}: at most ${MAX_HEADINGS} headings in one summary, so ${fh.left_out.join(', ')} is left out (the other frameworks are done)`);
     }
     if (!inputs) continue;
     const idx = tasks.length;
@@ -1659,6 +1758,7 @@ module.exports = {
   modulesNamed,
   impactAsked,
   headingsFor,
+  frameworkHeadings,
   listTopicWords,
   ownNamedInQuestion,
   withoutOwnWords,
