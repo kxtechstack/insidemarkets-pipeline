@@ -67,6 +67,29 @@ const GOAL_LABELS = {
 
 const cleanText = (v, max) => String(v == null ? '' : v).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 const same = (a, b) => cleanText(a, 300).toLowerCase() === cleanText(b, 300).toLowerCase();
+// Words added to the end of a search (the subject, a place not in our list)
+// must still fit the search job's limit (300 letters). "How do we win younger
+// shoppers in Saudi Arabia?": 6 searches were joined up to 299 letters, then
+// the subject was added -> 310, refused by Step 8. The added words win: the
+// last whole points of the search make room (listed in the notes), never
+// half a word.
+function addWords(words, extra, max = MAX_JOINED_CHARS) {
+  const tail = String(extra || '').trim();
+  let parts = String(words || '').split(/\s*,\s*/).filter(Boolean);
+  const dropped = [];
+  const join = () => `${parts.join(', ')} ${tail}`.trim();
+  while (parts.length > 1 && join().length > max) dropped.unshift(parts.pop());
+  let text = join();
+  if (text.length > max) {
+    // one point alone is too long: cut it at a space before the added words
+    const room = Math.max(0, max - tail.length - 1);
+    const cut = cutWords(parts[0] || '', room);
+    if (cut.cut) dropped.unshift(cut.cut);
+    text = `${cut.text} ${tail}`.trim();
+  }
+  return { text, dropped };
+}
+
 // Search words kept under a length limit WITHOUT cutting a word or a point in
 // half: whole comma parts are kept while they fit ("regulation in United
 // Arab E" was a cut name, then searched for the other side as "arab e").
@@ -554,7 +577,16 @@ function partForSide(words, sides, label, ownName) {
     // One or many is the same thing ("competitor" for the "Competitors" side).
     const oneOrMany = other.split(' ').map(singular).join(' ');
     const names = uniq([other, oneOrMany, ...(PLACES[s.label] || []).map(plain)]).filter(Boolean).sort((a, b) => b.length - a.length);
-    for (const n of names) w = w.split(` ${n} `).join(' ');
+    // the name goes with the "and / or / vs" that pairs it with another
+    // name: "estee lauder and lancome refill packaging" for the Estée Lauder
+    // side -> "estee lauder refill packaging" (was "estee lauder and refill
+    // packaging"); the word before is taken first, else the word after
+    for (const n of names) {
+      w = w.replace(new RegExp(`(?<= )(?:and|or|vs|versus) ${n}(?= )`, 'g'), ' ')
+        .replace(new RegExp(`(?<= )${n} (?:and|or|vs|versus)(?= )`, 'g'), ' ')
+        .split(` ${n} `).join(' ');
+      w = ` ${w.trim().split(/\s+/).join(' ')} `;
+    }
     // the competitor list side: every way of saying "competitors"
     if (s.label === 'Competitors') w = ` ${w.trim().split(/\s+/).filter((t) => !RIVAL_WORD.test(t)).join(' ')} `;
     const first = other.split(' ')[0];
@@ -878,6 +910,19 @@ function completeSearches(aiSearches, plan, understood, notes) {
             notes.push(`${id}: other sides' names taken out of the "${x.side}" search`);
           }
         }
+        // a DATE side's search does not carry its own date either: the dates
+        // are its filter ("Compare April and May": "monthly sales data May"
+        // kept "May" while "April" was taken out of the April search)
+        if (sides[0] && sides[0].date_from) {
+          const KEEP = '\u0000keep';
+          for (const x of mine().filter((m) => m.side)) {
+            const cleaned = wordsForSide(x.words, [{ label: KEEP }, ...nameSides], KEEP, ownName);
+            if (cleaned && cleaned !== wordsForSide(x.words, [], x.side, ownName)) {
+              searches[searches.indexOf(x)] = { ...x, words: cleaned };
+              notes.push(`${id}: the date "${x.side}" taken out of its own search (the dates are its filter)`);
+            }
+          }
+        }
       } else {
         // Sides named by the AI (the question names no 2 places / companies /
         // dates): two names for the same thing are ONE side ("UAE retail" and
@@ -893,6 +938,19 @@ function completeSearches(aiSearches, plan, understood, notes) {
         const question = understood.question_text || '';
         const proven = new Set();   // sides the question itself sets against each other
         const named = uniq(mine().filter((s) => s.side).map((s) => s.side));
+        // two AI sides the question itself sets against each other ("Which
+        // is growing faster, skincare or makeup") are sides, even when one
+        // side's search also names the other (that name is taken out later)
+        for (const a of named) {
+          for (const b of named) {
+            if (a === b) continue;
+            const pa = sideCore(a, ownName);
+            const pb = sideCore(b, ownName);
+            if (!pa || !pb || pa === OWN_CORE || pb === OWN_CORE || pa === pb) continue;
+            if ((` ${pa} `).includes(` ${pb} `) || (` ${pb} `).includes(` ${pa} `)) continue;
+            if (setAgainst(pa.split(' '), pb, question)) { proven.add(a); proven.add(b); }
+          }
+        }
         for (const a of named) {
           for (const b of named) {
             if (a === b || !mine().some((x) => x.side === b) || !mine().some((x) => x.side === a)) continue;
@@ -1116,7 +1174,15 @@ function questionSubjects(understood) {
   // subjects ("mercado", "Risiken", "riskler"). Our news is in English and
   // the AI already wrote English searches, so nothing is added then.
   if (!questionInEnglish(understood)) return [];
-  const pick = (list) => (list || []).map((t) => ({ text: String(t), words: words(t) })).filter((x) => x.words.length);
+  // A module's name is not a subject: it picks the module, and "market
+  // dynamics" was added to every search of "Market dynamics signals about
+  // men's grooming" as if it were the subject (20 Nov).
+  // (only the module NAMES "market dynamics / market signals / outlook";
+  // the policy and competitor words - regulation, rules, competitor - are
+  // real subjects)
+  const noModules = (t) => MODULE_WORDS.filter(([m]) => m === 'market' || m === 'outlook')
+    .reduce((x, [, re]) => x.replace(new RegExp(re.source, 'gi'), ' '), String(t));
+  const pick = (list) => (list || []).map((t) => ({ text: String(t), words: words(noModules(t)) })).filter((x) => x.words.length);
   const main = [...pick(understood.products), ...pick(understood.topics)];
   return main.length ? main : pick(understood.industries);
 }
@@ -1125,7 +1191,8 @@ function questionSubjects(understood) {
 // whole question, so a rare English word ("haircare") does not count
 // against it.
 function questionInEnglish(understood) {
-  return looksEnglish(understood.question_text, [...(understood.places || []), ...companyNames(understood)]);
+  // the question as TYPED decides (Step 2's spelling fixes assume English, 3g)
+  return looksEnglish(understood.question_typed || understood.question_text, [...(understood.places || []), ...companyNames(understood)]);
 }
 
 // Does the search still say what the question is about? ("market risks"
@@ -1292,7 +1359,11 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
     countries = countries.filter(placeKnown);
     const have = new Set(plain(search.words).split(' '));
     const missing = notFilters.filter((x) => !plain(x).split(' ').filter((w) => w !== 'the').every((w) => have.has(w)));
-    if (missing.length) search = { ...search, words: `${search.words} ${missing.join(' ')}` };
+    if (missing.length) {
+      const added = addWords(search.words, missing.join(' '));
+      search = { ...search, words: added.text };
+      if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');
+    }
     filterWhy = [filterWhy, `places: ${notFilters.join(', ')} not in our place list, so searched by words, not used as a filter`].filter(Boolean).join('; ');
   }
   // "Who owns Huda Beauty today?", "what is the VAT rate today": "today"
@@ -1320,8 +1391,10 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       // the main subject is enough to keep the search on topic; adding every
       // subject of a long question makes a word soup (at most 2)
       const add = uniq(subjects.map((x) => x.text)).slice(0, MAX_SUBJECTS_ADDED);
-      search = { ...search, words: `${search.words} ${add.join(' ')}` };
+      const added = addWords(search.words, add.join(' '));
+      search = { ...search, words: added.text };
       filterWhy = [filterWhy, `words: the subject (${add.join(', ')}) added, the search had lost it`].filter(Boolean).join('; ');
+      if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');
     }
   }
   const inputs = {};

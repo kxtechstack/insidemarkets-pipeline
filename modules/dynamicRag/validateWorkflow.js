@@ -345,7 +345,7 @@ function validateWorkflow(workflow, understood, plan) {
 
   // 6. every framework the question names (SWOT, PESTLE, Five Forces) has
   // its headings in the framework summary, or is said to be left out
-  const named = FRAMEWORKS.filter((f) => f.match.test(String((understood && understood.question_text) || '')));
+  const named = FRAMEWORKS.filter((f) => f.match.test(String((understood && understood.question_text) || (workflow && workflow.question_text) || '')));
   for (const r of requirements.filter((x) => x.goal === 'framework' && !leftOut.includes(`(${x.requirement_id})`))) {
     const sum = tasks.find((t) => t && t.capability === 'summarise' && (t.for_requirements || []).includes(r.requirement_id));
     if (!sum) continue;   // the key job is checked above

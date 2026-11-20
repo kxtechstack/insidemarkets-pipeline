@@ -1038,9 +1038,22 @@ function checkForm(form, question, names, typed = {}) {
   // ("Nike's competitors") it is about that company instead.
   // ("How is <our company> doing against competitors?" = our own competitors too)
   const onlyOwnNamed = companiesOut.length > 0 && companiesOut.every((c) => c.matched && c.matched.type === 'own_company');
-  const ownCompetitors = rivalsByName ||
+  // "competitors of nikee" / "rivals of Nike": the competitors of SOMEONE
+  // ELSE, even when the AI did not keep that name as a company (20 Nov: the
+  // searches were filtered to the client's competitor list). Only "of" + a
+  // word that is not us ("competitors of ours" is still ours; "competitors to
+  // watch" is not "of").
+  const ofOther = String(question).match(/\b(?:competitors?|rivals?)\s+of\s+(?:the\s+)?([\p{L}\p{N}'&.-]+)/iu);
+  const OURS = new Set(['us', 'our', 'ours', 'we', 'me', 'my', 'mine', 'client', 'company', 'brand', 'business']);
+  const ownNameWords = plainWords((names.client && names.client.company_name) || '');
+  const competitorsOfOther = ofOther && !OURS.has(ofOther[1].toLowerCase()) &&
+    !ownNameWords.includes(normalise(ofOther[1]));
+  if (competitorsOfOther) {
+    removed.push({ field: 'all_competitors', value: ofOther[0], why: `the competitors of "${ofOther[1]}", not the client competitors` });
+  }
+  const ownCompetitors = !competitorsOfOther && (rivalsByName ||
     // ("the competition" = our competitors; "compare on demand and competition" = a topic)
-    (/\b(competitors?|rivals?|the competition)\b/i.test(String(question)) && (companiesOut.length === 0 || onlyOwnNamed));
+    (/\b(competitors?|rivals?|the competition)\b/i.test(String(question)) && (companiesOut.length === 0 || onlyOwnNamed)));
   const topics = withoutDates('topics');
   for (const t of movedToTopics) if (!topics.some((x) => x.toLowerCase() === t.toLowerCase())) topics.push(t);
   // a place hiding in a topic ("Korean market"), when the user really wrote it
@@ -1222,6 +1235,11 @@ async function understandQuery(request, cleaned, options = {}) {
     ...checked,
     time,
     today: ymd(today),   // the day the dates were worked out from, as text (Step 7 never searches past it)
+    // the question this was worked out from (after Step 2), so every later
+    // step reads the same text (20 Nov: Step 6 and Step 8 had no question
+    // text, so their framework rules did nothing in the real chat)
+    question_text: question,
+    question_typed: original || question,   // exactly as typed (decides the language)
     client: { ...names.client, competitors: (names.competitors || []).map((c) => c.name) },
     removed_by_check: removed,
     checks_skipped,

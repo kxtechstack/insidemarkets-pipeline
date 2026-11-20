@@ -147,7 +147,10 @@ function parseJsonLoose(text) {
   const commas = (t) => t.replace(/}\s*{/g, '},{').replace(/"\s*\n\s*"/g, '",\n"');
   // an apostrophe written the wrong way inside a word: "men\'s" (not a JSON
   // escape) or "men"s" (a double quote) -> "men's"
-  const apostrophes = (t) => t.replace(/\\'/g, "'").replace(/(\p{L})"(s|t|re|ll|ve|d)\b(?!\s*[:,}\]])/gu, "$1'$2");
+  // also a broken escape: "Lanc\u00fome" (a \u with fewer than 4 hex
+  // digits, 20 Nov: two replies lost) or a backslash before a plain letter
+  const apostrophes = (t) => t.replace(/\\'/g, "'").replace(/(\p{L})"(s|t|re|ll|ve|d)\b(?!\s*[:,}\]])/gu, "$1'$2")
+    .replace(/\\u[0-9a-fA-F]{0,3}(?![0-9a-fA-F])/g, '').replace(/\\(?!["\\/bfnrtu])/g, '');
   const fixed = apostrophes(String(text));
   const variants = fixed === text ? [text] : [text, fixed];
   const base = variants.flatMap((t) => [t, t.replace(/,\s*([}\]])/g, '$1'), commas(t), commas(t).replace(/,\s*([}\]])/g, '$1')]);
@@ -468,12 +471,40 @@ function finishPlan(plan, understood) {
   // planned as "market attractiveness; regulation; ..." had no PESTLE
   // points at all. A framework is covered when its needs already talk about
   // at least half of its headings; otherwise its headings are added as one
-  // need (said in the notes; a need over the limit is listed as removed).
+  // need (said in the notes; when the part is full, the last need makes
+  // room and the note names it).
   const question = String(understood.question_text || '');
   const named = FRAMEWORKS.map((f) => ({ f, at: question.search(f.match) })).filter((x) => x.at >= 0)
     .sort((a, b) => a.at - b.at).map((x) => x.f);
+  // A need that only names the framework itself ("pestel framework
+  // headings", "SWOT framework headings", "evidence for each heading") is not
+  // something the news holds: it was searched as "pestel framework headings
+  // skincare". Such needs are taken out (notes); the headings come next.
+  // (the question's own places and companies count too: "PESTLE framework
+  // Egypt" is still only the framework; the part keeps the Egypt filter)
+  const lowWords = (text) => String(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+  const scopeWords = [...(understood.places || []), ...(understood.companies || []).map((c) => (c && c.name) || c)]
+    .flatMap((x) => lowWords(x));
+  const FRAME_WORDS = new Set([...FRAMEWORKS.flatMap((f) => [...f.words, ...lowWords(f.name)]), ...scopeWords,
+    'framework', 'frameworks', 'heading', 'headings', 'analysis', 'evidence', 'porter', 's', '5',
+    'elements', 'components', 'factors', 'model']);
+  const onlyFrameworkWords = (text) => {
+    const words = lowWords(text);
+    return words.length > 0 && words.every((w) => FRAME_WORDS.has(w) || META_WORDS.has(w));
+  };
+  // a need that names a framework the question did NOT ask for ("SWOT
+  // analysis framework for cosmetics industry" in a PESTEL question)
+  const otherFramework = (text) => FRAMEWORKS.some((f) => !named.includes(f) && f.match.test(String(text)));
   for (const r of requirements.filter((x) => x.goal === 'framework')) {
     r.information_needed = [...(r.information_needed || [])];
+    if (named.length) {
+      const meta = r.information_needed.filter((n) => onlyFrameworkWords(n) || otherFramework(n));
+      if (meta.length) {
+        r.information_needed = r.information_needed.filter((n) => !meta.includes(n));
+        notes.push(`${r.requirement_id}: needs that only name a framework (or one the question did not ask for) were taken out (${meta.map((m) => `"${m}"`).join(', ')}): the asked framework's headings are searched instead`);
+      }
+    }
     for (const f of named) {
       const needs = r.information_needed.join(' ').toLowerCase();
       const talkedAbout = f.headings.filter((h) => {
@@ -486,7 +517,11 @@ function finishPlan(plan, understood) {
         r.information_needed.push(need);
         notes.push(`${r.requirement_id}: the question asks for a ${f.name}, so its headings were added to the information needed`);
       } else {
-        notes.push(`${r.requirement_id}: the question asks for a ${f.name}, but the part already has ${MAX_NEEDS} needs, so its headings were not added as a need (the summary still uses them)`);
+        // full ("a SWOT and a PESTLE": 6 SWOT needs): the last need makes
+        // room, so the asked-for framework is still searched (recorded)
+        const out = r.information_needed.pop();
+        r.information_needed.push(need);
+        notes.push(`${r.requirement_id}: the question asks for a ${f.name}, so its headings replaced the last need ("${out}")`);
       }
     }
   }
@@ -570,8 +605,10 @@ function finishPlan(plan, understood) {
  * }
  * @throws ChatError 503 only if the AI could not be reached at all
  */
-async function planTasks(cleaned, understood) {
+async function planTasks(cleaned, understoodIn) {
   const question = cleaned.preprocessed_query;
+  // the code checks read the question too (framework names): never without it
+  const understood = understoodIn && understoodIn.question_text ? understoodIn : { ...understoodIn, question_text: question };
   const goals = goalsOf(understood);
   const prompt = await requirePrompt(PLAN_PROMPT_ID);
 
