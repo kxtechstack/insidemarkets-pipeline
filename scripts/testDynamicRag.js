@@ -2584,11 +2584,19 @@ async function testBig6(withStep5Bank) {
       const wait = gapMs - (Date.now() - started);
       if (wait > 0) await sleep(wait);
     }
-    const retry = results.filter((r) => r.error && /AI|429|timeout|ECONN|socket/i.test(r.error));
+    // (a database or network hiccup counts too: "fetch failed")
+    const retry = results.filter((r) => r.error && /AI|429|timeout|ECONN|socket|fetch failed|network/i.test(r.error));
     if (retry.length) {
-      realLog(`\n  ${retry.length} questions got no answer (AI busy). Waiting 60s, then trying them again...`);
+      realLog(`\n  ${retry.length} questions got no answer (AI busy or network hiccup). Waiting 60s, then trying them again...`);
       await sleep(60000);
-      for (const r of retry) Object.assign(r, await askOne(r.t));
+      // the new answer REPLACES the old one (20 Nov: Object.assign kept the
+      // old "error", so 23 questions that worked on the retry were still
+      // counted as crashed)
+      for (const r of retry) {
+        const again = await askOne(r.t);
+        for (const k of Object.keys(r)) delete r[k];
+        Object.assign(r, again);
+      }
     }
   } finally {
     console.log = realLog;
@@ -4429,11 +4437,19 @@ async function testBig7(bank = 'old') {
       const wait = gapMs - (Date.now() - started);
       if (wait > 0) await sleep(wait);
     }
-    const retry = results.filter((r) => r.error && /AI|429|timeout|ECONN|socket/i.test(r.error));
+    // (a database or network hiccup counts too: "fetch failed")
+    const retry = results.filter((r) => r.error && /AI|429|timeout|ECONN|socket|fetch failed|network/i.test(r.error));
     if (retry.length) {
-      realLog(`\n  ${retry.length} questions got no answer (AI busy). Waiting 60s, then trying them again...`);
+      realLog(`\n  ${retry.length} questions got no answer (AI busy or network hiccup). Waiting 60s, then trying them again...`);
       await sleep(60000);
-      for (const r of retry) Object.assign(r, await askOne(r.t));
+      // the new answer REPLACES the old one (20 Nov: Object.assign kept the
+      // old "error", so 23 questions that worked on the retry were still
+      // counted as crashed)
+      for (const r of retry) {
+        const again = await askOne(r.t);
+        for (const k of Object.keys(r)) delete r[k];
+        Object.assign(r, again);
+      }
     }
   } finally {
     console.log = realLog;

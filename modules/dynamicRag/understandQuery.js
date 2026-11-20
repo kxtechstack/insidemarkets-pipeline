@@ -75,18 +75,27 @@ const MAX_ITEM_CHARS = 100;
 // 1. The instruction, from the prompts table
 // ═════════════════════════════════════════════════════════════════════════
 let promptCache = { text: null, loadedAt: 0 };
+const DB_RETRY_MS = 1500;   // wait before reading the database once more
 
 async function loadPrompt() {
   if (promptCache.text && Date.now() - promptCache.loadedAt < PROMPT_REFRESH_MS) {
     return promptCache.text;
   }
-  const { data, error } = await supabase
-    .from('prompts')
-    .select('prompt_template')
-    .eq('id', UNDERSTAND_PROMPT_ID)
-    .eq('is_active', true)
-    .maybeSingle();
-
+  // A short database hiccup ("fetch failed": 23 questions in a row on 20 Nov)
+  // must not stop the chat: try once more after a moment, and if it still
+  // fails keep using the last good text (a prompt changes rarely).
+  const read = () => supabase.from('prompts').select('prompt_template')
+    .eq('id', UNDERSTAND_PROMPT_ID).eq('is_active', true).maybeSingle()
+    .then((r) => r, (e) => ({ data: null, error: e }));
+  let { data, error } = await read();
+  if (error) {
+    await new Promise((r) => setTimeout(r, DB_RETRY_MS));
+    ({ data, error } = await read());
+  }
+  if (error && promptCache.text) {
+    console.error(`[DynamicRAG] could not reload prompt ${UNDERSTAND_PROMPT_ID} (${error.message}): the last good text is used`);
+    return promptCache.text;
+  }
   if (error) throw new Error(`could not load prompt ${UNDERSTAND_PROMPT_ID}: ${error.message}`);
   if (!data || !data.prompt_template) {
     throw new Error(`prompt ${UNDERSTAND_PROMPT_ID} is missing or switched off in the prompts table`);
@@ -99,12 +108,19 @@ async function loadPrompt() {
 // 2. The client's names: its own company and its competitors
 // ═════════════════════════════════════════════════════════════════════════
 async function loadClientNames(clientId) {
-  const [clientRes, compRes] = await Promise.all([
-    supabase.schema('admin').from('clients')
-      .select('id, company_name, industry').eq('id', clientId).maybeSingle(),
-    supabase.schema('admin').from('competitors')
-      .select('id, name, name_key, search_name, aliases, is_active').eq('client_id', clientId),
+  const caught = (q) => q.then((r) => r, (e) => ({ data: null, error: e }));
+  const readBoth = () => Promise.all([
+    caught(supabase.schema('admin').from('clients')
+      .select('id, company_name, industry').eq('id', clientId).maybeSingle()),
+    caught(supabase.schema('admin').from('competitors')
+      .select('id, name, name_key, search_name, aliases, is_active').eq('client_id', clientId)),
   ]);
+  // one more try after a short database hiccup (same as the prompt)
+  let [clientRes, compRes] = await readBoth();
+  if (clientRes.error || compRes.error) {
+    await new Promise((r) => setTimeout(r, DB_RETRY_MS));
+    [clientRes, compRes] = await readBoth();
+  }
   if (clientRes.error) throw new Error(`could not load client: ${clientRes.error.message}`);
   if (compRes.error) throw new Error(`could not load competitors: ${compRes.error.message}`);
 

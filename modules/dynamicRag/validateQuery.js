@@ -54,19 +54,28 @@ const MAX_QUESTION_CHARS = 300;
 
 // ── 1. The instruction, from the prompts table ───────────────────────────
 let promptCache = { text: null, loadedAt: 0 };
+const DB_RETRY_MS = 1500;   // wait before reading the database once more
 
 async function loadPrompt() {
   if (promptCache.text && Date.now() - promptCache.loadedAt < PROMPT_REFRESH_MS) {
     return promptCache.text;
   }
 
-  const { data, error } = await supabase
-    .from('prompts')
-    .select('prompt_template')
-    .eq('id', VALIDATE_PROMPT_ID)
-    .eq('is_active', true)
-    .maybeSingle();
-
+  // A short database hiccup ("fetch failed": 23 questions in a row on 20 Nov)
+  // must not stop the chat: try once more after a moment, and if it still
+  // fails keep using the last good text (a prompt changes rarely).
+  const read = () => supabase.from('prompts').select('prompt_template')
+    .eq('id', VALIDATE_PROMPT_ID).eq('is_active', true).maybeSingle()
+    .then((r) => r, (e) => ({ data: null, error: e }));
+  let { data, error } = await read();
+  if (error) {
+    await new Promise((r) => setTimeout(r, DB_RETRY_MS));
+    ({ data, error } = await read());
+  }
+  if (error && promptCache.text) {
+    console.error(`[DynamicRAG] could not reload prompt ${VALIDATE_PROMPT_ID} (${error.message}): the last good text is used`);
+    return promptCache.text;
+  }
   if (error) throw new Error(`could not load prompt ${VALIDATE_PROMPT_ID}: ${error.message}`);
   if (!data || !data.prompt_template) {
     throw new Error(`prompt ${VALIDATE_PROMPT_ID} is missing or switched off in the prompts table`);

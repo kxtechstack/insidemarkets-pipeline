@@ -23,10 +23,19 @@ async function getPrompt(id) {
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.text;
   let text = null;
-  try {
+  const read = async () => {
     const { data, error } = await supabase.from('prompts').select('prompt_template').eq('id', id).eq('is_active', true).maybeSingle();
     if (error) throw new Error(error.message);
-    text = data && data.prompt_template ? data.prompt_template : null;
+    return data && data.prompt_template ? data.prompt_template : null;
+  };
+  try {
+    try {
+      text = await read();
+    } catch (first) {
+      // a short database hiccup ("fetch failed"): one more try after a moment
+      await new Promise((r) => setTimeout(r, 1500));
+      text = await read();
+    }
   } catch (e) {
     console.error(`[Prompts] could not read prompt '${id}': ${e.message}`);
     return hit ? hit.text : null;   // database hiccup: keep using the last good text
