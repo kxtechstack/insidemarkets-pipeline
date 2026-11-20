@@ -424,7 +424,18 @@ function checkRegistry() {
   return problems;
 }
 
+// The analysis frameworks the chat knows, with their fixed headings.
+// "words" are the chat's own terms for them: Step 2 never "fixes" these
+// spellings ("pestel" must not become "pastel"), Step 7 gives the fixed
+// headings when the question names one.
+const FRAMEWORKS = [
+  { name: 'SWOT', words: ['swot'], match: /\bswot\b/i, headings: ['Strengths', 'Weaknesses', 'Opportunities', 'Threats'] },
+  { name: 'PESTLE', words: ['pest', 'pestle', 'pestel'], match: /\bpest(le|el)?\b/i, headings: ['Political', 'Economic', 'Social', 'Technological', 'Legal', 'Environmental'] },
+  { name: 'Five Forces', words: ['porter', 'porters', 'forces'], match: /\b(five|5)\s+forces\b/i, headings: ['Competitive rivalry', 'Threat of new entrants', 'Threat of substitutes', 'Buyer power', 'Supplier power'] },
+];
+
 module.exports = {
+  FRAMEWORKS,
   CAPABILITIES,
   GOAL_GUIDE,
   GOAL_KEY_JOB,

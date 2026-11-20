@@ -39,6 +39,7 @@ const {
 const { REQUIRE_READY_JOBS } = require('./chatConfig');
 const { searchDates } = require('./buildWorkflow');
 const { standardPlace } = require('../placeNames');
+const { preprocessText } = require('./preprocessQuery');   // only to spot date words
 
 const REF = /^T\d+\.output$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -131,6 +132,19 @@ function checkFilters(task, understood, today, problems) {
   const t5 = understood.time || null;
   const ranges = (t5 && t5.ranges) || [];
 
+  // a question that names a time: every search keeps that time, except
+  // "today" meaning "now" ("who owns Huda Beauty today?"), which Step 7
+  // searches without a date limit
+  const onlyToday = ranges.length === 1 && /^today$/i.test(String(ranges[0].text || '').trim());
+  const searches = task.capability === 'retrieve_data' || task.capability === 'structured_search';
+  if (searches && t5 && (t5.from || t5.to) && !i.date_from && !i.date_to && !onlyToday) {
+    problems.push(`${task.task_id}: has no dates, but the question names a time`);
+  }
+  // dates are filters (date_from / date_to), never search words: news text
+  // does not say "October December", so they only blur the search
+  if (task.capability === 'retrieve_data' && i.query && preprocessText(i.query).time_expressions.length) {
+    problems.push(`${task.task_id}: date words in the search "${i.query}"`);
+  }
   if (i.date_from || i.date_to) {
     if (!t5) {
       problems.push(`${task.task_id}: has dates, but the question has none`);
@@ -161,6 +175,55 @@ function checkFilters(task, understood, today, problems) {
 }
 
 // ── The run order: batches of jobs that can run at the same time ─────────
+// The sides of a comparison:
+//  - at least 2, each named once
+//  - really different things: a side whose words all sit inside another
+//    side ("UAE retail" and "UAE retail market") is the same thing
+//  - a side's search never names another side ("Lancome pricing vs Dior"
+//    for the Lancome side would also fetch Dior's news)
+function checkSides(task, tasks, problems, understood = {}) {
+  const sides = (task.inputs && task.inputs.sides) || [];
+  const labels = sides.map((x) => plain(x && x.label));
+  if (labels.length < 2) problems.push(`${task.task_id}: compare needs at least 2 sides`);
+  if (new Set(labels).size !== labels.length) problems.push(`${task.task_id}: two sides with the same name`);
+  const words = (l) => l.split(' ').filter(Boolean);
+  labels.forEach((a, i) => labels.forEach((b, j) => {
+    if (i >= j || a === b || !a || !b) return;
+    const [small, big] = words(a).length <= words(b).length ? [a, b] : [b, a];
+    if (words(small).every((w) => words(big).includes(w))) {
+      problems.push(`${task.task_id}: the sides "${sides[i].label}" and "${sides[j].label}" are the same thing`);
+    }
+  }));
+  // one or many is the same word ("competitor" names the "Competitors" side)
+  const oneOrMany = (t) => t.split(' ').filter(Boolean).map((w) => (w.length > 3 && /[^s]s$/.test(w) ? w.slice(0, -1) : w)).join(' ');
+  for (const side of sides) {
+    const src = tasks.find((x) => x && `${x.task_id}.output` === (side && side.ref));
+    if (!src || !src.inputs || !src.inputs.query) continue;
+    const q = ` ${oneOrMany(plain(src.inputs.query))} `;
+    for (const other of sides) {
+      if (other === side) continue;
+      const o = oneOrMany(plain(other && other.label));
+      const named = (o.length >= 3 && q.includes(` ${o} `)) ||
+        (plain(other && other.label) === 'competitors' && /\b(competit\w*|rivals?)\b/.test(q));
+      if (named) problems.push(`${src.task_id}: the "${side.label}" search names the other side "${other.label}"`);
+    }
+    // nor a thing LEFT OUT of the comparison (past the 4-side limit, the
+    // same kind as the sides): it is not compared, so its news must not be
+    // pulled into a side ("nykaa" in the Estée Lauder search)
+    if (sides.length >= 4) {
+      const places = ((understood && understood.places) || []).map(plain);
+      const companies = ((understood && understood.companies) || []).map((c) => plain((c && c.matched && c.matched.name) || (c && c.name)));
+      const same = labels.every((l) => places.includes(l)) ? places : labels.every((l) => companies.includes(l)) ? companies : [];
+      const raw = ` ${plain(src.inputs.query)} `;
+      for (const n of same) {
+        if (n.length >= 3 && !labels.includes(n) && raw.includes(` ${n} `)) {
+          problems.push(`${src.task_id}: the "${side.label}" search names "${n}", which is left out of the comparison`);
+        }
+      }
+    }
+  }
+}
+
 function runBatches(tasks) {
   const level = new Map();
   for (const t of tasks) {
@@ -226,12 +289,9 @@ function validateWorkflow(workflow, understood, plan) {
     if (forReq.length === 0) problems.push(`${t.task_id}: does not say which goal it is for`);
     for (const r of forReq) if (!reqIds.includes(r)) problems.push(`${t.task_id}: is for ${r}, which is not a part of the plan`);
 
-    // a comparison: 2+ sides, each side once
-    if (t.capability === 'compare') {
-      const labels = ((t.inputs && t.inputs.sides) || []).map((s) => plain(s && s.label));
-      if (labels.length < 2) problems.push(`${t.task_id}: compare needs at least 2 sides`);
-      if (new Set(labels).size !== labels.length) problems.push(`${t.task_id}: two sides with the same name`);
-    }
+    // a comparison: 2+ sides, each a different thing, and no side's search
+    // pulls another side's news
+    if (t.capability === 'compare') checkSides(t, tasks, problems, understood);
 
     // 4. filters from Step 5
     if (SEARCH_JOBS.includes(t.capability)) {
@@ -244,6 +304,14 @@ function validateWorkflow(workflow, understood, plan) {
     const key = `${t.capability}|${JSON.stringify(t.inputs)}`;
     if (seen.has(key)) problems.push(`${t.task_id}: is the same job as ${seen.get(key)}`);
     else seen.set(key, t.task_id);
+  });
+
+  // 2b. every result is used: each job but the last (the evidence check)
+  // gives its result to a later job. A search nobody reads, or facts nobody
+  // looks at, are fetched or worked out for nothing (and lost to the answer).
+  const usedRefs = new Set(tasks.flatMap((t) => (t ? refsOf(t.inputs) : [])));
+  tasks.forEach((t, k) => {
+    if (t && k < tasks.length - 1 && !usedRefs.has(t.task_id)) problems.push(`${t.task_id}: its result is used by no later job`);
   });
 
   // 3. limits
@@ -290,4 +358,4 @@ function validateWorkflow(workflow, understood, plan) {
   };
 }
 
-module.exports = { validateWorkflow, runBatches, refsOf };
+module.exports = { validateWorkflow, runBatches, refsOf, checkSides };

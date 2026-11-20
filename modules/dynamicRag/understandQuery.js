@@ -37,7 +37,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { callLLM } = require('../llmClient');
 const { ChatError } = require('./chatError');
-const { preprocessText } = require('./preprocessQuery');   // only to spot date words
+const { preprocessText, looksEnglish } = require('./preprocessQuery');   // date words; is the question English?
 const { standardPlace, placeFromAdjective, PLACES } = require('../placeNames');  // the same place names the news pipeline saves
 const {
   UNDERSTAND_PROMPT_ID,
@@ -543,10 +543,28 @@ function resolveOne(expr, today, yearHint = null) {
       return range(utc(a, 0, 1), utc(b, 11, 31));
     }
     case 'since': {
+      // "since Q3" / "since H1 2025": from the start of that quarter / half
+      const part = t.match(/since\s+(?:the\s+)?(q[1-4]|h[12])(?:\s?'?(\d{4}|\d{2}))?/);
+      if (part) {
+        const p = readPoint(part[2] ? `${part[1]} ${part[2]}` : part[1], today, yearHint);
+        return p ? range(p.from, today) : null;
+      }
       const y = Number(years[0]);
       const mon = t.match(/since\s+([a-z]{3})/);
       const m = mon && MONTHS[mon[1]] !== undefined ? MONTHS[mon[1]] : 0;
       return range(utc(y, m, 1), today);
+    }
+    case 'to_now': {
+      // "from Jan to now": from the start of the point up to today
+      const startText = t.replace(/^from\s+/, '').replace(/\s*(?:-|–|—|to|till|until|through)\s*(?:now|today|date|present|the present)$/, '');
+      const p = readPoint(startText, today, yearHint);
+      return p && p.from <= today ? range(p.from, today) : null;
+    }
+    case 'part_year': {
+      // early = Jan-Apr, mid = May-Aug, late / end = Sep-Dec, start = Jan-Apr
+      const y = Number(years[0]);
+      const which = /\bmid/.test(t) ? 1 : /\b(late|end)/.test(t) ? 2 : 0;
+      return { ...range(monthStart(y, which * 4), monthEnd(y, which * 4 + 3)), note: `${['early', 'mid', 'late'][which]} ${y} read as ${['January to April', 'May to August', 'September to December'][which]}` };
     }
     case 'fiscal_year': {
       const y = toYear(years[years.length - 1]);
@@ -564,7 +582,7 @@ function resolveOne(expr, today, yearHint = null) {
       return range(monthStart(y, (q - 1) * 3), monthEnd(y, (q - 1) * 3 + 2));
     }
     case 'half_year': {
-      const h = t.includes('h2') ? 2 : 1;
+      const h = (t.includes('h2') || /\b(?:second|2nd)\s+half/.test(t)) ? 2 : 1;
       if (years.length === 0) {
         const p = readPoint(`h${h}`, today, yearHint);
         return { ...range(p.from, p.to), note: yearHint ? `year ${yearHint} taken from the question` : 'no year given: the most recent one' };
@@ -857,13 +875,58 @@ function checkForm(form, question, names) {
   // Companies and places decide WHAT we search, so they must really be in
   // the question. (Topics and industries may be reworded by the AI —
   // "EV" -> "electric vehicles" — so they are not checked word by word.)
+  // A question in another language names its places in that language
+  // ("Marruecos", "Deutschland", "Mısır"), and the AI writes them in English
+  // ("Morocco") as its prompt says: so a place is not "missing" from such a
+  // question just because its English name was not typed (as for Arabic or
+  // Hindi questions). Companies are still checked.
+  const leaveOut = [...form.places, ...form.companies, ...((names && names.competitors) || []).map((c) => (c && c.name) || c),
+    (names && names.client && names.client.company_name) || ''];
+  const otherLanguage = !skipChecks && !looksEnglish(question, leaveOut);
   const keepIfAsked = (field) => form[field].filter((item) => {
     if (skipChecks || isInQuestion(item, question)) return true;
+    if (field === 'places' && otherLanguage) return true;
     removed.push({ field, value: item, why: 'not in the question' });
     return false;
   });
-  const askedCompanies = keepIfAsked('companies');
-  const askedPlaces = keepIfAsked('places');
+  // Dates are worked out by code (resolveTime), so date words the AI put in
+  // topics, metrics, places or companies are taken out: metrics ["last 3
+  // months"] -> [], topics ["sales since 2020"] -> ["sales"], places
+  // ["October", "Q4 2025"] -> [] (a date is never a place: later a place we
+  // do not know is searched by its words, so "October" would end up in the
+  // search words). (Product names are left alone: some have years in them.)
+  // the date phrases of the question itself: "May" in "Compare April and
+  // May" is a date there, even though "May" alone is not read as one
+  const questionDates = new Set(preprocessText(String(question || ''), [], [], { fixWords: false }).time_expressions
+    .map((t) => normalise(t.text)));
+  const withoutDates = (field, list = form[field]) => list.flatMap((item) => {
+    if (questionDates.has(normalise(item))) {
+      removed.push({ field, value: item, why: 'a date of the question (dates are worked out separately)' });
+      return [];
+    }
+    const p = preprocessText(item, [], [], { fixWords: false });
+    if (p.time_expressions.length === 0) return [item];
+    let rest = p.preprocessed_query;
+    for (const t of p.time_expressions) rest = rest.split(t.text).join(' ');
+    rest = rest.replace(/\s+/g, ' ').trim();
+    // drop little words left hanging at either end: "revenue in" -> "revenue"
+    const EDGE = /^(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)\s+|\s+(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)$/i;
+    while (EDGE.test(rest)) rest = rest.replace(EDGE, '').trim();
+    rest = rest.replace(/^[\s,.;-]+|[\s,.;-]+$/g, '').trim();
+    const keep = meaningfulWords(rest).some((w) => w.length >= 3);
+    // a company NAME is never cut ("March Beauty" stays): only a company
+    // that is nothing but a date goes
+    if (keep && field === 'companies') return [item];
+    removed.push({
+      field,
+      value: item,
+      why: keep ? `date words taken out (dates are worked out separately), kept "${rest}"` : 'a date (dates are worked out separately)',
+    });
+    return keep ? [rest] : [];
+  });
+
+  const askedCompanies = withoutDates('companies', keepIfAsked('companies'));
+  const askedPlaces = withoutDates('places', keepIfAsked('places'));
   const movedToTopics = [];
   let ownByName = false;
   let rivalsByName = false;
@@ -956,29 +1019,6 @@ function checkForm(form, question, names) {
   const ownCompetitors = rivalsByName ||
     // ("the competition" = our competitors; "compare on demand and competition" = a topic)
     (/\b(competitors?|rivals?|the competition)\b/i.test(String(question)) && (companiesOut.length === 0 || onlyOwnNamed));
-  // Dates are worked out by code (resolveTime), so date words the AI put in
-  // topics or metrics are taken out: metrics ["last 3 months"] -> [],
-  // topics ["sales since 2020"] -> ["sales"]. (Product names are left alone:
-  // some have years in them.)
-  const withoutDates = (field) => form[field].flatMap((item) => {
-    const p = preprocessText(item, [], [], { fixWords: false });
-    if (p.time_expressions.length === 0) return [item];
-    let rest = p.preprocessed_query;
-    for (const t of p.time_expressions) rest = rest.split(t.text).join(' ');
-    rest = rest.replace(/\s+/g, ' ').trim();
-    // drop little words left hanging at either end: "revenue in" -> "revenue"
-    const EDGE = /^(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)\s+|\s+(?:in|of|for|from|to|over|during|since|by|at|on|the|and|,|-)$/i;
-    while (EDGE.test(rest)) rest = rest.replace(EDGE, '').trim();
-    rest = rest.replace(/^[\s,.;-]+|[\s,.;-]+$/g, '').trim();
-    const keep = meaningfulWords(rest).some((w) => w.length >= 3);
-    removed.push({
-      field,
-      value: item,
-      why: keep ? `date words taken out (dates are worked out separately), kept "${rest}"` : 'a date (dates are worked out separately)',
-    });
-    return keep ? [rest] : [];
-  });
-
   const topics = withoutDates('topics');
   for (const t of movedToTopics) if (!topics.some((x) => x.toLowerCase() === t.toLowerCase())) topics.push(t);
   // a place hiding in a topic ("Korean market"), when the user really wrote it
@@ -1164,6 +1204,17 @@ async function understandQuery(request, cleaned, options = {}) {
     checks_skipped,
     attempts,
   };
+
+  // A question that names only a time ("what changed this month vs last
+  // month?", "compare January and February", "what happened on 1 March?")
+  // is about the client's own industry in that time, the same as "what's
+  // new in my industry?". It is not asked back.
+  const industry = names.client && names.client.industry;
+  if (!hasSomethingToWorkOn(checked) && time && (time.ranges || []).length && industry) {
+    result.industries = [industry];
+    checked.industries = [industry];
+    removed.push({ what: 'industry', value: industry, why: 'the question names only a time, so it is about the client industry (added by code)' });
+  }
 
   addComparisonGoal(result, checkText);
 

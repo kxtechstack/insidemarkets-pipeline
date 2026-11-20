@@ -218,4 +218,4 @@ function placeFromAdjective(word) {
   return null;
 }
 
-module.exports = { standardPlace, standardPlaces, placeCovers, isCountry, placeFromAdjective, PLACES, REGIONS, REGION_MEMBERS };
+module.exports = { standardPlace, standardPlaces, placeCovers, isCountry, placeFromAdjective, PLACES, PLACE_ADJECTIVES, REGIONS, REGION_MEMBERS };

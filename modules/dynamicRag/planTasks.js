@@ -145,7 +145,12 @@ const plainNeed = (text) => String(text).replace(/_+/g, ' ').replace(/\s+/g, ' '
 function parseJsonLoose(text) {
   // also: a comma missing between two items ("} {" or "\"a\" \"b\"")
   const commas = (t) => t.replace(/}\s*{/g, '},{').replace(/"\s*\n\s*"/g, '",\n"');
-  const base = [text, text.replace(/,\s*([}\]])/g, '$1'), commas(text), commas(text).replace(/,\s*([}\]])/g, '$1')];
+  // an apostrophe written the wrong way inside a word: "men\'s" (not a JSON
+  // escape) or "men"s" (a double quote) -> "men's"
+  const apostrophes = (t) => t.replace(/\\'/g, "'").replace(/(\p{L})"(s|t|re|ll|ve|d)\b(?!\s*[:,}\]])/gu, "$1'$2");
+  const fixed = apostrophes(String(text));
+  const variants = fixed === text ? [text] : [text, fixed];
+  const base = variants.flatMap((t) => [t, t.replace(/,\s*([}\]])/g, '$1'), commas(t), commas(t).replace(/,\s*([}\]])/g, '$1')]);
   const tries = [...base];
   // the closing brackets at the very end, e.g. "]]}" or "]}}": try taking out
   // one of them, then two of them

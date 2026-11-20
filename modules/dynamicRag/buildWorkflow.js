@@ -36,9 +36,10 @@ const { callLLM } = require('../llmClient');
 const { requirePrompt } = require('../promptStore');
 const { ChatError } = require('./chatError');
 const { WORKFLOW_PROMPT_ID } = require('./chatConfig');
-const { getCapability, RUN_LIMITS, MODULES, GOAL_KEY_JOB } = require('./capabilityRegistry');
+const { getCapability, RUN_LIMITS, MODULES, GOAL_KEY_JOB, FRAMEWORKS } = require('./capabilityRegistry');
 const { parseJsonLoose, withoutDateWords, withoutMetaNeeds } = require('./planTasks');
-const { standardPlace, PLACES } = require('../placeNames');
+const { standardPlace, placeFromAdjective, PLACES } = require('../placeNames');
+const { looksEnglish } = require('./preprocessQuery');
 
 const MAX_ATTEMPTS = 2;               // ask the AI at most twice
 const MAX_SEARCHES_PER_PART = 3;
@@ -46,6 +47,7 @@ const MAX_WORDS_CHARS = 150;           // search words
 const MAX_JOINED_CHARS = 300;          // joined search words (the search job takes up to 300)
 const MAX_SIDE_CHARS = 80;
 const MAX_SIDES = 4;                   // compare takes 2 to 4 sides
+const MAX_SUBJECTS_ADDED = 2;           // subjects added to a search that lost them
 
 // The order of analysis jobs inside one part of the plan.
 const ANALYSIS_ORDER = [
@@ -103,13 +105,9 @@ function impactAsked(question) {
 
 // Fixed headings for SWOT / PESTLE / Five Forces.
 function headingsFor(question) {
-  const q = String(question || '').toLowerCase();
-  if (/\bswot\b/.test(q)) return ['Strengths', 'Weaknesses', 'Opportunities', 'Threats'];
-  if (/\bpest(le|el)?\b/.test(q)) return ['Political', 'Economic', 'Social', 'Technological', 'Legal', 'Environmental'];
-  if (/\b(five|5)\s+forces\b/.test(q)) {
-    return ['Competitive rivalry', 'Threat of new entrants', 'Threat of substitutes', 'Buyer power', 'Supplier power'];
-  }
-  return null;
+  const q = String(question || '');
+  const f = FRAMEWORKS.find((x) => x.match.test(q));
+  return f ? [...f.headings] : null;
 }
 
 // Words that say "the newest things", not WHAT to look for.
@@ -119,36 +117,53 @@ const LATEST_WORDS = new Set([
   'activities', 'development', 'developments', 'event', 'events', 'item', 'items', 'important', 'critical',
   'high', 'impact', 'what', 'happened', 'all', 'any', 'the', 'of', 'in', 'for', 'about', 'and', 'our', 'my',
   'client', 'business', 'company', 'market', 'industry', 'policy', 'policies', 'competitor', 'competitors',
-  'launch', 'launches', 'regulatory', 'regulation', 'regulations', 'rules', 'dynamics',
+  'regulatory', 'regulation', 'regulations', 'rules', 'dynamics',
   'give', 'me', 'show', 'list', 'which', 'are', 'is', 'was', 'were', 'there', 'from', 'last', 'this', 'to', 'get',
   'tell', 'please', 'summarise', 'summarize', 'summary', 'brief', 'briefing', 'today', 'we', 'us', 'i', 'my',
   'sector', 'happening', 'going', 'on', 'did', 'do', 'anything', 'everything', 'know', 'should', 'team', 'big',
-  'announce', 'announced', 'changed', 'launched', 'released', 'moved', 'happen', 'new', 'whats', 'has', 'have', 'been',
-  'recently', 'lately', 'currently', 'now', 'so', 'far',
+  'announce', 'announced', 'changed', 'moved', 'happen', 'new', 'whats', 'has', 'have', 'been',
+  'recently', 'lately', 'currently', 'now', 'so', 'far', 'at', 'by', 'with',
 ]);
 // ignore: words that are filters, not topics (the client industry, places, company names)
-const onlyLatestWords = (text, ignore = []) => {
-  const skip = new Set(ignore.flatMap((x) => String(x).toLowerCase().split(/[^\p{L}\p{N}]+/u)).filter(Boolean));
-  const words = String(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/)
-    .filter((w) => w.length >= 2 && !skip.has(w));
-  return words.every((w) => LATEST_WORDS.has(w));
+// The module names ("policy alerts", "forward outlook", "rivals") say WHERE
+// to look, so they are not a topic either.
+// (Names are taken out WHOLE: "beauty" stays a topic even though the
+// client is called "Lumière Beauty Group".)
+const topicWordsOf = (text, ignore = []) => {
+  let t = ` ${plain(text)} `;
+  const names = uniq(ignore.map(plain).filter(Boolean)).sort((a, b) => b.length - a.length);
+  for (const n of names) t = t.split(` ${n} `).join(' ');
+  for (const [, re] of MODULE_WORDS) t = t.replace(new RegExp(re.source, 'gi'), ' ');
+  return t.split(/\s+/).filter((w) => w.length >= 2 && !LATEST_WORDS.has(w) && !JOIN_WORDS.has(w));
 };
 
-// Is the QUESTION only asking for "the newest items" (no real topic)?
-// Decided from the user's own words, not the AI's: dates, places, company
-// names and the client industry are filters, so they do not count as a topic.
-// "Give me all high impact signals from last month" -> yes
-// "List all funding rounds in our industry this quarter" -> no (funding rounds)
-function asksOnlyForLatest(question, understood) {
+// The topic words of a LIST question: what is left of the user's own words
+// once dates, places, company names, the client industry, the module names
+// and the "newest items" words are taken out.
+// "Show all policy signals about packaging"          -> packaging
+// "news from last week about fragrance"              -> fragrance
+// "Give me all high impact signals from last month"  -> (none)
+// Other industries the question names ("fragrance", "retail") ARE topics:
+// only the client's own industry is the whole data already.
+function listTopicWords(question, understood) {
   const text = withoutDateWords([String(question || '')], [])[0] || '';
+  const places = understood.places || [];
   const ignore = [
-    ...(understood.places || []),
+    ...places, ...places.flatMap((p) => PLACES[p] || []),     // "UAE" = United Arab Emirates
     ...(understood.companies || []).flatMap((c) => [c.name, c.matched && c.matched.name]),
-    ...(understood.industries || []),
     (understood.client && understood.client.industry) || '',
     (understood.client && understood.client.company_name) || '',
   ].filter(Boolean);
-  return onlyLatestWords(text, ignore);
+  // a place word ("indian", "korean") is the place, a filter too
+  return topicWordsOf(text, ignore).filter((w) => !places.some((p) => w.length >= 4 && same(placeFromAdjective(w) || '', p)));
+}
+
+// Is the QUESTION only asking for "the newest items" (no real topic)?
+// Decided from the user's own words, not the AI's.
+// "Give me all high impact signals from last month" -> yes
+// "List all funding rounds in our industry this quarter" -> no (funding rounds)
+function asksOnlyForLatest(question, understood) {
+  return listTopicWords(question, understood).length === 0;
 }
 
 // The sides of a comparison that the code can name for sure, with the
@@ -156,45 +171,172 @@ function asksOnlyForLatest(question, understood) {
 // topics, "online vs offline": the AI names those sides).
 function codeSides(understood, aiSideNames = null) {
   if (understood.compare_sides !== undefined) return understood.compare_sides;   // already chosen
-  const places = understood.places || [];
-  const companies = (understood.companies || []).map((c) => (c.matched && c.matched.name) || c.name);
   const own = understood.client && understood.client.company_name;
   const ranges = (understood.time && understood.time.ranges) || [];
-  const companySides = companies.length >= 2 ? companies.slice(0, MAX_SIDES).map((c) => ({ label: c, companies: [c] })) : null;
-  const placeSides = places.length >= 2 ? places.slice(0, MAX_SIDES).map((p) => ({ label: p, countries: [p] })) : null;
-  // Both 2+ companies and 2+ places: the question decides what is compared.
-  // The AI names the sides; the code checks they are one of the two choices.
+  // Two or more KINDS of sides can fit (2+ places and 2+ companies, or 2+
+  // places and "that company vs us"): the question decides what is
+  // compared, never a fixed order. First the words next to
+  // "compare / vs / versus" the user typed, then the side names the AI
+  // wrote (one of the choices it was shown), then the first choice.
   // ("compare Lancôme and Estée Lauder in UAE and Saudi" -> the companies,
-  //  "compare the Saudi and UAE markets for Lancôme and Estée Lauder" -> the places)
-  if (companySides && placeSides) {
-    const named = (aiSideNames || []).filter(Boolean);
-    const hits = (list) => named.filter((n) => list.some((x) => sameSide(n, x.label))).length;
-    return hits(placeSides) > hits(companySides) ? placeSides : companySides;
-  }
-  if (companySides) return companySides;
-  if (companies.length === 1 && understood.about_own_business && own && !same(companies[0], own)) {
-    return [{ label: companies[0], companies: [companies[0]] }, { label: own, companies: [own] }];
-  }
-  if (placeSides) return placeSides;
-  // "How do we stand against our competitors?": own company vs the competitor list
-  const rivals = (understood.client && understood.client.competitors) || [];
-  const onlyOwn = companies.length === 0 || (companies.length === 1 && own && same(companies[0], own));
-  if (understood.all_competitors && understood.about_own_business && own && rivals.length && onlyOwn) {
-    return [{ label: own, companies: [own] }, { label: 'Competitors', companies: rivals.slice(0, 20) }];
-  }
-  if (ranges.length >= 2) {
-    return ranges.slice(0, MAX_SIDES).map((r) => ({ label: r.text, date_from: r.from, date_to: r.to }));
-  }
+  //  "compare the Saudi and UAE markets for Lancôme" -> the places)
+  // (also "Q1 2025 versus Q1 2026 competitor activity" -> the two dates,
+  //  not "us vs competitors" just because competitors are named)
+  const options = sideOptions(understood);
+  if (options.length > 1) return chooseSides(options, aiSideNames, understood.question_text, own);
+  if (options.length === 1) return options[0].sides;
   return null;
 }
 
-// When the question names 2+ companies AND 2+ places, the AI is shown both
-// choices; otherwise the fixed sides (or none).
-function sideChoices(understood) {
+// The places / companies / dates of the chosen kind that did not fit in
+// the comparison (more than MAX_SIDES were named).
+function sidesLeftOut(understood, sides) {
+  if (!sides || sides.length < MAX_SIDES) return [];
+  const labels = sides.map((x) => x.label);
+  let all = [];
+  if (sides[0].countries) all = understood.places || [];
+  else if (sides[0].date_from) all = ((understood.time && understood.time.ranges) || []).map((r) => r.text);
+  else if (sides[0].companies && sides[0].label !== 'Competitors') {
+    all = companyNames(understood);
+    // the competitors compared with each other: the rest of the list
+    if (!all.length && understood.all_competitors) all = (understood.client && understood.client.competitors) || [];
+  }
+  return uniq(all).filter((x) => !labels.includes(x));
+}
+
+const companyNames = (understood) => (understood.companies || []).map((c) => (c.matched && c.matched.name) || c.name);
+
+// Every kind of sides the question could compare, in the fixed order used
+// only to break a tie: companies, "that company vs us", places, "us vs
+// competitors", dates.
+// Does the user put OUR business in the question as a thing of its own
+// ("how do WE compare", "where are WE losing", "our pricing", the client's
+// name)? "my competitors" / "our rivals" only says whose competitors they
+// are: our business is not a side then. Step 5 also marks a question about
+// "competitors" as about our business, so that flag alone is no proof.
+// (No question text known: Step 5's flag decides.)
+const RIVAL_WORD = /\b(competit\w*|rivals?)\b/i;
+function ownNamedInQuestion(understood) {
+  const q = String(understood.question_text || '');
+  if (!q) return Boolean(understood.about_own_business);
+  const own = plain(understood.client && understood.client.company_name);
+  const t = q.replace(/\b(?:our|my)\s+(?:[\p{L}'-]+\s+)?(?:competit\w*|rivals?)\b/giu, ' ');
+  if (/\b(we|our|ours|my|myself|ourselves)\b/i.test(t) || /\bus\b/.test(t)) return true;
+  return Boolean(own && ` ${plain(t)} `.includes(` ${own} `));
+}
+
+function sideOptions(understood) {
   const places = understood.places || [];
-  const companies = (understood.companies || []).map((c) => (c.matched && c.matched.name) || c.name);
-  if (companies.length >= 2 && places.length >= 2) return [companies.slice(0, MAX_SIDES), places.slice(0, MAX_SIDES)];
-  return null;
+  const companies = companyNames(understood);
+  const own = understood.client && understood.client.company_name;
+  const ownTyped = Boolean(understood.about_own_business) && ownNamedInQuestion(understood);
+  const options = [];
+  if (companies.length >= 2) {
+    options.push({ kind: 'companies', sides: companies.slice(0, MAX_SIDES).map((c) => ({ label: c, companies: [c] })) });
+  } else if (companies.length === 1 && ownTyped && own && !same(companies[0], own)) {
+    options.push({ kind: 'company_vs_own', sides: [{ label: companies[0], companies: [companies[0]] }, { label: own, companies: [own] }] });
+  }
+  if (places.length >= 2) {
+    options.push({ kind: 'places', sides: places.slice(0, MAX_SIDES).map((p) => ({ label: p, countries: [p] })) });
+  }
+  const rivals = (understood.client && understood.client.competitors) || [];
+  const onlyOwn = companies.length === 0 || (companies.length === 1 && own && same(companies[0], own));
+  if (understood.all_competitors && rivals.length && onlyOwn) {
+    if (ownTyped && own) {
+      // "How do we stand against our competitors?": own company vs the competitor list
+      options.push({ kind: 'own_vs_competitors', sides: [{ label: own, companies: [own] }, { label: 'Competitors', companies: rivals.slice(0, 20) }] });
+    } else if (rivals.length >= 2) {
+      // "Which competitor is opening the most stores?": the competitors are
+      // compared with each other (our own business is not in the question)
+      options.push({ kind: 'competitors', sides: rivals.slice(0, MAX_SIDES).map((c) => ({ label: c, companies: [c] })) });
+    }
+  }
+  // two or more different dates the user named ("2025 and 2025" is one date)
+  const ranges = [];
+  for (const r of (understood.time && understood.time.ranges) || []) {
+    if (!ranges.some((x) => x.from === r.from && x.to === r.to)) ranges.push(r);
+  }
+  if (ranges.length >= 2) {
+    options.push({ kind: 'dates', sides: ranges.slice(0, MAX_SIDES).map((r) => ({ label: r.text, date_from: r.from, date_to: r.to })) });
+  }
+  return options;
+}
+
+// Which of several kinds of sides does the question compare?
+function chooseSides(options, aiSideNames, question, own) {
+  const score = (names) => options.map((o) => names.filter((n) => o.sides.some((x) => sameSide(n, x.label, own))).length);
+  const pick = (scores) => {
+    const top = Math.max(...scores);
+    const winners = scores.filter((x) => x === top).length;
+    return top > 0 && winners === 1 ? options[scores.indexOf(top)].sides : null;
+  };
+  // the USER's words next to "compare / vs / versus" decide first; the AI's
+  // side names only break a tie (19 Nov: for "Q1 2025 versus Q1 2026
+  // competitor activity" the AI named the dates AND the 4 competitors, and
+  // 4 names beat 2: the dates the user put next to "versus" must win)
+  const near = compareWords(question);
+  const byWords = near ? pick(options.map((o) => o.sides.filter((x) => namedInText(near, x.label, own)).length)) : null;
+  if (byWords) return byWords;
+  const byAi = pick(score((aiSideNames || []).filter(Boolean)));
+  return byAi || options[0].sides;
+}
+
+// The things a question compares are the words right next to "compare /
+// vs / versus / compared to / against / than", up to a scope word ("in",
+// "for", "across"...), which starts WHERE or FOR WHOM:
+//   "compare Lancome and Dior | in UAE and Saudi"        -> the companies
+//   "compare the Saudi and UAE markets | for Lancome"    -> the places
+//   "how do we compare to Lancome | in Singapore"        -> us vs Lancome
+//   "Singapore vs Korea | for our brand"                 -> the places
+// The words before count only when the compare word sits between the two
+// things (vs, versus, against, than, compare(d) to / with).
+// No compare word: the whole question.
+const COMPARE_WORD = /\b(compared?\s+(?:to|with)|comparing\s+(?:to|with)|compare[ds]?|comparing|comparison(?:\s+(?:of|between))?|vs\.?|versus|against|than|between)\b/i;
+const SCOPE_WORD = /^(in|across|for|within|among|over|during|on|at|from|by|into|inside|of)$/i;
+function compareWords(question) {
+  const q = String(question || '');
+  if (!q) return '';
+  const m = q.match(COMPARE_WORD);
+  if (!m) return q;
+  const between = /^(vs\.?|versus|against|than)$/i.test(m[0]) || /\s(to|with)$/i.test(m[0]);
+  const afterWords = q.slice(m.index + m[0].length).split(/\s+/).filter(Boolean);
+  const after = [];
+  for (const word of afterWords) {
+    if (after.length && (SCOPE_WORD.test(word) || /[?.!;:]$/.test(after[after.length - 1]))) break;
+    after.push(word);
+    if (after.length >= 8) break;
+  }
+  if (!between) return after.join(' ');
+  const beforeText = q.slice(0, m.index).split(/[?.!;:]/).pop();
+  const beforeWords = beforeText.split(/\s+/).filter(Boolean);
+  const before = [];
+  for (let i = beforeWords.length - 1; i >= 0 && before.length < 4; i--) {
+    if (SCOPE_WORD.test(beforeWords[i])) break;
+    before.unshift(beforeWords[i]);
+  }
+  return `${before.join(' ')} ${after.join(' ')}`.trim();
+}
+
+// Is this side named in the text? Its name, a short place name ("UAE",
+// "saudi"), a place word ("korean"), or "our / we" for the client.
+function namedInText(text, label, own) {
+  const t = ` ${plain(text)} `;
+  const name = plain(label);
+  if (t.includes(` ${name} `)) return true;
+  if (own && plain(own) === name && OWN_SIDE_WORDS.test(t)) return true;
+  for (const alias of (PLACES[label] || []).map(plain)) if (alias.length >= 2 && t.includes(` ${alias} `)) return true;
+  for (const word of t.trim().split(' ')) {
+    if (word.length >= 4 && placeFromAdjective(word) && same(placeFromAdjective(word), label)) return true;
+  }
+  const first = name.split(' ')[0];
+  return first.length >= 4 && first !== 'the' && t.includes(` ${first} `);
+}
+
+// When more than one kind of sides fits, the AI is shown every choice;
+// otherwise the fixed sides (or none).
+function sideChoices(understood) {
+  const options = sideOptions(understood);
+  return options.length > 1 ? options.map((o) => o.sides.map((x) => x.label)) : null;
 }
 
 // Is this side the same as that one? ("UAE" = "United Arab Emirates")
@@ -202,6 +344,108 @@ function sideChoices(understood) {
 const plain = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
   .replace(/[^a-z0-9]+/g, ' ').trim();
 const OWN_SIDE_WORDS = /\b(our|we|us|my|client|own company|our company|our brand)\b/;
+
+// A side the AI named, boiled down: plain words, one-or-many ignored
+// ("competitors" = "competitor"). The client's own company in any form
+// ("our", "we", "client", its name from the database) is OWN_CORE.
+const OWN_CORE = '(own company)';
+const singular = (w) => (w.length > 4 && /ies$/.test(w) ? `${w.slice(0, -3)}y` : w.length > 3 && /[^s]s$/.test(w) ? w.slice(0, -1) : w);
+function sideCore(name, ownName) {
+  const p = plain(name);
+  if (!p) return '';
+  if (ownName) {
+    const own = plain(ownName);
+    const ownFirst = own.split(' ')[0];
+    if (p === own || OWN_SIDE_WORDS.test(p) || (ownFirst.length >= 4 && p.split(' ').includes(ownFirst))) return OWN_CORE;
+  }
+  return p.split(' ').map(singular).filter((w) => w && !JOIN_WORDS.has(w)).join(' ');
+}
+
+// Is an AI-named side really asked about? The words that make it
+// different from the other sides must be in the USER'S question (the AI's
+// own plan is no proof). "UAE retail market" vs "UAE retail landscape" in
+// "Compare UAE and UAE retail": "market" / "landscape" were never typed,
+// so they are not real sides. The own company counts when the user wrote
+// "our / we / us" or the company's name.
+// A word that is also in the OTHER sides' search words is the shared
+// topic, not what separates the sides ("market" in "predict_market_share"
+// is typed, but the "our" side searches "our market share" too).
+function sideInQuestion(side, otherSides, question, ownName, otherWords = '') {
+  const q = ` ${plain(question).split(' ').map(singular).join(' ')} `;
+  const core = sideCore(side, ownName);
+  if (core === OWN_CORE) {
+    const own = ownName ? plain(ownName) : '';
+    return OWN_SIDE_WORDS.test(plain(question)) || (own && q.includes(` ${own.split(' ').map(singular).join(' ')} `));
+  }
+  const others = new Set(otherSides.flatMap((o) => sideCore(o, ownName).split(' ')));
+  const own = core.split(' ').filter((w) => w.length >= 2 && !others.has(w));
+  const shared = ` ${plain(otherWords).split(' ').map(singular).join(' ')} `;
+  return own.length > 0 && own.every((w) => q.includes(` ${w} `) && !shared.includes(` ${w} `));
+}
+
+// The sides of a comparison read from its searches: a search that names a
+// word the user typed which no other search of that part has ("GCC
+// skincare market growth" vs "GCC makeup market growth" for "which is
+// growing faster, skincare or makeup") is about that thing. Searches that
+// name both, or neither, are not a side. Fewer than 2 = no sides.
+function sidesFromSearches(searches, question, ownName, understood = null) {
+  // our own business ("us", "our", the client's name) is never a side found
+  // this way: "us vs a competitor / the competitors" is decided from the
+  // names (sideOptions), and "rules vs us" is not a comparison
+  const ownWords = new Set(plain(ownName || '').split(' ').filter(Boolean));
+  const ownWord = (w) => ownWords.has(w) || sideCore(w, ownName) === OWN_CORE;
+  // the places and companies of the question are its SCOPE (they are
+  // filters), never what this comparison is between: "Qatar" sits in
+  // almost every search of "city stores versus online in Qatar"
+  const scope = new Set();
+  for (const name of [...((understood && understood.places) || []), ...(understood ? companyNames(understood) : [])]) {
+    for (const n of [name, ...(PLACES[name] || [])]) for (const w of plain(n).split(' ')) if (w.length >= 2 && w !== 'the') scope.add(singular(w));
+  }
+  const scopeWord = (w) => scope.has(w) || ((understood && understood.places) || []).some((p) => w.length >= 4 && same(placeFromAdjective(w) || '', p));
+  const norm = (t) => plain(t).split(' ').map(singular)
+    .filter((w) => w.length >= 2 && !JOIN_WORDS.has(w) && !ownWord(w) && !scopeWord(w));
+  const typed = new Set(norm(question));
+  let sets = searches.map((x) => new Set(norm(x.words).filter((w) => typed.has(w))));
+  // words every search that names something has are the shared topic
+  // ("stores" in "city stores" and "online stores"); a search that names
+  // nothing the user typed does not decide what is shared
+  const named = sets.filter((set) => set.size > 0);
+  const common = [...(named[0] || [])].filter((w) => named.length > 1 && named.every((set) => set.has(w)));
+  sets = sets.map((set) => new Set([...set].filter((w) => !common.includes(w))));
+  // a search that holds another search's words and more names both things: shared, not a side
+  const contains = (a, b) => b.size > 0 && a.size > b.size && [...b].every((w) => a.has(w));
+  const candidates = searches.map((x, i) => ({ search: x, set: sets[i] }))
+    .filter((c, i) => c.set.size > 0 && !sets.some((other, j) => j !== i && contains(c.set, other)));
+  // searches about the same thing are ONE side ("city store sales" and
+  // "city store market share"): searches that share a word go together
+  const groups = [];
+  for (const c of candidates) {
+    const touching = groups.filter((g) => [...c.set].some((w) => g.words.has(w)));
+    const group = { members: [c], words: new Set(c.set) };
+    for (const g of touching) {
+      group.members.push(...g.members);
+      for (const w of g.words) group.words.add(w);
+      groups.splice(groups.indexOf(g), 1);
+    }
+    groups.push(group);
+  }
+  if (groups.length < 2 || groups.length > MAX_SIDES) return [];
+  const found = [];
+  for (const g of groups) {
+    // the label in the user's own words and order ("men's grooming", "city store")
+    const first = g.members.map((m) => m.search).sort((a, b) => searches.indexOf(a) - searches.indexOf(b))[0];
+    const tokens = String(first.words).split(/[\s,]+/)
+      .filter((t) => plain(t).split(' ').map(singular).some((w) => g.words.has(w)));
+    const label = uniq(tokens.map((t) => t.toLowerCase())).join(' ');
+    if (!label) return [];
+    for (const m of g.members) found.push({ search: m.search, label });
+  }
+  const labels = uniq(found.map((f) => f.label));
+  if (labels.length < 2) return [];
+  const wordsOf = (label) => found.filter((f) => f.label === label).map((f) => f.search.words).join(' ');
+  return labels.every((label) => sideInQuestion(label, labels.filter((l) => l !== label), question, ownName,
+    labels.filter((l) => l !== label).map(wordsOf).join(' '))) ? found : [];
+}
 
 // Is this side the same as that one? ("UAE" = "United Arab Emirates",
 // "Estee Lauder" = "Estée Lauder", "our company" = the client's own company)
@@ -233,17 +477,32 @@ function sideNamedIn(words, sides, ownName) {
 
 // Search words for one side, without the names of the OTHER sides:
 // for the Lancôme side, "Estee Lauder company profile" -> "company profile".
+// Each comma part is done on its own, so the joining words left hanging
+// are tidied in every part ("differences between uae and qatar" for the UAE
+// side -> "differences between uae"), and the commas stay, so a part that
+// comes twice is still seen as the same part when searches are joined.
 function wordsForSide(words, sides, label, ownName) {
+  return uniq(String(words || '').split(',').map((p) => partForSide(p, sides, label, ownName)).filter(Boolean)).join(', ');
+}
+function partForSide(words, sides, label, ownName) {
   let w = ` ${plain(words)} `;
   for (const s of sides) {
     if (s.label === label) continue;
     const other = plain(s.label);
     // a place side is also written in short ("UAE", "Saudi"); longest
-    // first, so "saudi arabia" goes whole, not "saudi" leaving "arabia"
-    const names = uniq([other, ...(PLACES[s.label] || []).map(plain)]).sort((a, b) => b.length - a.length);
+    // first, so "saudi arabia" goes whole, not "saudi" leaving "arabia".
+    // One or many is the same thing ("competitor" for the "Competitors" side).
+    const oneOrMany = other.split(' ').map(singular).join(' ');
+    const names = uniq([other, oneOrMany, ...(PLACES[s.label] || []).map(plain)]).filter(Boolean).sort((a, b) => b.length - a.length);
     for (const n of names) w = w.split(` ${n} `).join(' ');
+    // the competitor list side: every way of saying "competitors"
+    if (s.label === 'Competitors') w = ` ${w.trim().split(/\s+/).filter((t) => !RIVAL_WORD.test(t)).join(' ')} `;
     const first = other.split(' ')[0];
     if (first.length >= 4 && first !== 'the') w = w.split(` ${first} `).join(' ');
+    // a place side written as a place word ("malaysian" for Malaysia)
+    if (PLACES[s.label]) {
+      w = ` ${w.trim().split(/\s+/).filter((t) => !(t.length >= 4 && same(placeFromAdjective(t) || '', s.label))).join(' ')} `;
+    }
     if (ownName && plain(ownName) === other) w = w.replace(/\b(our|client|own) (company|brand|business)\b|\b(our|client)\b/g, ' ');
   }
   return tidyJoins(w);
@@ -264,6 +523,65 @@ function tidyJoins(text) {
   return out.join(' ');
 }
 
+// The words "our / we / us / my / client" say WHOSE news it is, and the
+// filter already says that: news articles never contain them, so they only
+// blur the search. "client industry" / "our sector" is the client's real
+// industry from the database ("Cosmetics industry"). "client" stays when
+// the user typed it ("client retention"). "US" (the country) stays.
+function withoutOwnWords(words, understood) {
+  const industry = understood && understood.client && understood.client.industry;
+  const typedClient = /\bclients?\b/i.test(String((understood && understood.question_text) || ''));
+  const ownWord = typedClient ? '(?:our|my)' : "(?:client'?s?|our|my)";
+  let w = ` ${String(words || '')} `;
+  if (industry) w = w.replace(new RegExp(`\\b(?:the\\s+)?${ownWord}\\s+(industry|sector)\\b`, 'gi'), (m, noun) => ` ${industry} ${noun} `);
+  w = w.replace(/\b(?:our|ours|we|my|ourselves)\b/gi, ' ').replace(/\bus\b/g, ' ');
+  if (!typedClient) w = w.replace(/\bclient(?:'s|s|s')?(?=[\s,.;:]|$)/gi, ' ');
+  // tidy: no loose joining words left at the start or end of a comma part
+  const tidy = w.split(',').map((part) => {
+    const t = part.trim().split(/\s+/).filter(Boolean);
+    while (t.length && JOIN_WORDS.has(t[0].toLowerCase())) t.shift();
+    while (t.length && JOIN_WORDS.has(t[t.length - 1].toLowerCase())) t.pop();
+    return t.join(' ');
+  }).filter(Boolean).join(', ');
+  return tidy || String(words || '');
+}
+
+// Is this one of our standard places (the names the news is stored under)?
+const placeKnown = (name) => Object.prototype.hasOwnProperty.call(PLACES, name);
+
+// The words a search sends. One search fetches news about ONE thing, so
+// comparison words mean nothing there ("estee lauder vs market activity"
+// once the other side is taken out): vs / versus / compared to / compared
+// with are taken out, a phrase repeated right after itself is kept once
+// ("uae retail market vs uae retail market"), a comma part whose words all
+// sit in another part is dropped ("UAE retail market UAE retail" next to
+// "UAE retail market trends"), and loose joining words are tidied.
+function cleanSearchWords(words) {
+  const parts = String(words || '').split(',').map((part) => {
+    let w = ` ${part.trim()} `.replace(/\s(vs\.?|versus|compared (?:to|with))(?=\s)/gi, ' ');
+    const tokens = w.split(/\s+/).filter(Boolean);
+    for (let n = Math.min(6, Math.floor(tokens.length / 2)); n >= 1; n--) {
+      for (let i = 0; i + 2 * n <= tokens.length; i++) {
+        const a = tokens.slice(i, i + n).map(plain).join(' ');
+        const b = tokens.slice(i + n, i + 2 * n).map(plain).join(' ');
+        if (a === b) { tokens.splice(i + n, n); i -= 1; }
+      }
+    }
+    return tidyJoins(tokens.join(' '));
+  }).filter(Boolean);
+  const cleaned = parts;
+  // a comma part whose words are all in another part is not needed
+  const wordsIn = (t) => uniq(plain(t).split(' ').filter((w) => w && !JOIN_WORDS.has(w)));
+  const kept = [];
+  cleaned.forEach((part, i) => {
+    const mineW = wordsIn(part);
+    const inside = cleaned.some((other, j) => j !== i && (wordsIn(other).length > mineW.length || (j < i && wordsIn(other).length === mineW.length)) &&
+      mineW.every((w) => wordsIn(other).includes(w)));
+    if (!inside) kept.push(part);
+  });
+  return kept.join(', ') || String(words || '').trim();
+}
+
 // A part that has a "compare" job needs sides (a comparison, or a
 // competitor analysis that compares).
 const comparesSides = (part) => part.goal === 'comparison' || (part.analysis || []).includes('compare');
@@ -279,8 +597,8 @@ function buildMessage(question, understood, plan) {
       `  information needed: ${(r.information_needed || []).join('; ') || '-'}`,
     ];
     if (comparesSides(r) && sideChoices(understood)) {
-      const [a, b] = sideChoices(understood);
-      lines.push(`  SIDES (choose ONE of these two sets, the one the question compares, one search per side, the side name in "side"): ${a.join(' | ')}  OR  ${b.join(' | ')}`);
+      const sets = sideChoices(understood);
+      lines.push(`  SIDES (choose ONE of these ${sets.length} sets, the one the question compares, one search per side, the side name in "side"): ${sets.map((x) => x.join(' | ')).join('  OR  ')}`);
     } else if (comparesSides(r)) {
       lines.push(sides
         ? `  SIDES (fixed, write one search per side, put the side name in "side"): ${sides.map((s) => s.label).join(' | ')}`
@@ -358,7 +676,9 @@ function checkAiSearches(replyText, plan, understood) {
       const asked = ` ${plain(forList.flatMap((id) => partById.get(id).information_needed || []).join(' '))} ${plain([...(understood.topics || []), ...(understood.products || []), ...(understood.industries || []),
         ...(understood.places || []), ...(understood.companies || []).flatMap((c) => [c.name, c.matched && c.matched.name])].filter(Boolean).join(' '))} `;
       const sideWords = plain(side).split(' ').filter((x) => x.length >= 3 && !JOIN_WORDS.has(x));
-      if (!sideWords.length || !sideWords.every((x) => asked.includes(` ${x} `))) {
+      // one or many: "competitors" is asked about when the plan says "competitor market share"
+      const askedFor = (x) => [x, singular(x), `${x}s`].some((f) => asked.includes(` ${f} `));
+      if (!sideWords.length || !sideWords.every(askedFor)) {
         removed.push({ what: 'search side', value: side, why: 'not something the question or the plan talks about' });
         side = null;
       }
@@ -426,12 +746,17 @@ const replaceIn = (searches, oldOnes, merged) => {
 function completeSearches(aiSearches, plan, understood, notes) {
   let searches = (aiSearches || []).map((s) => ({ ...s, for: [...s.for] }));
   const sides = codeSides(understood);
+  const leftOut = sidesLeftOut(understood, sides);
 
   for (const part of plan.requirements) {
     const id = part.requirement_id;
     const mine = () => searches.filter((s) => s.for.includes(id));
 
     if (comparesSides(part)) {
+      // nothing is dropped silently: past the limit, the rest is recorded
+      if (leftOut.length) {
+        notes.push(`${id}: at most ${MAX_SIDES} sides can be compared, so ${sides.map((x) => x.label).join(', ')} are compared; left out of the comparison: ${leftOut.join(', ')}`);
+      }
       // ONE search per side: several searches for the same side are joined
       for (const label of uniq(mine().filter((s) => s.side).map((s) => s.side))) {
         const same_ = mine().filter((s) => s.side === label);
@@ -446,6 +771,11 @@ function completeSearches(aiSearches, plan, understood, notes) {
         // names: for Lancôme, "Estee Lauder pricing" -> "pricing". A side the
         // AI forgot gets its words the same way. Nothing asked for is lost.
         const ownName = understood.client && understood.client.company_name;
+        // The names of the sides LEFT OUT (past the 4-side limit) are taken
+        // out of every side's words too: they are not compared, so the
+        // Estée Lauder search never carries "nykaa", and the Saudi search
+        // never carries "demand levels in bahrain".
+        const nameSides = [...sides, ...leftOut.map((label) => ({ label }))];
         // (a search shared with other parts is given out too, when every
         // part it serves compares the same sides)
         const sideless = mine().filter((s) => !s.side && s.for.every((f) => {
@@ -453,7 +783,7 @@ function completeSearches(aiSearches, plan, understood, notes) {
           return r && comparesSides(r);
         }));
         const sideWords = (label) => {
-          const fromSideless = sideless.map((s) => wordsForSide(s.words, sides, label, ownName)).filter(Boolean);
+          const fromSideless = sideless.map((s) => wordsForSide(s.words, nameSides, label, ownName)).filter(Boolean);
           return fromSideless.length ? mergeSearches(fromSideless.map((w) => ({ for: [id], words: w }))).words : '';
         };
         for (const side of sides) {
@@ -467,7 +797,7 @@ function completeSearches(aiSearches, plan, understood, notes) {
             continue;
           }
           const other = mine().find((x) => x.side);
-          const words = extra || (other && wordsForSide(other.words, sides, side.label, ownName)) || wordsFromNeeds(part);
+          const words = extra || (other && wordsForSide(other.words, nameSides, side.label, ownName)) || wordsFromNeeds(part);
           searches.push({ for: [id], words, side: side.label, added_by_code: true });
           notes.push(`${id}: search for the side "${side.label}" added by code`);
         }
@@ -478,8 +808,8 @@ function completeSearches(aiSearches, plan, understood, notes) {
         // a side's search never names another side ("Lancôme vs Estee Lauder
         // pricing" for the Lancôme side -> "lancome pricing")
         for (const x of mine().filter((m) => m.side)) {
-          const cleaned = wordsForSide(x.words, sides, x.side, ownName);
-          if (cleaned && cleaned !== plain(x.words)) {
+          const cleaned = wordsForSide(x.words, nameSides, x.side, ownName);
+          if (cleaned && cleaned !== wordsForSide(x.words, [], x.side, ownName)) {
             searches[searches.indexOf(x)] = { ...x, words: cleaned };
             notes.push(`${id}: other sides' names taken out of the "${x.side}" search`);
           }
@@ -490,12 +820,20 @@ function completeSearches(aiSearches, plan, understood, notes) {
         // "UAE retail market"). Fewer than 2 real sides = nothing to compare:
         // the part is summarised instead (said in the notes), sides are never
         // invented from the "information needed".
+        // The client's own company written another way ("our", "we",
+        // "client", "Lumiere") is one side, under the company's name.
+        const ownName = understood.client && understood.client.company_name;
+        for (const x of mine().filter((m) => m.side && sideCore(m.side, ownName) === OWN_CORE && m.side !== ownName)) {
+          searches[searches.indexOf(x)] = { ...x, side: ownName };
+        }
         const named = uniq(mine().filter((s) => s.side).map((s) => s.side));
         for (const a of named) {
           for (const b of named) {
-            if (a === b || !mine().some((x) => x.side === b)) continue;
-            const pa = plain(a);
-            const pb = plain(b);
+            if (a === b || !mine().some((x) => x.side === b) || !mine().some((x) => x.side === a)) continue;
+            // compared without general words and plurals: "UAE retail market"
+            // and "UAE retail landscape" are both "uae retail"
+            const pa = sideCore(a, ownName);
+            const pb = sideCore(b, ownName);
             if (pa.length <= pb.length && (` ${pb} `).includes(` ${pa} `)) {
               for (const x of mine().filter((m) => m.side === b)) searches[searches.indexOf(x)] = { ...x, side: a };
               notes.push(`${id}: the sides "${a}" and "${b}" are the same thing, so they are one side`);
@@ -506,9 +844,58 @@ function completeSearches(aiSearches, plan, understood, notes) {
           const same_ = mine().filter((x) => x.side === label);
           if (same_.length > 1) searches = replaceIn(searches, same_, mergeSearches(same_));
         }
+        // the words that make each side different must be in the user's
+        // question; a side the user never asked about is not a side
+        const question = understood.question_text || '';
+        const kept = uniq(mine().filter((x) => x.side).map((x) => x.side));
+        for (const label of kept) {
+          const otherWords = mine().filter((m) => m.side && m.side !== label).map((m) => m.words).join(' ');
+          if (sideInQuestion(label, kept.filter((o) => o !== label), question, ownName, otherWords)) continue;
+          for (const x of mine().filter((m) => m.side === label)) searches[searches.indexOf(x)] = { ...x, side: null };
+          notes.push(`${id}: the side "${label}" is not something the question compares, so it is not a side`);
+        }
+        // The AI named no real sides, but its searches are one per thing the
+        // user compares ("skincare or makeup": one search names skincare,
+        // the other makeup): those words are the sides.
+        if (uniq(mine().filter((x) => x.side).map((x) => x.side)).length < 2) {
+          const found = sidesFromSearches(mine(), question, ownName, understood);
+          if (found.length >= 2) {
+            for (const f of found) searches[searches.indexOf(f.search)] = { ...f.search, side: f.label };
+            notes.push(`${id}: no sides from the AI; the searches name the things the question compares, so the sides are ${uniq(found.map((f) => f.label)).map((l) => `"${l}"`).join(' and ')} (found by code)`);
+            // ONE search per side, as for the sides the AI names
+            for (const label of uniq(found.map((f) => f.label))) {
+              const same_ = mine().filter((x) => x.side === label);
+              if (same_.length > 1) {
+                searches = replaceIn(searches, same_, mergeSearches(same_));
+                notes.push(`${id}: ${same_.length} searches for the side "${label}" joined into one (one search per side)`);
+              }
+            }
+          }
+        }
         const left = uniq(mine().filter((x) => x.side).map((x) => x.side));
         if (left.length < 2) {
           for (const x of mine().filter((m) => m.side)) searches[searches.indexOf(x)] = { ...x, side: null };
+        } else {
+          // A search with no side (only for comparing parts) is given to
+          // EVERY side, without the other sides' words, as for the fixed
+          // sides: "market share of luxury and mass fragrance" -> the luxury
+          // search gets "market share of luxury fragrance". Otherwise compare
+          // never uses it and it is fetched for nothing.
+          const labelSides = left.map((label) => ({ label }));
+          const sideless = mine().filter((s) => !s.side && s.for.every((f) => {
+            const r = plan.requirements.find((x) => x.requirement_id === f);
+            return r && comparesSides(r);
+          }));
+          for (const s of sideless) {
+            for (const label of left) {
+              const target = mine().find((x) => x.side === label);
+              const extra = wordsForSide(s.words, labelSides, label, ownName);
+              if (!target || !extra) continue;
+              searches[searches.indexOf(target)] = { ...mergeSearches([target, { ...target, words: extra }]), side: label, for: uniq([...target.for, ...s.for]) };
+            }
+            searches.splice(searches.indexOf(s), 1);
+            notes.push(`${id}: search "${s.words}" had no side: its words were given to each side's search`);
+          }
         }
       }
     }
@@ -525,6 +912,57 @@ function completeSearches(aiSearches, plan, understood, notes) {
       const join = free.slice(room - 1);
       searches = replaceIn(searches, join, mergeSearches(join));
       notes.push(`${id}: ${join.length} searches joined into one (at most ${MAX_SEARCHES_PER_PART} searches for one part)`);
+    }
+  }
+
+  // A comparison is only fair when every side is searched for the SAME
+  // points: "What are competitors doing about sustainability?" had Lancôme
+  // searched for "initiatives", Shiseido for "campaigns" and YSL for "green
+  // launches". Any point one side's search has (other side names taken
+  // out) is added to the searches of the other sides. Nothing is removed.
+  const ownNameForSides = understood.client && understood.client.company_name;
+  for (const part of plan.requirements) {
+    if (!comparesSides(part)) continue;
+    const id = part.requirement_id;
+    const mine = searches.filter((x) => x.side && x.for.includes(id));
+    const labels = uniq(mine.map((x) => x.side));
+    if (labels.length < 2 || labels.length !== mine.length) continue;
+    const labelSides = labels.map((label) => ({ label }));
+    const pointsOf = (x) => uniq(String(x.words).split(',')
+      .map((p) => wordsForSide(p, labelSides, '\u0000', ownNameForSides))
+      .filter((p) => p.split(' ').some((t) => t.length >= 3 && !JOIN_WORDS.has(t))));
+    const all = uniq(mine.flatMap(pointsOf));
+    const missingFor = (x) => { const have = pointsOf(x); return all.filter((p) => !have.includes(p)); };
+    if (mine.every((x) => missingFor(x).length === 0)) continue;
+    for (const x of mine) {
+      let words = x.words;
+      for (const p of missingFor(x)) if (`${words}, ${p}`.length <= MAX_JOINED_CHARS) words = `${words}, ${p}`;
+      searches[searches.indexOf(x)] = { ...x, words };
+    }
+    notes.push(`${id}: every side is searched for the same points (${all.join('; ').slice(0, 160)})`);
+  }
+
+  // Every company the user named is searched for. For a goal that is not
+  // about the company itself (market entry, campaigns, strategy, trends...)
+  // only a search that names the company is filtered to it, the others look
+  // at all the news ("India cosmetics regulation" is not Nykaa news). So
+  // when no search names the company, its name is added to one search of
+  // the part (the one about competitors if there is one, else the first),
+  // and never lost.
+  const ownName = understood.client && understood.client.company_name;
+  for (const part of plan.requirements) {
+    if (COMPANY_GOALS.includes(part.goal) || comparesSides(part)) continue;
+    const id = part.requirement_id;
+    const mineNow = () => searches.filter((s) => s.for.includes(id) && !s.side);
+    if (!mineNow().length) continue;
+    for (const c of understood.companies || []) {
+      const mine = mineNow();
+      const name = (c.matched && c.matched.name) || c.name;
+      if (!name || (ownName && same(name, ownName))) continue;
+      if (searches.some((s) => companiesNamedIn(s.words, understood).some((x) => same(x, name)))) continue;
+      const target = mine.find((s) => RIVAL_WORD.test(s.words)) || mine[0];
+      searches[searches.indexOf(target)] = { ...target, words: `${target.words} ${name}` };
+      notes.push(`${id}: no search named ${name}, so "${name}" was added to the search "${target.words}" (the other searches look at all the news)`);
     }
   }
   return searches;
@@ -563,6 +1001,40 @@ function placesNamedIn(words, understood) {
     }
   }
   return places.filter((p) => found.has(p));
+}
+
+// What the question is about, as Step 5 found it: its products and topics
+// (or its industry when it names neither). Only the words that say WHICH
+// thing count: goal words ("risks", "trends", "market", "campaign") are
+// our own goal names and say nothing about the subject, and places and
+// companies are filters already.
+const GOAL_WORDS = new Set(Object.keys(GOAL_KEY_JOB).flatMap((g) => g.split('_')).map((w) => singular(w)));
+function questionSubjects(understood) {
+  const named = [...(understood.places || []), ...companyNames(understood)]
+    .flatMap((x) => plain(x).split(' ')).map(singular);
+  const words = (text) => plain(text).split(' ').map(singular)
+    .filter((w) => w.length >= 4 && !GOAL_WORDS.has(w) && !JOIN_WORDS.has(w) && !named.includes(w));
+  // A question in another language keeps its own words in Step 5's
+  // subjects ("mercado", "Risiken", "riskler"). Our news is in English and
+  // the AI already wrote English searches, so nothing is added then.
+  if (!questionInEnglish(understood)) return [];
+  const pick = (list) => (list || []).map((t) => ({ text: String(t), words: words(t) })).filter((x) => x.words.length);
+  const main = [...pick(understood.products), ...pick(understood.topics)];
+  return main.length ? main : pick(understood.industries);
+}
+// Is the question written in English? Most of its words (leaving out the
+// company and place names) must be common English words. Decided for the
+// whole question, so a rare English word ("haircare") does not count
+// against it.
+function questionInEnglish(understood) {
+  return looksEnglish(understood.question_text, [...(understood.places || []), ...companyNames(understood)]);
+}
+
+// Does the search still say what the question is about? ("market risks"
+// for "reputation risks from influencer marketing" does not.)
+function keepsSubject(words, subjects) {
+  const have = new Set(plain(words).split(' ').map(singular));
+  return subjects.some((x) => x.words.some((w) => have.has(w)));
 }
 
 // Goals that are about the named companies themselves.
@@ -616,7 +1088,15 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
   const parts = plan.requirements.filter((r) => search.for.includes(r.requirement_id));
   const allList = parts.length > 0 && parts.every((r) => r.goal === 'list');
   const named = modulesNamed(question, understood);
-  const exactRead = allList && (named.length > 0 || asksOnlyForLatest(question, understood));
+  // a place we do not know ("Maroc", "Riyadh", "Atlantis") cannot be an
+  // exact filter, so such a list question is searched by meaning instead
+  const unknownPlaces = (understood.places || []).filter((x) => !placeKnown(x));
+  // The exact read can only filter (module, dates, place, company, impact):
+  // it has no search words. So it is used only when the question has no
+  // topic at all ("high impact signals last month", "estée lauder news").
+  // A list question WITH a topic ("policy signals about packaging") is
+  // searched by meaning, kept to the module it names.
+  const exactRead = allList && unknownPlaces.length === 0 && asksOnlyForLatest(question, understood);
 
   const time = understood.time;
   const own = understood.client && understood.client.company_name;
@@ -628,7 +1108,10 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       if (named.length < companies.length) filterWhy = `companies: only ${named.join(', ')} (named in the search)`;
       companies = named;
     } else {
-      const othersName = allSearches.some((x) => x !== search && !x.side && companiesNamedIn(x.words, understood).length);
+      // (a side search counts too: "What is Estée Lauder doing, and how
+      // should we react?" - the Estée Lauder side covers the company, so the
+      // strategy search about the market is not Estée Lauder news)
+      const othersName = allSearches.some((x) => x !== search && companiesNamedIn(x.words, understood).length);
       const needNotAboutThem = parts.some((r) => (r.information_needed || []).some((n) => companiesNamedIn(n, understood).length === 0));
       // ...and the search really is about something else: it names another
       // subject of the question ("Korean beauty brands"), or the goal is not
@@ -637,7 +1120,14 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       // about Emirates NBD.
       const otherSubject = namesOtherSubject(search.words, understood);
       const companyGoal = parts.every((r) => COMPANY_GOALS.includes(r.goal));
-      if (othersName && needNotAboutThem && (otherSubject || !companyGoal)) {
+      // an exact read has no search words, so it can never be "about
+      // something else": it keeps the companies ("estée lauder news")
+      if (exactRead) {
+        // keep the filter
+      } else if (othersName && (!companyGoal || (needNotAboutThem && otherSubject))) {
+        // a goal about the market, not the company (market entry, campaigns,
+        // strategy, trends, risks): only a search that names the company is
+        // its news ("India cosmetics regulation" is not Nykaa news)
         companies = [];
         filterWhy = 'companies: none (this search is about something else in the question, other searches cover the companies)';
       } else if (own && companies.some((c) => same(c, own))) {
@@ -646,7 +1136,14 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
         // consumer signals are NOT news about our own company
         const allAboutOwn = parts.every((r) => (r.information_needed || []).length > 0 &&
           (r.information_needed || []).every((n) => companiesNamedIn(n, understood).some((c) => same(c, own))));
-        if (!allAboutOwn) {
+        // ...but a SWOT or a profile of our company describes the company
+        // itself: our company IS the subject, as for any other company
+        // ("SWOT analysis of Lumière Beauty Group" -> "company strengths and
+        // weaknesses" is Lumière news; the needs just say "Strengths").
+        // A fact or a list about us is decided by its needs as before ("Is
+        // Pakistan a good market for our fragrances?" is market news).
+        const describesOwn = parts.every((r) => ['framework', 'company_profile'].includes(r.goal));
+        if (!allAboutOwn && !describesOwn) {
           companies = companies.filter((c) => !same(c, own));
           filterWhy = `companies: ${companies.length ? companies.join(', ') : 'none'} (the search is not about ${own} itself)`;
         }
@@ -674,13 +1171,64 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
   if (side && side.companies) companies = side.companies;
   if (side && side.date_from) { dateFrom = side.date_from; dateTo = side.date_to; }
   if (side && side.companies && own && same(side.companies[0], own)) companies = [own];
+  // A search filtered to some companies does not carry the name of another
+  // company from the question (or our own): "competitor activity in
+  // Lumière Beauty Group" filtered to the competitors -> the name is taken
+  // out, the filter already says whose news it is.
+  if (!(side && side.companies) && companies.length) {
+    const others = uniq([...companyNames(understood), own].filter(Boolean))
+      .filter((n) => !companies.some((c) => same(c, n)));
+    const w = ` ${plain(search.words)} `;
+    const hit = others.filter((n) => plain(n).length >= 3 && w.includes(` ${plain(n)} `));
+    if (hit.length) {
+      const KEEP = '\u0000keep';
+      search = { ...search, words: wordsForSide(search.words, [{ label: KEEP }, ...hit.map((label) => ({ label }))], KEEP, null) };
+      filterWhy = [filterWhy, `words: ${hit.join(', ')} taken out (this search is not filtered to ${hit.length > 1 ? 'them' : 'it'})`].filter(Boolean).join('; ');
+    }
+  }
+  // Only places in our place list are filters: the news is stored under
+  // those names ("Morocco"), so a filter on "Maroc" would find nothing. A
+  // place we do not know stays in the search words instead (never dropped).
+  const notFilters = countries.filter((x) => !placeKnown(x));
+  if (notFilters.length) {
+    countries = countries.filter(placeKnown);
+    const have = new Set(plain(search.words).split(' '));
+    const missing = notFilters.filter((x) => !plain(x).split(' ').filter((w) => w !== 'the').every((w) => have.has(w)));
+    if (missing.length) search = { ...search, words: `${search.words} ${missing.join(' ')}` };
+    filterWhy = [filterWhy, `places: ${notFilters.join(', ')} not in our place list, so searched by words, not used as a filter`].filter(Boolean).join('; ');
+  }
+  // "Who owns Huda Beauty today?", "what is the VAT rate today": "today"
+  // means "now", not "news from today only". Only news / alert questions
+  // (list) keep a today-only filter; any other goal gets no date limit.
+  const ranges = (time && time.ranges) || [];
+  const onlyToday = ranges.length === 1 && /^today$/i.test(String(ranges[0].text || '').trim())
+    && dateFrom === todayOf(understood) && dateTo === dateFrom;
+  if (onlyToday && !side && !allList) {
+    dateFrom = null;
+    dateTo = null;
+    filterWhy = [filterWhy, 'dates: "today" here means "now", so no date limit (only news questions keep today\'s date)'].filter(Boolean).join('; ');
+  }
   const dates = searchDates(dateFrom, dateTo, todayOf(understood));
   dateFrom = dates.from;
   dateTo = dates.to;
 
+  // Every search keeps what the question is about. The AI often writes
+  // only the goal's general needs ("competitor threats", "market risks")
+  // and drops the subject; the subject is then added from Step 5. A side
+  // search is about its side, so it is left alone.
+  if (!exactRead && !side && !search.side) {
+    const subjects = questionSubjects(understood);
+    if (subjects.length && !keepsSubject(search.words, subjects)) {
+      // the main subject is enough to keep the search on topic; adding every
+      // subject of a long question makes a word soup (at most 2)
+      const add = uniq(subjects.map((x) => x.text)).slice(0, MAX_SUBJECTS_ADDED);
+      search = { ...search, words: `${search.words} ${add.join(' ')}` };
+      filterWhy = [filterWhy, `words: the subject (${add.join(', ')}) added, the search had lost it`].filter(Boolean).join('; ');
+    }
+  }
   const inputs = {};
-  if (!exactRead) inputs.query = search.words;
-  inputs.modules = exactRead ? (named.length ? named : [...MODULES]) : [...MODULES];
+  if (!exactRead) inputs.query = cleanSearchWords(withoutOwnWords(search.words, understood));
+  inputs.modules = (exactRead || allList) && named.length ? named : [...MODULES];
   if (dateFrom) inputs.date_from = dateFrom;
   if (dateTo) inputs.date_to = dateTo;
   if (companies.length) inputs.companies = companies.slice(0, 20);
@@ -728,11 +1276,13 @@ function analysisTasks(part, E, U, sideRefs, question, notes) {
       }
       inputs = { sides: sideRefs.slice(0, MAX_SIDES), dimensions: (part.information_needed || []).slice(0, 8) };
     } else if (job === 'identify_gaps') {
-      inputs = { inputs: take([done.compare, done.identify_patterns, done.analyse_risks, ...U, ...E], 4) };
+      // the part's own results and own searches come before the results of
+      // the parts it waits for, so its own evidence is never cut off
+      inputs = { inputs: take([done.compare, done.identify_patterns, done.analyse_risks, ...E, ...U], 4) };
     } else if (job === 'discover_opportunities') {
-      inputs = { inputs: take([done.identify_patterns, done.identify_gaps, done.compare, ...U, ...E], 4) };
+      inputs = { inputs: take([done.identify_patterns, done.identify_gaps, done.compare, ...E, ...U], 4) };
     } else if (job === 'summarise') {
-      inputs = { input: take([...Object.values(done), ...U, ...E], 6), focus: `${GOAL_LABELS[part.goal]}: ${topic}`.slice(0, 200) };
+      inputs = { input: take([...Object.values(done), ...E, ...U], 6), focus: `${GOAL_LABELS[part.goal]}: ${topic}`.slice(0, 200) };
       const headings = part.goal === 'framework' ? headingsFor(question) : null;
       if (headings) inputs.headings = headings;
     }
@@ -824,11 +1374,34 @@ function assemble(plan, understood, question, searches, notes) {
       }));
       local.push(add({ capability: t.capability, inputs, for_requirements: [id], why: `${GOAL_LABELS[part.goal]} (${id})` }));
     }
-    finals[id] = local.length ? [`${local[local.length - 1]}.output`] : E;
+    // The part's results = its last job AND every other job or search of
+    // the part that no later job of the part uses ("extract facts" before a
+    // "compare" that only takes the sides). Nothing is fetched or worked
+    // out for nothing: it goes on to the evidence check and the answer.
+    const refsOf = (taskId) => {
+      const t = tasks.find((x) => x.task_id === taskId);
+      return t ? (JSON.stringify(t.inputs).match(/T\d+/g) || []) : [];
+    };
+    const ids = uniq(local);
+    const used = new Set(ids.flatMap(refsOf));
+    const leaves = ids.filter((x) => !used.has(x));
+    const last = local[local.length - 1];
+    const unusedSearches = E.map((r) => r.replace('.output', '')).filter((x) => !used.has(x));
+    finals[id] = local.length
+      ? uniq([last, ...leaves.filter((x) => x !== last), ...unusedSearches]).map((x) => `${x}.output`)
+      : E;
   }
 
-  // the evidence check, once, at the end
-  const findings = uniq(plan.requirements.flatMap((r) => finals[r.requirement_id] || [])).slice(0, 8);
+  // the evidence check, once, at the end. Each part's main result first;
+  // what does not fit (at most 8) is reported back as "overflow", so the
+  // caller can take out a helper job instead of leaving a result unused.
+  const MAX_FINDINGS = (getCapability('validate_evidence').inputs.findings || {}).max || 8;
+  const allFindings = uniq([
+    ...plan.requirements.map((r) => (finals[r.requirement_id] || [])[0]),
+    ...plan.requirements.flatMap((r) => (finals[r.requirement_id] || []).slice(1)),
+  ].filter(Boolean));
+  const findings = allFindings.slice(0, MAX_FINDINGS);
+  const overflow = allFindings.slice(MAX_FINDINGS).map((x) => x.replace('.output', ''));
   if (findings.length) {
     add({ capability: 'validate_evidence', inputs: { findings }, for_requirements: plan.requirements.map((r) => r.requirement_id), why: 'check every finding has real evidence' });
   }
@@ -838,7 +1411,7 @@ function assemble(plan, understood, question, searches, notes) {
     const refs = JSON.stringify(t.inputs).match(/T\d+\.output/g) || [];
     t.depends_on = uniq(refs.map((r) => r.replace('.output', ''))).filter((x) => x !== t.task_id);
   }
-  return { tasks, finals };
+  return { tasks, finals, overflow };
 }
 
 const countOf = (tasks) => ({
@@ -862,6 +1435,7 @@ const countOf = (tasks) => ({
 function finishWorkflow(plan, understood, question, aiSearches, aiBudget, removed, aiSideNames = null) {
   const notes = [];
   // the sides of any comparison are chosen once, for every part of the build
+  if (!understood.question_text) understood = { ...understood, question_text: question };
   understood = { ...understood, compare_sides: codeSides(understood, aiSideNames) };
   let working = { ...plan, requirements: plan.requirements.map((r) => ({ ...r, analysis: [...(r.analysis || [])] })) };
   let searches = completeSearches(aiSearches, working, understood, notes);
@@ -926,6 +1500,35 @@ function finishWorkflow(plan, understood, question, aiSearches, aiBudget, remove
       built = build();
     }
   }
+  // 3b. more results than the evidence check can take: a helper job whose
+  //     result nothing else uses is taken out (never a key job)
+  while (built.overflow.length && guard++ < 140) {
+    let cut = false;
+    for (const tid of built.overflow) {
+      const t = built.tasks.find((x) => x.task_id === tid);
+      if (!t || !HELPER_JOBS.includes(t.capability)) continue;
+      const r = working.requirements.find((x) => (t.for_requirements || []).includes(x.requirement_id) &&
+        x.analysis.includes(t.capability) && GOAL_KEY_JOB[x.goal] !== t.capability);
+      if (!r) continue;
+      r.analysis = r.analysis.filter((j) => j !== t.capability);
+      removed.push({ what: 'analysis', value: `${t.capability} (${r.requirement_id})`, why: 'its result would not fit in the evidence check (at most 8 results): helper job taken out' });
+      cut = true;
+      break;
+    }
+    if (!cut) {
+      // no helper to take out: a part's own searches are joined into one
+      // (nothing asked for is lost), the part with the most searches first
+      const parts = [...working.requirements].sort((a, b) =>
+        searches.filter((x) => !x.side && x.for.length === 1 && x.for[0] === b.requirement_id).length -
+        searches.filter((x) => !x.side && x.for.length === 1 && x.for[0] === a.requirement_id).length);
+      const r = parts[0];
+      const own = r ? searches.filter((x) => !x.side && x.for.length === 1 && x.for[0] === r.requirement_id) : [];
+      if (own.length < 2) break;
+      searches = replaceIn(searches, own, mergeSearches(own));
+      removed.push({ what: 'search', value: own.map((x) => x.words).join(' + '), why: `more results than the evidence check can take (at most 8): ${own.length} searches of ${r.requirement_id} joined into one` });
+    }
+    built = build();
+  }
   // 4. whole extra goals: optional ones first, the main goal never
   while (over() && guard++ < 160) {
     const extra = [...working.requirements].reverse().filter((r) => r.requirement_id !== mainId);
@@ -959,6 +1562,7 @@ function finishWorkflow(plan, understood, question, aiSearches, aiBudget, remove
     counts,
     over_limits: overLimits,
     notes: uniq(finalNotes),
+    question_text: understood.question_text,   // the question the plan was built for (shown in reports / Phoenix)
   };
 }
 
@@ -981,6 +1585,9 @@ function finishWorkflow(plan, understood, question, aiSearches, aiBudget, remove
  */
 async function buildWorkflow(cleaned, understood, plan, options = {}) {
   const question = cleaned.preprocessed_query;
+  // the question is kept with Step 5's result, so the sides of a comparison
+  // can be chosen by the words next to "compare / vs"
+  understood = { ...understood, question_text: question };
   const prompt = await requirePrompt(WORKFLOW_PROMPT_ID);
   const messages = [
     { role: 'system', content: prompt },
@@ -1052,10 +1659,20 @@ module.exports = {
   modulesNamed,
   impactAsked,
   headingsFor,
-  onlyLatestWords,
+  listTopicWords,
+  ownNamedInQuestion,
+  withoutOwnWords,
   asksOnlyForLatest,
   codeSides,
   sideChoices,
+  sideOptions,
+  sideCore,
+  sideInQuestion,
+  sidesFromSearches,
+  cleanSearchWords,
+  placeKnown,
+  compareWords,
+  namedInText,
   sameSide,
   sideNamedIn,
   wordsForSide,

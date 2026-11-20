@@ -165,7 +165,8 @@ function showStep2(r) {
   return rows([
     ['Before', esc(r.original_query)],
     ['After cleaning', `<span class="${changed ? 'changed' : ''}">${esc(r.preprocessed_query)}</span>${changed ? '' : ' <span class="small">(no change)</span>'}`],
-    ['Short forms swapped', tags(r.corrections_applied)],
+    ['Short forms swapped', tags(r.terms_swapped || r.corrections_applied)],
+    ['Spelling fixed', tags(r.spelling_fixed || [])],
     ['Words recognised', tags(termList)],
     ['Date words found', tags((r.time_expressions || []).map((t) => `${t.text} (${t.kind})`))],
     ['Date words NOT understood', (r.time_unclear || []).length ? tags(r.time_unclear, 'bad') + ' <span class="small">the user is asked to write the date again</span>' : '<span class="none">none</span>'],

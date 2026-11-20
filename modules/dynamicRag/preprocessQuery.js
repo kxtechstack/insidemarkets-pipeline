@@ -39,7 +39,8 @@ const { ChatError } = require('./chatError');
 const fs = require('fs');
 const path = require('path');
 const { WORD_LIST_REFRESH_MS } = require('./chatConfig');
-const { PLACES, standardPlace, placeFromAdjective } = require('../placeNames');
+const { PLACES, PLACE_ADJECTIVES, standardPlace, placeFromAdjective } = require('../placeNames');
+const { FRAMEWORKS } = require('./capabilityRegistry');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -142,18 +143,32 @@ function applyTerms(text, terms) {
 // ── 3. Date phrases ──────────────────────────────────────────────────────
 // These are the date formats the chat understands. They are the same for
 // every client, so they are safe to keep in code.
-const YEAR = '(?:199\\d|20[0-4]\\d)';
+const YEAR = '(?:19\\d\\d|20\\d\\d)';   // 1900-2099: a year outside this is never silently dropped
 const COUNT = '(?:\\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
 const UNIT = '(?:day|week|wk|month|mth|quarter|qtr|year|yr)s?';
 const MONTH =
   '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|' +
-  'sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+  'sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])';   // a whole word only: "10 market" is not "10 mar"
 
 // One POINT in time: a month (with or without year), a quarter, a half year,
 // a financial year or a year. A RANGE is any point to any point, so every
 // combination is understood the same way ("March to June 2025", "Jan-Mar 2025",
 // "Q1 to Q3 2025", "between March and June 2025", "Nov 2024 - Feb 2025").
 const MONTH_P = `${MONTH}\\.?`;
+// The same month names in any letter case, for a rule that is otherwise
+// case-sensitive ("May" with a capital after "April and"): every letter
+// outside [...] becomes [xX].
+const MONTH_ANY_CASE = (() => {
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < MONTH.length; i++) {
+    const ch = MONTH[i];
+    if (ch === '[' && MONTH[i - 1] !== '\\') inClass = true;
+    if (ch === ']' && MONTH[i - 1] !== '\\') inClass = false;
+    out += (!inClass && /[a-z]/.test(ch) && MONTH[i - 1] !== '\\') ? `[${ch}${ch.toUpperCase()}]` : ch;
+  }
+  return out;
+})();
 const DAY_NUM = '\\d{1,2}(?:st|nd|rd|th)?';
 // a single day: "March 3rd", "3 March", "3rd of March 2025", "2025-03-03"
 const DAY_POINT =
@@ -177,10 +192,18 @@ const DATE_PATTERNS = [
   { kind: 'range',           re: `\\bbetween\\s+${POINT}\\s+and\\s+${POINT}\\b` },
   { kind: 'range',           re: `\\b(?:from\\s+)?${POINT}\\s*(?:-|–|—|to|through|till|until)\\s*${POINT}\\b` },
   { kind: 'since',           re: `\\bsince\\s+(?:${MONTH}\\.?\\s+)?${YEAR}\\b` },
+  // "since Q3", "since H1 2025", "since the third quarter": from the start of it up to today
+  { kind: 'since',           re: `\\bsince\\s+(?:the\\s+)?(?:Q[1-4]|H[12])(?:\\s?'?(?:\\d{4}|\\d{2}))?\\b` },
+  // "from Jan to now", "March until today", "since Q1 to date": a point up to today
+  { kind: 'to_now',          re: `\\b(?:from\\s+)?${POINT}\\s*(?:-|–|—|to|till|until|through)\\s*(?:now|today|date|present|the present)\\b` },
+  // "early 2025", "mid 2025", "late 2025": the first, middle or last four months
+  { kind: 'part_year',       re: `\\b(?:early|mid|late|end of|start of|beginning of)[\\s-]+${YEAR}\\b` },
   { kind: 'quarter',         re: `\\bQ[1-4]\\s?(?:FY\\s?)?'?(?:\\d{4}|\\d{2})\\b` },
   { kind: 'quarter',         re: `\\b(?:first|second|third|fourth|1st|2nd|3rd|4th)\\s+quarter\\s+(?:of\\s+)?${YEAR}\\b` },
   { kind: 'fiscal_year',     re: `\\b(?:FY\\s?'?(?:\\d{4}|\\d{2})|(?:fiscal|financial)\\s+year\\s+(?:\\d{4}|\\d{2}))\\b` },
   { kind: 'half_year',       re: `\\bH[12]\\s?(?:\\d{4}|\\d{2})\\b` },
+  // "first half of 2025", "the second half of 2024"
+  { kind: 'half_year',       re: `\\b(?:the\\s+)?(?:first|1st|second|2nd)\\s+half\\s+(?:of\\s+)?${YEAR}\\b` },
   { kind: 'relative_period', re: `\\b(?:last|past|previous|next|coming|upcoming)\\s+(?:${COUNT}\\s*)?${UNIT}\\b` },
   { kind: 'current_period',  re: `\\b(?:this|current)\\s+(?:week|month|quarter|year)\\b` },
   { kind: 'current_period',  re: `\\b(?:today|yesterday|year[\\s-]to[\\s-]date|YTD)\\b` },
@@ -188,10 +211,20 @@ const DATE_PATTERNS = [
   // a month written as 2026-10
   { kind: 'month',           re: `(?<![\\d/.,-])${YEAR}-(?:0[1-9]|1[0-2])(?![\\d/-])` },
   { kind: 'month_year',      re: `\\b${MONTH}\\.?,?\\s+${YEAR}\\b` },
-  { kind: 'month',           re: `\\b${DATE_WORD}\\s+(?:the\\s+)?${MONTH_P}(?![\\w])(?!\\s*,?\\s*\\d)` },
+  // "in October", "since March", "since last October" (= the most recent October)
+  { kind: 'month',           re: `\\b${DATE_WORD}\\s+(?:the\\s+|last\\s+)?${MONTH_P}(?![\\w])(?!\\s*,?\\s*\\d)` },
   // "September and october", "March or april": the second month of a list
   // ("may" is left out: "and may affect" is not a date)
   { kind: 'month',           re: `(?<=${MONTH_P}\\s+(?:and|or|vs|versus|&)\\s+)(?!may\\b)${MONTH_P}(?![\\w])(?!\\s*,?\\s*\\d)` },
+  // "May" in a list of months IS the month: "Compare April and May", "May
+  // and June trends". It is never read alone ("May I see", "and may
+  // affect"): only next to another month name, and a small "may" only at
+  // the end ("compare april and may").
+  { kind: 'month',           re: `(?<=${MONTH_ANY_CASE}\\.?\\s+(?:and|or|vs|versus|&)\\s+)May(?![\\w])(?!\\s*,?\\s*\\d)`, flags: 'g' },
+  { kind: 'month',           re: `(?<=${MONTH_P}\\s+(?:and|or|vs|versus|&)\\s+)may(?=\\s*[?.!]*\\s*$)`, flags: 'gi' },
+  // the FIRST month of a list, in small letters too: "april and may",
+  // "may and june", "jan to mar" (a month name next to another one is a date)
+  { kind: 'month',           re: `\\b${MONTH_P}(?=\\s+(?:and|or|vs|versus|&|to|till|until|-)\\s+${MONTH_P}(?![\\w]))`, flags: 'gi' },
   { kind: 'month',           re: `\\b${CAPITAL_MONTH}\\.?(?![\\w])(?!\\s*,?\\s*\\d)`, flags: 'g' },
   // a quarter or half with no year ("Q1", "in H2"): the most recent one
   { kind: 'quarter',         re: `\\bQ[1-4]\\b(?!\\s*(?:FY\\s?)?'?\\d)`, flags: 'g' },
@@ -378,18 +411,97 @@ function protectedWordSet(names) {
   const add = (text) => {
     for (const w of plainLower(text).split(/[^a-z0-9]+/)) if (w.length >= 3) set.add(w);
   };
-  for (const n of names || []) add(n);
-  for (const [std, aliases] of Object.entries(PLACES)) { add(std); for (const a of aliases) add(a); }
+  // a name of several words is also kept joined ("esteelauder"), so a short
+  // form typed as one word ("estlauder") can be matched against it
+  const addJoined = (text) => {
+    const parts = plainLower(text).split(/[^a-z0-9]+/).filter(Boolean);
+    if (parts.length > 1) set.add(parts.join(''));
+  };
+  for (const n of names || []) { add(n); addJoined(n); }
+  for (const [std, aliases] of Object.entries(PLACES)) {
+    for (const x of [std, ...aliases]) { add(x); addJoined(x); }
+  }
+  // place adjectives: the listed ones, and a place name with an ending that
+  // is a real English word ("indian", "korean", "egyptian", "japanese")
+  // the chat's own terms ("swot", "pestel"): Step 7 reads them, so they are never "fixed"
+  for (const f of FRAMEWORKS) for (const w of f.words) set.add(w);
+  for (const adj of Object.keys(PLACE_ADJECTIVES || {})) add(adj);
+  loadEnglishWords();
+  for (const name of Object.keys(PLACES)) {
+    const w = plainLower(name);
+    if (!/^[a-z]{4,}$/.test(w)) continue;
+    for (const end of ['n', 'an', 'ian', 'ese', 'i', 'ish']) {
+      const base = /[aeiou]$/.test(w) && end !== 'n' ? w.slice(0, -1) : w;
+      for (const form of [w + end, base + end]) if (englishWords.has(form)) set.add(form);
+    }
+  }
   return set;
 }
+
+// Is the word a name typed in short, with letters left out ("singpr" for
+// singapore, "indnsia", "phlppines", "estlauder")? All its letters are in
+// the name, in the same order, it starts with the same letter and covers
+// most of the name. Returns how much of the name it covers (0 = not at all).
+const SHORT_FORM_COVER = 0.6;
+function shortFormCover(w, name) {
+  if (!w || !name || w.length < 4 || w.length >= name.length || w[0] !== name[0]) return 0;
+  let j = 0;
+  for (const ch of name) if (ch === w[j]) j += 1;
+  if (j < w.length) return 0;
+  const cover = w.length / name.length;
+  return cover >= SHORT_FORM_COVER ? cover : 0;
+}
+// The common English word this word is a short form of ("mrkt" -> market),
+// only when one word clearly wins; null otherwise.
+function shortFormFix(w) {
+  const found = [];
+  const longest = Math.floor(w.length / SHORT_FORM_COVER);
+  for (let len = w.length + 1; len <= longest; len++) {
+    for (const c of wordsByStart.get(`${w[0]}${len}`) || []) {
+      const n = englishWords.get(c) || 0;
+      const cover = n >= MIN_COMMON ? shortFormCover(w, c) : 0;
+      if (cover) found.push({ c, n, cover });
+    }
+  }
+  // the closest word first ("custmr": customer before customers), then the most common
+  found.sort((a, b) => b.cover - a.cover || b.n - a.n);
+  const [top] = found;
+  if (!top) return null;
+  const rival = found.find((x) => x !== top && x.cover === top.cover && x.n * CLEAR_WINNER > top.n);
+  return rival ? null : top.c;
+}
+// Are all the letters of w in word c, in the same order? ("shud" in "should")
+function keepsLetters(w, c) {
+  let j = 0;
+  for (const ch of c) if (ch === w[j]) j += 1;
+  return j === w.length;
+}
+function shortFormOfProtected(w, protectedSet) {
+  let best = 0;
+  for (const p of protectedSet) {
+    if (p.length < 5) continue;
+    const c = shortFormCover(w, p);
+    if (c > best) best = c;
+  }
+  return best;
+}
 function nearProtected(w, protectedSet) {
-  if (protectedSet.has(w)) return true;
+  return nameSlips(w, protectedSet) !== Infinity;
+}
+// How many slips the word is from the closest protected name (0 = it is
+// the name; Infinity = not close to any name).
+function nameSlips(w, protectedSet) {
+  if (protectedSet.has(w)) return 0;
+  let best = Infinity;
   for (const p of protectedSet) {
     if (p.length < 4) continue;
     const allowed = Math.max(w.length, p.length) >= 7 ? 2 : 1;
-    if (Math.abs(p.length - w.length) <= allowed && slips(w, p) <= allowed) return true;
+    if (Math.abs(p.length - w.length) <= allowed) {
+      const d = slips(w, p);
+      if (d <= allowed && d < best) best = d;
+    }
   }
-  return false;
+  return best;
 }
 
 /**
@@ -425,10 +537,22 @@ function fixSpelling(text, protectedNames = []) {
       continue;
     }
     if (englishWords.has(w)) { entry.kind = 'english'; continue; }
-    if (/^[A-Z]{2,}/.test(core) || (/^[A-Z]/.test(core) && !isFirst) || nearProtected(w, protectedSet)) {
-      entry.kind = 'name';                                                // KSA, Careem, lancme
+    // the plural of a common English word is an English word too: "regs"
+    // (reg), "skus" (sku) are typed on purpose, they are not typos
+    if (w.endsWith('s') && (englishWords.get(w.slice(0, -1)) || 0) >= MIN_COMMON) { entry.kind = 'english'; continue; }
+    if (/^[A-Z]{2,}/.test(core) || (/^[A-Z]/.test(core) && !isFirst)) {
+      entry.kind = 'name';                                                // KSA, Careem
       continue;
     }
+    // Close to a name ("lancme", "shisedo"): a name, unless a common
+    // English word is CLOSER than that name - "frgrance" is 1 slip from
+    // "fragrance" but 2 from "France", so it is the word, never the place.
+    // A tie stays a name (safe: names are never changed).
+    const toName = nameSlips(w, protectedSet);
+    if (toName === 0) { entry.kind = 'name'; continue; }
+    // a name typed in short ("singpr" = singapore) is a name, unless it is
+    // the short form of an English word just as well ("prce" = price, not prince)
+    const nameCover = shortFormOfProtected(w, protectedSet);
     if (checked >= MAX_WORDS_TO_CHECK) { entry.kind = 'name'; continue; }
     checked += 1;
     entry.check = true;          // a possible typo (used again by the next-word check)
@@ -445,10 +569,32 @@ function fixSpelling(text, protectedNames = []) {
       const best = found[0];
       const rival = best && found.find((x) => x !== best && x.d === best.d);
       const sure = best && best.n >= MIN_COMMON && !(rival && rival.n * CLEAR_WINNER > best.n);
+      // A word typed with letters left out ("mrkt", "cmpny", "regltn") is
+      // more than 1-2 slips from the real word. If one common word holds all
+      // its letters in the same order, that word is taken - unless a sure
+      // fix one slip away exists ("prce" -> price either way).
+      // With a word one slip away, the old rule stays ("latst" is last or
+      // latest: left as typed), except when the short-form word is clearly
+      // more common than that sure fix ("custmr": customer, not custer).
+      const short = shortFormFix(w);
+      const oneSlip = found.some((x) => x.d === 1 && x.n >= MIN_COMMON);
+      let fix = sure ? best.c : null;
+      if (!oneSlip && short) fix = short;
+      if (oneSlip && sure && short && (englishWords.get(short) || 0) > best.n * CLEAR_WINNER) fix = short;
       if (bestMatchCache.size > 5000) bestMatchCache.clear();
-      bestMatchCache.set(w, sure ? best.c : null);
+      bestMatchCache.set(w, fix);
     }
     const fix = bestMatchCache.get(w);
+    if (toName !== Infinity && !(fix && slips(w, fix) < toName)) {
+      entry.kind = 'name';             // lancme stays (never "lance"); frgrance -> fragrance
+      entry.check = false;
+      continue;
+    }
+    if (nameCover && !(fix && shortFormCover(w, fix) >= nameCover)) {
+      entry.kind = 'name';             // "singpr" stays (never "singer"); the AI reads it as Singapore
+      entry.check = false;             // and the next-word check must not "fix" it either
+      continue;
+    }
     if (fix) { entry.kind = 'typo'; entry.fix = fix; } else entry.kind = 'name';   // unsure: treat as a name, leave it
   }
 
@@ -469,6 +615,10 @@ function fixSpelling(text, protectedNames = []) {
       for (const c of wordsByStart.get(`${e.w[0]}${len}`) || []) {
         if ((englishWords.get(c) || 0) < MIN_COMMON) continue;
         const d = slips(e.w, c);
+        // Two slips in a short word (under 7 letters) is a different word
+        // ("regs" -> "real"), unless the slips are letters LEFT OUT and all
+        // the typed letters are still there, in order ("shud" -> "should").
+        if (d === 2 && e.w.length < 7 && !keepsLetters(e.w, c)) continue;
         if (d <= 2) found.push({ c, d });
       }
     }
@@ -536,6 +686,8 @@ function preprocessText(originalQuery, terms = [], protectedNames = [], options 
   const fixWords = options.fixWords !== false;
   const tidied = cleanText(originalQuery);
   const swapped = applyTerms(tidied, terms);
+  const termSwaps = [...swapped.corrections];   // word-list swaps only (KSA -> Saudi Arabia)
+  const spellingFixed = [];                     // spelling and date-word fixes
   // obvious typos, after the word list (a word-list term is never "fixed")
   if (fixWords) {
     // names from the word list are protected (KSA, Saudi Arabia); its
@@ -545,11 +697,13 @@ function preprocessText(originalQuery, terms = [], protectedNames = [], options 
     const spelling = fixSpelling(swapped.text, [...protectedNames, ...nameTerms.flatMap((t) => [t.term, t.replace_with])]);
     swapped.text = spelling.text;
     for (const c of spelling.corrections) if (!swapped.corrections.includes(c)) swapped.corrections.push(c);
+    spellingFixed.push(...spelling.corrections);
   }
   // date words with a spelling slip are fixed before dates are spotted
   const dateFix = fixDateTypos(swapped.text);
   swapped.text = dateFix.text;
   for (const c of dateFix.corrections) if (!swapped.corrections.includes(c)) swapped.corrections.push(c);
+  spellingFixed.push(...dateFix.corrections);
 
   const spans = findDateSpans(swapped.text);
 
@@ -561,7 +715,9 @@ function preprocessText(originalQuery, terms = [], protectedNames = [], options 
     // date words that are in the question but were not read as a date
     // (Step 5 asks the user instead of guessing)
     time_unclear: findUnreadDateWords(swapped.text, spans),
-    corrections_applied: swapped.corrections,
+    corrections_applied: swapped.corrections,  // everything changed (word list + spelling)
+    terms_swapped: termSwaps,                   // word-list swaps only
+    spelling_fixed: spellingFixed,              // spelling fixes only
   };
 }
 
@@ -709,7 +865,45 @@ async function preprocessQuery(request) {
   };
 }
 
+// Is this a common English word (or the plural of one)? Later steps use it
+// to tell English words from words in another language.
+function isEnglishWord(word) {
+  loadEnglishWords();
+  const w = plainLower(word);
+  const common = (x) => (englishWords.get(x) || 0) >= MIN_COMMON;
+  return common(w) || (w.endsWith('s') && common(w.slice(0, -1)));
+}
+
+// Is this question written in English? Words of 3+ letters ("no", "de",
+// "do" are in both languages), leaving out the names given (companies,
+// places): at least half must be common English words. Used by Step 5
+// (a place in another language is not "missing" from the question) and
+// Step 7 (no English subject words added to a question in another
+// language). One rule, in one place.
+// A word with a capital letter (not the first word) is a name, and names
+// say nothing about the language: the English word file holds many names
+// ("Italia", "Deutschland", "della" are all in it), so "Tendenze della
+// cosmetica in Italia" or "Vergleiche Deutschland und Frankreich" were
+// read as English. Only the other words decide.
+function looksEnglish(text, leaveOut = []) {
+  const named = new Set(leaveOut.flatMap((x) => plainLower(x).split(/[^a-z0-9]+/).filter(Boolean)));
+  const words = String(text || '').split(/\s+/)
+    .map((t) => t.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, ''))
+    .filter(Boolean);
+  // in a question written all in capitals every word has a capital: then
+  // the capitals say nothing and every word counts
+  const allCaps = words.length > 0 && words.every((t) => t === t.toUpperCase());
+  const typed = words
+    .filter((t, i) => allCaps || i === 0 || !/^\p{Lu}/u.test(t))
+    .filter((t) => t.length >= 3 && !named.has(plainLower(t)));
+  if (!typed.length) return true;
+  const english = typed.filter((t) => /^[a-z'’-]+$/i.test(t) && isEnglishWord(t)).length;
+  return english * 2 >= typed.length;
+}
+
 module.exports = {
+  looksEnglish,
+  isEnglishWord,
   preprocessQuery,
   preprocessText,
   companiesNamed,

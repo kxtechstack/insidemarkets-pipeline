@@ -172,13 +172,14 @@ function decide(ai, cleaned = {}) {
  * @returns the result from decide(), plus attempts (how many AI calls it took)
  * @throws ChatError 503 if the AI could not give a usable reply
  */
-// The question, plus what code already found in it and the client's
-// industry (for the example topics of an ask-back question).
+// The question, plus what code already found in it. The client's industry
+// is NOT sent: the AI took it as a limit and rejected business questions
+// about other industries ("Apple's revenue" -> "a different industry").
+// Users may ask about any industry, company or country.
 function userMessage(cleaned) {
   const lines = [`Question to label:\n"""\n${cleaned.preprocessed_query}\n"""`];
   const found = topicsFound(cleaned);
   if (found.length) lines.push(`Named in the question (found by code): ${found.join(', ')}`);
-  if (cleaned.client_industry) lines.push(`Industry of the client: ${cleaned.client_industry}`);
   return lines.join('\n');
 }
 
