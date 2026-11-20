@@ -512,6 +512,45 @@ function sidesFromSearches(searches, question, ownName, understood = null) {
     labels.filter((l) => l !== label).map(wordsOf).join(' '))) ? found : [];
 }
 
+// When the reading above finds no sides but the question itself sets two
+// words against each other ("Compare online and stores in Kuwait": the
+// searches were "online store market performance" and "store market
+// performance", so "store" looked like the shared topic and the part was
+// summarised): a search with the first word is that side, a search with
+// only the second word is the other side. "online store" (the first word
+// right before the second) is the first side; a search naming both apart
+// ("skincare makeup GCC") names both and is shared.
+function sidesFromPair(searches, question, ownName, understood = null) {
+  const scope = new Set();
+  for (const name of [...((understood && understood.places) || []), ...(understood ? companyNames(understood) : [])]) {
+    for (const n of [name, ...(PLACES[name] || [])]) for (const w of plain(n).split(' ')) if (w.length >= 2) scope.add(singular(w));
+  }
+  const ownWords = new Set(plain(ownName || '').split(' ').filter(Boolean));
+  const usable = (w) => w.length >= 2 && !JOIN_WORDS.has(w) && !AGAINST_WORDS.has(w) && !scope.has(w) && !ownWords.has(w) && sideCore(w, ownName) !== OWN_CORE;
+  const typedTokens = plain(question).split(' ');
+  const typed = uniq(typedTokens.map(singular).filter(usable));
+  for (let i = 0; i < typed.length; i++) {
+    for (let j = 0; j < typed.length; j++) {
+      const [a, b] = [typed[i], typed[j]];
+      if (a === b || !setAgainst([a], b, question)) continue;
+      const words = (x) => plain(x.words).split(' ').map(singular);
+      const sideOf = (x) => {
+        const w = words(x);
+        const hasA = w.includes(a);
+        const hasB = w.includes(b);
+        if (hasA && hasB) return w.some((v, k) => v === a && w[k + 1] === b) ? a : null;   // "online store" = a; both apart = shared
+        return hasA ? a : (hasB ? b : null);
+      };
+      const found = searches.map((x) => ({ search: x, side: sideOf(x) })).filter((f) => f.side);
+      if (!found.some((f) => f.side === a) || !found.some((f) => f.side === b)) continue;
+      // the label as the user typed it ("stores", not "store")
+      const label = (w) => typedTokens.find((t) => singular(t) === w) || w;
+      return found.map((f) => ({ search: f.search, label: label(f.side) }));
+    }
+  }
+  return [];
+}
+
 // Does the question set these words against the other side's words with
 // "and" / "or" / "vs" ("Compare online and stores", "stores versus online")?
 // Plain grammar words only, a few words apart.
@@ -994,7 +1033,8 @@ function completeSearches(aiSearches, plan, understood, notes) {
         // user compares ("skincare or makeup": one search names skincare,
         // the other makeup): those words are the sides.
         if (uniq(mine().filter((x) => x.side).map((x) => x.side)).length < 2) {
-          const found = sidesFromSearches(mine(), question, ownName, understood);
+          let found = sidesFromSearches(mine(), question, ownName, understood);
+          if (found.length < 2) found = sidesFromPair(mine(), question, ownName, understood);
           if (found.length >= 2) {
             for (const f of found) searches[searches.indexOf(f.search)] = { ...f.search, side: f.label };
             notes.push(`${id}: no sides from the AI; the searches name the things the question compares, so the sides are ${uniq(found.map((f) => f.label)).map((l) => `"${l}"`).join(' and ')} (found by code)`);
@@ -1182,7 +1222,19 @@ function questionSubjects(understood) {
   // real subjects)
   const noModules = (t) => MODULE_WORDS.filter(([m]) => m === 'market' || m === 'outlook')
     .reduce((x, [, re]) => x.replace(new RegExp(re.source, 'gi'), ' '), String(t));
-  const pick = (list) => (list || []).map((t) => ({ text: String(t), words: words(noModules(t)) })).filter((x) => x.words.length);
+  // A framework's name is not a subject either: "Porter's 5 Forces" and
+  // "PESTEL for cosmetics" were added to searches; the news never says them,
+  // the summary headings do that job. What is left of the subject is used
+  // ("PESTEL for cosmetics" -> "cosmetics").
+  const FRAME = new Set([...FRAMEWORKS.flatMap((f) => [...f.words, ...plain(f.name).split(' ')]), 'analysis', 'framework', 's', '5']);
+  const noFrameworks = (t) => {
+    const kept = String(t).split(/\s+/).filter((tok) => !plain(tok).split(' ').filter(Boolean).every((w) => FRAME.has(w)));
+    return tidyJoins(kept.join(' '));
+  };
+  const pick = (list) => (list || []).map((t) => {
+    const text = noFrameworks(noModules(t)).replace(/\s+/g, ' ').trim();
+    return { text, words: words(text) };
+  }).filter((x) => x.words.length);
   const main = [...pick(understood.products), ...pick(understood.topics)];
   return main.length ? main : pick(understood.industries);
 }
@@ -1391,7 +1443,11 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       // the main subject is enough to keep the search on topic; adding every
       // subject of a long question makes a word soup (at most 2)
       const add = uniq(subjects.map((x) => x.text)).slice(0, MAX_SUBJECTS_ADDED);
-      const added = addWords(search.words, add.join(' '));
+      // a search that is only a piece of the subject ("men" for "men's
+      // grooming") becomes the subject, not "men men's grooming"
+      const subjectWords = new Set(plain(add.join(' ')).split(' ').map(singular));
+      const piece = plain(search.words).split(' ').filter(Boolean).every((w) => subjectWords.has(singular(w)));
+      const added = piece ? { text: add.join(' '), dropped: [] } : addWords(search.words, add.join(' '));
       search = { ...search, words: added.text };
       filterWhy = [filterWhy, `words: the subject (${add.join(', ')}) added, the search had lost it`].filter(Boolean).join('; ');
       if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');

@@ -4058,6 +4058,43 @@ async function testStep7() {
     return (r && r.searches[0].side === 'Lancome') || r;
   });
 
+  // ---- round 8 (20 Nov, from the v9/v10 reports) ----
+  await check('Sides: "Compare online and stores in Kuwait" with NO AI sides ("online store ..." / "store ...") -> sides "online" and "stores", compared, approved', async () => {
+    const q = 'Compare online and stores in Kuwait and find opportunities';
+    const u = und({ primary_goal: 'comparison', secondary_goals: ['opportunities'], places: ['Kuwait'] });
+    const wf = wfOf(u, q, [['online store market performance Kuwait', 'IR1'], ['store market performance Kuwait', 'IR1'],
+      ['online store market performance Kuwait vs store market performance Kuwait', 'IR1'], ['market gaps Kuwait', 'IR2']].map(([words, id]) => ({ for: [id], words, side: null })));
+    const cmp = wf.tasks.find((t) => t.capability === 'compare');
+    const labels = cmp ? cmp.inputs.sides.map((x) => x.label).join() : '';
+    return (labels === 'online,stores' && ok(u, wf) === true && step8(u, wf).status === 'approved') || { labels, notes: wf.notes, s8: step8(u, wf).problems };
+  });
+  for (const [q, ai] of [
+    // must NOT change: one search names both apart, the other neither -> nothing to compare (safe)
+    ['Which is growing faster, skincare or makeup, in the GCC?', ['skincare makeup GCC growth', 'GCC market growth']],
+    ['Compare UAE and UAE retail', ['UAE retail market characteristics', 'UAE retail market size']],
+  ]) {
+    await check(`Sides (must not change): "${q}" with searches ${ai.map((x) => `"${x}"`).join(', ')} -> summarised, not compared`, async () => {
+      const u = und({ primary_goal: 'comparison', places: /GCC/.test(q) ? ['GCC'] : ['United Arab Emirates'] });
+      const wf = wfOf(u, q, ai.map((words) => ({ for: ['IR1'], words, side: null })));
+      return (!wf.tasks.some((t) => t.capability === 'compare') && ok(u, wf) === true) || wf.notes;
+    });
+  }
+  for (const [q, topics, ai, want] of [
+    ['pestel for cosmetics in the EU', ['PESTEL for cosmetics'], 'EU political environment', 'EU political environment cosmetics'],
+    ['porters 5 forces on uae salons', ["Porter's 5 Forces"], 'UAE salon competitive rivalry', 'UAE salon competitive rivalry'],
+    ['SWOT analysis of our haircare line', ['SWOT analysis'], 'haircare line strengths and weaknesses', 'haircare line strengths and weaknesses'],
+    ["Market dynamics signals about men's grooming this year", ["men's grooming"], 'men', "men's grooming"],
+    // must NOT change
+    ['Risks for beauty brands from influencer rules', ['influencer rules'], 'market risks', 'market risks influencer rules'],
+  ]) {
+    await check(`Subjects: "${q}" (topics ${JSON.stringify(topics)}), AI search "${ai}" -> "${want}" (a framework name is not a subject; a piece of the subject becomes the subject)`, async () => {
+      const u = und({ primary_goal: /swot|pestel|forces/i.test(q) ? 'framework' : (/Risks/.test(q) ? 'risks' : 'list'), places: /EU/.test(q) ? ['European Union'] : (/uae/.test(q) ? ['United Arab Emirates'] : []), topics, industries: [] });
+      const wf = wfOf(u, q, [{ for: ['IR1'], words: ai, side: null }]);
+      const got = wf.tasks.filter((t) => t.inputs.query).map((t) => t.inputs.query);
+      return got.join() === want || got;
+    });
+  }
+
   // 10. a SWOT / profile of OUR company keeps every search on our company
   await check('Own SWOT: "SWOT analysis of Test Co" (needs say only "Strengths") -> every search stays on Test Co', async () => {
     const u = und({ primary_goal: 'framework', secondary_goals: [], industries: [], topics: [], companies: [OWNC], about_own_business: true });
