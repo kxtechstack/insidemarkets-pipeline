@@ -555,9 +555,15 @@ function sidesFromPair(searches, question, ownName, understood = null) {
 // "and" / "or" / "vs" ("Compare online and stores", "stores versus online")?
 // Plain grammar words only, a few words apart.
 const AGAINST_WORDS = new Set(['and', 'or', 'vs', 'versus', 'against', 'than']);
-function setAgainst(extra, core, question) {
+function setAgainst(extraIn, core, question) {
   const t = plain(question).split(' ').map(singular);
-  const coreWords = core.split(' ').filter(Boolean);
+  // only the words that make the two sides DIFFERENT count: in "Compare
+  // UAE and UAE retail" the AI's sides "UAE market" and "UAE retail" share
+  // "uae", and "uae ... and ... uae" is not one side set against the other
+  // (21 Nov: they were compared)
+  const allCore = core.split(' ').filter(Boolean);
+  const extra = extraIn.filter((w) => w && !allCore.includes(w));
+  const coreWords = allCore.filter((w) => !extraIn.includes(w));
   const at = (list) => t.map((w, i) => (list.includes(w) ? i : -1)).filter((i) => i >= 0);
   for (const i of at(extra)) {
     for (const j of at(coreWords)) {
@@ -567,6 +573,41 @@ function setAgainst(extra, core, question) {
     }
   }
   return false;
+}
+
+// The searches of an AI reply read one by one, when the reply as a whole
+// is not valid JSON. Each search starts at '{"for"'; it ends where the next
+// one starts. A search that still cannot be read is tried once more
+// without one of its brackets (a stray "]" or "}" in the middle, the
+// commonest slip of the small model). Only objects with words are kept.
+function searchItemsFrom(text) {
+  const t = String(text || '');
+  const starts = [];
+  const re = /\{\s*"for"\s*:/g;
+  let m;
+  while ((m = re.exec(t))) starts.push(m.index);
+  const isSearch = (x) => x && typeof x === 'object' && !Array.isArray(x) && x.words;
+  const out = [];
+  for (let k = 0; k < starts.length; k++) {
+    const piece = t.slice(starts[k], k + 1 < starts.length ? starts[k + 1] : t.length).trim().replace(/[\s,]+$/, '');
+    // the end of the whole list ("]}") or text after it belongs to no search
+    const close = piece.lastIndexOf('}');
+    const tries = close > 0 ? [piece.slice(0, close + 1), piece] : [piece];
+    let got = null;
+    for (const x of tries) {
+      const whole = parseJsonLoose(x);
+      if (isSearch(whole)) { got = whole; break; }
+      // one stray bracket inside the search
+      for (let i = 1; i < x.length - 1 && !got; i++) {
+        if (x[i] !== ']' && x[i] !== '}') continue;
+        const cand = parseJsonLoose(x.slice(0, i) + x.slice(i + 1));
+        if (isSearch(cand)) got = cand;
+      }
+      if (got) break;
+    }
+    if (got) out.push(got);
+  }
+  return out;
 }
 
 // Is this side the same as that one? ("UAE" = "United Arab Emirates",
@@ -757,7 +798,19 @@ function checkAiSearches(replyText, plan, understood) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start === -1) return { searches: null, problem: 'there is no JSON object in it', removed };
-  const p = parseJsonLoose(text.slice(start, end + 1)) || parseJsonLoose(text.slice(start).trim());
+  let p = parseJsonLoose(text.slice(start, end + 1)) || parseJsonLoose(text.slice(start).trim());
+  if (!p || typeof p !== 'object' || !Array.isArray(p.searches)) {
+    // The whole reply is not one JSON object, but its searches may still
+    // be readable one by one (21 Nov): one search with a stray bracket
+    // ("side": "entry barriers"], ...), a reply cut short, or the list
+    // written three times ({...} {...} {...}). Every whole search is kept;
+    // nothing is guessed.
+    const items = searchItemsFrom(text);
+    if (items.length) {
+      removed.push({ what: 'AI reply', value: `${text.length} characters`, why: `not one clean JSON object; read search by search, ${items.length} searches kept` });
+      p = { searches: items };
+    }
+  }
   if (!p || typeof p !== 'object') return { searches: null, problem: 'the JSON is broken', removed };
   if (!Array.isArray(p.searches)) return { searches: null, problem: 'it has no "searches" list', removed };
 
@@ -913,12 +966,20 @@ function completeSearches(aiSearches, plan, understood, notes) {
         const nameSides = [...sides, ...leftOut.map((label) => ({ label }))];
         // (a search shared with other parts is given out too, when every
         // part it serves compares the same sides)
-        const sideless = mine().filter((s) => !s.side && s.for.every((f) => {
+        const comparing = (f) => {
           const r = plan.requirements.find((x) => x.requirement_id === f);
-          return r && comparesSides(r);
-        }));
+          return Boolean(r && comparesSides(r));
+        };
+        const sideless = mine().filter((s) => !s.side && s.for.every(comparing));
+        // A search with no side that ALSO serves a part that does not
+        // compare ("halal beauty market activity" for the comparison and
+        // for the trends of "Indonesia compared to Malaysia for halal
+        // beauty") gives its words to every side too, and stays as it is
+        // for the other part. Before (21 Nov) it was left out of the
+        // comparison: only "regulation" was compared.
+        const shared = mine().filter((s) => !s.side && !s.for.every(comparing));
         const sideWords = (label) => {
-          const fromSideless = sideless.map((s) => wordsForSide(s.words, nameSides, label, ownName)).filter(Boolean);
+          const fromSideless = [...sideless, ...shared].map((s) => wordsForSide(s.words, nameSides, label, ownName)).filter(Boolean);
           return fromSideless.length ? mergeSearches(fromSideless.map((w) => ({ for: [id], words: w }))).words : '';
         };
         for (const side of sides) {
@@ -939,6 +1000,12 @@ function completeSearches(aiSearches, plan, understood, notes) {
         for (const s of sideless) {
           searches.splice(searches.indexOf(s), 1);
           notes.push(`${id}: search "${s.words}" had no side: its words were given to each side's search`);
+        }
+        for (const s of shared) {
+          const at = searches.indexOf(s);
+          if (at < 0) continue;
+          searches[at] = { ...s, for: s.for.filter((f) => f !== id) };
+          notes.push(`${id}: search "${s.words}" had no side: its words were given to each side's search (it stays a search of ${searches[at].for.join(', ')})`);
         }
         // a side's search never names another side ("Lancôme vs Estee Lauder
         // pricing" for the Lancôme side -> "lancome pricing")
@@ -1447,9 +1514,19 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       // grooming") becomes the subject, not "men men's grooming"
       const subjectWords = new Set(plain(add.join(' ')).split(' ').map(singular));
       const piece = plain(search.words).split(' ').filter(Boolean).every((w) => subjectWords.has(singular(w)));
-      const added = piece ? { text: add.join(' '), dropped: [] } : addWords(search.words, add.join(' '));
+      // only the subject words the search does not have yet: "emerging
+      // trends" added to "Saudi retail trends" gave "... trends emerging
+      // trends", "launching in Turkey" to "Turkey cosmetics ..." repeated
+      // Turkey, "Estée Lauder activity" repeated the company (21 Nov)
+      const have = new Set(plain(search.words).split(' ').filter(Boolean).map(singular));
+      const fresh = tidyJoins(add.join(' ').split(/\s+/).filter((tok) => {
+        const ws = plain(tok).split(' ').filter((w) => w.length > 1);
+        return ws.length > 0 && !ws.every((w) => have.has(singular(w)));
+      }).join(' '));
+      const addText = piece ? add.join(' ') : fresh;
+      const added = piece ? { text: addText, dropped: [] } : addWords(search.words, addText);
       search = { ...search, words: added.text };
-      filterWhy = [filterWhy, `words: the subject (${add.join(', ')}) added, the search had lost it`].filter(Boolean).join('; ');
+      filterWhy = [filterWhy, `words: the subject (${piece ? add.join(', ') : addText}) added, the search had lost it`].filter(Boolean).join('; ');
       if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');
     }
   }

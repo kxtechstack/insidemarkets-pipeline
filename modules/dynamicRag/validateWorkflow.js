@@ -181,8 +181,42 @@ function checkFilters(task, understood, today, problems) {
 //    side ("UAE retail" and "UAE retail market") is the same thing
 //  - a side's search never names another side ("Lancome pricing vs Dior"
 //    for the Lancome side would also fetch Dior's news)
-function checkSides(task, tasks, problems, understood = {}) {
+// A side that is not a place, a company, our business, "Competitors" or a
+// date is a side the AI or the code named from WORDS ("online", "men's
+// grooming"). The words that make it different from the other sides must
+// be in the user's question: "UAE market" vs "UAE retail" for "Compare UAE
+// and UAE retail" was compared although nobody typed "market" (21 Nov).
+const SIDE_GLUE = new Set(['and', 'or', 'vs', 'versus', 'the', 'of', 'in', 'for', 'on', 'to', 'a', 'an', 's']);
+const sideWords = (t) => plain(t).split(' ').filter((w) => w && !SIDE_GLUE.has(w))
+  .map((w) => (w.length > 3 && /[^s]s$/.test(w) ? w.slice(0, -1) : w));
+function wordSidesNotAsked(sides, understood, question) {
+  const u = understood || {};
+  const fixed = new Set([
+    ...(u.places || []), ...(u.places_not_in_list || []),
+    ...(u.companies || []).flatMap((c) => [c && c.name, c && c.matched && c.matched.name]),
+    ...((u.client && [u.client.company_name, ...(u.client.competitors || [])]) || []),
+    ...((u.time && u.time.ranges) || []).map((r) => r && r.text),
+    'competitors',
+  ].filter(Boolean).map(plain));
+  const typed = new Set(sideWords(question));
+  if (typed.size === 0) return [];
+  const out = [];
+  for (const side of sides) {
+    const label = plain(side && side.label);
+    if (!label || fixed.has(label) || /\d/.test(label)) continue;
+    const others = new Set(sides.filter((o) => o !== side).flatMap((o) => sideWords(o && o.label)));
+    const own = sideWords(label).filter((w) => w.length >= 2 && !others.has(w));
+    const missing = own.filter((w) => !typed.has(w));
+    if (missing.length) out.push({ label: side.label, missing });
+  }
+  return out;
+}
+
+function checkSides(task, tasks, problems, understood = {}, question = '') {
   const sides = (task.inputs && task.inputs.sides) || [];
+  for (const x of wordSidesNotAsked(sides, understood, question)) {
+    problems.push(`${task.task_id}: the side "${x.label}" is not something the question compares ("${x.missing.join(' ')}" was never typed)`);
+  }
   const labels = sides.map((x) => plain(x && x.label));
   if (labels.length < 2) problems.push(`${task.task_id}: compare needs at least 2 sides`);
   if (new Set(labels).size !== labels.length) problems.push(`${task.task_id}: two sides with the same name`);
@@ -291,7 +325,10 @@ function validateWorkflow(workflow, understood, plan) {
 
     // a comparison: 2+ sides, each a different thing, and no side's search
     // pulls another side's news
-    if (t.capability === 'compare') checkSides(t, tasks, problems, understood);
+    if (t.capability === 'compare') {
+      const asked = [understood && understood.question_text, understood && understood.question_typed, workflow && workflow.question_text].filter(Boolean).join(' ');
+      checkSides(t, tasks, problems, understood, asked);
+    }
 
     // 4. filters from Step 5
     if (SEARCH_JOBS.includes(t.capability)) {

@@ -2725,6 +2725,28 @@ function judgeWorkflow(u, p, w) {
         const [x, y] = sw(a).length <= sw(b).length ? [sw(a), sw(b)] : [sw(b), sw(a)];
         if (x.length && x.every((k) => y.includes(k))) serious.push(`${t.task_id}: the sides "${a}" and "${b}" are the same thing`);
       }));
+      // 21 Nov: a side named from WORDS (not a place, company, us,
+      // "Competitors" or a date) differs from the other sides only by words
+      // the user typed ("UAE market" vs "UAE retail" for "Compare UAE and UAE retail")
+      {
+        const pl = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const glue = ['and', 'or', 'vs', 'versus', 'the', 'of', 'in', 'for', 'on', 'to', 'a', 'an', 's'];
+        const ws = (x) => pl(x).split(' ').filter((k) => k && !glue.includes(k)).map((k) => (k.length > 3 && /[^s]s$/.test(k) ? k.slice(0, -1) : k));
+        const askedText = [u.question_text, u.question_typed, w.question_text].filter(Boolean).join(' ');
+        const typedW = new Set(ws(askedText));
+        const fixedNames = new Set([...(u.places || []), ...(u.places_not_in_list || []),
+          ...(u.companies || []).flatMap((c) => [c.name, c.matched && c.matched.name]),
+          ...(u.client ? [u.client.company_name, ...(u.client.competitors || [])] : []),
+          ...((u.time && u.time.ranges) || []).map((r) => r.text), 'competitors'].filter(Boolean).map(pl));
+        const sidesHere = t.inputs.sides || [];
+        for (const side of typedW.size ? sidesHere : []) {
+          const lab = pl(side.label);
+          if (!lab || fixedNames.has(lab) || /\d/.test(lab)) continue;
+          const others = new Set(sidesHere.filter((o) => o !== side).flatMap((o) => ws(o.label)));
+          const missing = ws(lab).filter((k) => k.length >= 2 && !others.has(k) && !typedW.has(k));
+          if (missing.length) serious.push(`${t.task_id}: the side "${side.label}" is not something the question compares ("${missing.join(' ')}" was never typed)`);
+        }
+      }
       // a side's search must not name another side (it would pull the other side's news)
       const plainT = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       for (const side of t.inputs.sides || []) {
@@ -4057,6 +4079,94 @@ async function testStep7() {
     const r = planner.parseJsonLoose(String.raw`{"searches":[{"for":["IR1"],"words":"x","side":"Lanc\u00fome"}]}`);
     return (r && r.searches[0].side === 'Lancome') || r;
   });
+
+  // ---- round 9 (21 Nov, from the v11 reports) ----
+  const sidesOf9 = (wf) => wf.tasks.filter((t) => t.capability === 'compare').map((t) => t.inputs.sides.map((x) => x.label).join(' vs ')).join() || 'summarised';
+  for (const [q, u0, ai, want] of [
+    // the same word on both sides is not "one side set against the other"
+    ['Compare UAE and UAE retail', { places: ['United Arab Emirates'] }, [['UAE retail market vs UAE market', 'UAE market'], ['UAE retail market', 'UAE retail'], ['UAE retail market characteristics', null]], 'summarised'],
+    ['Compare skincare and skincare', { topics: ['skincare'] }, [['skincare market size and trends', 'skincare products'], ['skincare competitor product launches', 'skincare competitor moves'], ['skincare market and consumer behavior', null]], 'summarised'],
+    // must NOT change
+    ['Which is growing faster, skincare or makeup, in the GCC?', { places: ['GCC'], topics: ['skincare', 'makeup'], industries: [] }, [['GCC skincare market growth', 'skincare'], ['skincare makeup GCC growth', 'makeup']], 'skincare vs makeup'],
+    ['Compare online and stores in Kuwait', { places: ['Kuwait'] }, [['online stores market performance', 'online stores'], ['stores market performance', 'stores']], 'online vs stores'],
+    ['How do premium and mass skincare compare in India?', { places: ['India'] }, [['premium skincare market India', 'premium'], ['mass skincare market India', 'mass']], 'premium vs mass'],
+  ]) {
+    await check(`Sides (AI-named): "${q}" with AI sides ${ai.filter((x) => x[1]).map((x) => `"${x[1]}"`).join(', ')} -> ${want} (only the words that make the sides DIFFERENT count)`, async () => {
+      const u = und({ primary_goal: 'comparison', ...u0 });
+      const wf = wfOf(u, q, ai.map(([words, side]) => ({ for: ['IR1'], words, side })));
+      const got = sidesOf9(wf);
+      return (got === want && ok({ ...u, question_text: q }, wf) === true && step8({ ...u, question_text: q }, wf).status === 'approved') || { got, notes: wf.notes, judge: ok({ ...u, question_text: q }, wf), s8: step8({ ...u, question_text: q }, wf).problems };
+    });
+  }
+  {
+    // Step 8 AND the checker: a side named from words must differ by words the user typed
+    const mk = (labels) => ({ question_text: 'x', ai_budget: 11, counts: { tasks: 3, searches: 2, ai_jobs: 1 }, goals_left_out: [], tasks: [
+      { task_id: 'T1', capability: 'retrieve_data', inputs: { query: 'a' }, depends_on: [], for_requirements: ['IR1'] },
+      { task_id: 'T2', capability: 'retrieve_data', inputs: { query: 'b' }, depends_on: [], for_requirements: ['IR1'] },
+      { task_id: 'T3', capability: 'compare', inputs: { sides: [{ label: labels[0], ref: 'T1.output' }, { label: labels[1], ref: 'T2.output' }] }, depends_on: ['T1', 'T2'], for_requirements: ['IR1'] }] });
+    for (const [q, labels, places, refused] of [
+      ['Compare UAE and UAE retail', ['UAE market', 'UAE retail'], ['United Arab Emirates'], true],
+      ['Compare skincare and skincare', ['skincare products', 'skincare competitor moves'], [], true],
+      ['Compare online and offline beauty sales in the GCC', ['online', 'offline'], ['GCC'], false],
+      ["Which is bigger: men's grooming or women's haircare in Egypt?", ["men's grooming", "women's haircare"], ['Egypt'], false],
+      ['compare uae and ksa', ['United Arab Emirates', 'Saudi Arabia'], ['United Arab Emirates', 'Saudi Arabia'], false],
+      ['What changed this month vs last month?', ['this month', 'last month'], [], false],
+    ]) {
+      await check(`Step 8 + checker: sides ${labels.map((l) => `"${l}"`).join(' vs ')} for "${q}" -> ${refused ? 'refused (a word nobody typed)' : 'fine'}`, async () => {
+        const v = require('../modules/dynamicRag/validateWorkflow');
+        const probs = [];
+        const wf = mk(labels);
+        v.checkSides(wf.tasks[2], wf.tasks, probs, { places }, q);
+        const said = probs.some((x) => x.includes('never typed'));
+        const j = judgeWorkflow({ places, question_text: q, client: { company_name: 'Lumière Beauty Group', competitors: [] } }, { requirements: [] }, wf).serious.some((x) => x.includes('never typed'));
+        return (said === refused && j === refused) || { probs, judge: j };
+      });
+    }
+  }
+  await check('Sides: a side-less search that ALSO serves another part ("halal beauty market activity" for the comparison and the trends) gives its words to every side and stays for the trends', async () => {
+    const q = 'Indonesia compared to Malaysia for halal beauty';
+    const u = und({ primary_goal: 'comparison', secondary_goals: ['trends'], places: ['Indonesia', 'Malaysia'], topics: ['halal beauty'] });
+    const wf = wfOf(u, q, [['halal beauty market activity', ['IR1', 'IR2'], null], ['halal beauty demand signals', ['IR1', 'IR2'], null],
+      ['halal beauty regulation Indonesia', ['IR1'], 'Indonesia'], ['halal beauty regulation Malaysia', ['IR1'], 'Malaysia'], ['halal beauty developments', ['IR2'], null]].map(([words, f, side]) => ({ for: f, words, side })));
+    const cmp = wf.tasks.find((t) => t.capability === 'compare');
+    const sideQs = cmp ? cmp.inputs.sides.map((x) => wf.tasks.find((t) => `${t.task_id}.output` === x.ref).inputs.query) : [];
+    const trends = wf.tasks.filter((t) => t.inputs.query && (t.for_requirements || []).includes('IR2')).map((t) => t.inputs.query).join(' | ');
+    return (sideQs.length === 2 && sideQs.every((x) => /market activity/.test(x) && /demand signals/.test(x)) && /market activity/.test(trends)
+      && ok(u, wf) === true && step8({ ...u, question_text: q }, wf).status === 'approved') || { sideQs, trends, notes: wf.notes };
+  });
+  for (const [q, u0, ai, want] of [
+    ['What are the emerging trends in Saudi retail?', { primary_goal: 'trends', places: ['Saudi Arabia'], topics: ['emerging trends'] }, 'Saudi retail trends', 'Saudi retail trends emerging'],
+    ['Launching in Turkey: what should we know?', { primary_goal: 'strategy', places: ['Turkey'], topics: ['launching in Turkey'] }, 'Turkey Cosmetics market attractiveness', 'Turkey Cosmetics market attractiveness launching'],
+    ['Risks of relying on China for packaging', { primary_goal: 'risks', places: ['China'], topics: ['relying on China'] }, 'China packaging regulation policy changes', 'China packaging regulation policy changes relying'],
+    // must NOT change
+    ['Risks from counterfeit products in the GCC', { primary_goal: 'risks', places: ['GCC'], topics: ['counterfeit products'] }, 'GCC competitor threats', 'GCC competitor threats counterfeit products'],
+  ]) {
+    await check(`Subjects: "${q}", AI search "${ai}" -> "${want}" (only the subject words the search does not have yet are added)`, async () => {
+      const u = und({ ...u0, industries: [] });
+      const wf = wfOf(u, q, [{ for: ['IR1'], words: ai, side: null }]);
+      const got = wf.tasks.filter((t) => t.inputs.query).map((t) => t.inputs.query);
+      return got.join() === want || got;
+    });
+  }
+  {
+    const u = und({ primary_goal: 'market_entry', secondary_goals: ['risks'], places: ['Jordan'] });
+    const uq = { ...u, question_text: 'Should we enter Jordan, and what are the risks?' };
+    for (const [name, reply, want] of [
+      ['a stray "]" inside two searches', '{"searches": [{"for": ["IR1"], "words": "jordan market attractiveness"}, {"for": ["IR2"], "words": "jordan risks"}, {"for": ["IR1"], "side": "customer segments"], "words": "jordan customer needs"}]}', 3],
+      ['a stray "}" in the middle of a search', '{"searches": [{"for": ["IR1"], "words": "jordan market attractiveness"}, {"for": ["IR1"], "side": "customer segments"}, "words": "jordan customer demographics"}, {"for": ["IR2"], "words": "jordan risks"}]}', 3],
+      ['the reply cut off in the middle of a search', '{"searches": [{"for": ["IR1"], "words": "jordan market attractiveness"}, {"for": ["IR2"], "words": "jordan risks"}, {"for": ["IR2"], "side": "', 2],
+      ['the list written three times', '{"searches": [{"for": ["IR1"], "words": "jordan entry"}]}\n\n{"searches": [{"for": ["IR2"], "words": "jordan risks"}]}\n\n{"searches": [{"for": ["IR1"], "words": "jordan demand"}]}', 3],
+      // must NOT change
+      ['a clean reply', '{"searches": [{"for": ["IR1"], "words": "jordan entry"}, {"for": ["IR2"], "words": "jordan risks"}]}', 2],
+      ['nothing readable', '{"searches": [{"for": ["IR1"], "side": "x"]}', 0],
+    ]) {
+      await check(`AI reply: ${name} -> ${want} whole searches read${want ? '' : ' (still broken: asked again)'}`, async () => {
+        const c = w.checkAiSearches(reply, planFor(uq), uq);
+        const n = (c.searches || []).length;
+        return n === want || { n, problem: c.problem, removed: c.removed };
+      });
+    }
+  }
 
   // ---- round 8 (20 Nov, from the v9/v10 reports) ----
   await check('Sides: "Compare online and stores in Kuwait" with NO AI sides ("online store ..." / "store ...") -> sides "online" and "stores", compared, approved', async () => {
