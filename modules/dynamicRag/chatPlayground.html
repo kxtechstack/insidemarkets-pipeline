@@ -126,7 +126,8 @@ const STEPS = [
   { key: 'planTasks', num: 6, title: 'Plan what information is needed', what: 'The AI writes a work plan: for each goal, what information is needed and what analysis to do. Code then checks it: one part per goal, only jobs from the job list, each goal keeps its key job, places / companies / dates copied from Step 5, date words taken out.' },
   { key: 'buildWorkflow', num: 7, title: 'Build the workflow (which jobs, in which order)', what: 'The AI writes the searches (what to look for). Code adds the filters from Step 5 (dates, places, companies), gives a comparison one search per side, adds the analysis jobs from the Step 6 plan in a fixed order, the evidence check at the end, and keeps the limits.' },
   { key: 'validateWorkflow', num: 8, title: 'Check the plan before anything runs', what: 'Code only, no AI. Checks the Step 7 list once more: real jobs with the right inputs, each job only uses earlier results, limits kept, dates / places / companies only from Step 5 (never past today), every goal has a search and its key job, the evidence check once at the end, no job twice. Then works out which jobs can run at the same time.' },
-  { key: null, num: 9, title: 'Search and check the evidence', what: 'Not built yet.', later: true },
+  { key: 'runWorkflow', num: 9, title: 'Run the jobs', what: 'Runs the approved jobs in order, up to 3 at a time. The searches read only this client\'s signals the user can open in a tab, keep the dates, places and companies from Step 5, and drop what the user left out. The AI jobs read only the news found and every point names its sources; code removes points with no source, a made-up number or the other side\'s news.' },
+  { key: 'generateAnswer', num: 10, title: 'The answer', what: 'Code builds the answer from the checked points (parts, numbered sources, how good the evidence is, what was not found). One AI call writes only the short answer at the top; code checks it (every sentence has a real source number, no made-up number) and uses its own short answer if the check fails. Nothing found or a plain list: no AI call. Saved in the chat history.' },
   { key: null, num: 10, title: 'Write the answer', what: 'Not built yet.', later: true },
 ];
 
@@ -373,7 +374,51 @@ function showStep8(r) {
   return rows(pairs);
 }
 
-const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5, planTasks: showStep6, buildWorkflow: showStep7, validateWorkflow: showStep8 };
+function showStep9(r) {
+  const c = r.counts || {};
+  const chipFor = (st) => ({ done: 'ok', failed: 'bad', blocked: 'warn', skipped: 'warn', not_built: 'off' }[st] || 'off');
+  const src = r.sources || {};
+  const cite = (ids) => (ids || []).slice(0, 3).map((x) => esc(src[x] ? String(src[x].title).slice(0, 50) : x)).join('; ') + ((ids || []).length > 3 ? ` +${ids.length - 3}` : '');
+  const jobs = Object.entries(r.results || {}).map(([id, j]) => {
+    const o = j.output;
+    let body = '';
+    if (o && Array.isArray(o.items)) {
+      body = o.items.slice(0, 5).map((it) => `<div class="small">${esc(it.date || '')} · ${esc(it.module)} · ${esc((it.countries || []).join('/') || '-')} · ${esc((it.companies || []).join('/') || '-')}${it.score != null ? ` · ${esc(it.score)}` : ''} — ${esc(it.title)}</div>`).join('');
+      if (o.items.length > 5) body += `<div class="small">… and ${o.items.length - 5} more</div>`;
+      const why = Object.entries((o.removed && o.removed.reasons) || {}).map(([k, v]) => `${k} ${v}`).join(', ');
+      if (why) body += `<div class="small">dropped: ${esc(why)}</div>`;
+      if (o.note) body += `<div class="small">note: ${esc(o.note)}</div>`;
+    } else if (o) {
+      // an AI job (or the evidence check)
+      for (const f of (o.findings || []).slice(0, 8)) body += `<div class="small">[${esc(f.kind)}${f.level ? ` ${esc(f.level)}` : ''}]${f.heading ? ` <b>${esc(f.heading)}</b>:` : ''} ${esc(f.text)}${f.why ? ` — why: ${esc(f.why)}` : ''}${f.why_it_matters ? ` — matters: ${esc(f.why_it_matters)}` : ''} <span class="none">(${cite(f.sources)})</span></div>`;
+      for (const p of (o.patterns || []).slice(0, 8)) body += `<div class="small">[${esc(p.kind)}, ${esc(p.source_count)} sources, ${esc(p.first_date)}..${esc(p.last_date)}] <b>${esc(p.name)}</b>: ${esc(p.description)}</div>`;
+      for (const g of (o.groups || []).slice(0, 8)) body += `<div class="small">group (${esc(g.from)}) <b>${esc(g.name)}</b>: ${esc(g.sources.length)} items</div>`;
+      for (const row of (o.rows || []).slice(0, 8)) body += `<div class="small"><b>${esc(row.point)}</b>: ${Object.entries(row.cells).map(([k, c]) => `${esc(k)}: ${esc(c.text || '(no news)')}`).join(' | ')}</div>`;
+      for (const d of (o.differences || [])) body += `<div class="small">difference: ${esc(d.text)}</div>`;
+      if (o.status) body += `<div class="small">evidence: <b>${esc(o.status)}</b> · supported ${esc(o.supported.length)} · weak ${esc(o.weak.length)} · conflicts ${esc(o.conflicts.length)}</div>` + (o.limitations || []).map((l) => `<div class="small">• ${esc(l)}</div>`).join('');
+      const why = Object.entries((o.removed && o.removed.reasons) || {}).map(([k, v]) => `${k} ${v}`).join(', ');
+      if (why) body += `<div class="small">removed: ${esc(why)}</div>`;
+      if (o.note) body += `<div class="small">note: ${esc(o.note)}</div>`;
+    }
+    return `<div style="margin:6px 0"><b>${esc(id)}</b> ${esc(j.capability)} <span class="chip ${chipFor(j.status)}">${esc(j.status)}</span>` +
+      `${o && Array.isArray(o.items) ? ` <span class="small">${o.items.length} signals</span>` : ''}${j.ai_calls ? ` <span class="small">AI calls ${esc(j.ai_calls)}</span>` : ''}${j.error ? ` <span class="small">${esc(j.error)}</span>` : ''}${body}</div>`;
+  }).join('');
+  return rows([
+    ['Result', `${esc(r.status)} · done ${esc(c.done)} · failed ${esc(c.failed)} · blocked ${esc(c.blocked)} · skipped ${esc(c.skipped || 0)} · not built ${esc(c.not_built)} · ${esc(c.signals)} signals${r.ai ? ` · AI calls ${esc(r.ai.used)} of ${esc(r.ai.budget)} (+${esc(r.ai.kept_for_answer)} kept for the answer)` : ''}`],
+    ['Jobs', jobs || '<span class="none">-</span>'],
+    ['Notes', (r.notes || []).length ? r.notes.map((n) => `<div class="small">• ${esc(n)}</div>`).join('') : '<span class="none">none</span>'],
+  ]);
+}
+
+function showStep10(r) {
+  return rows([
+    ['Result', `${esc(r.status)} · evidence ${esc(r.confidence && r.confidence.level)} · short answer by ${esc(r.summary_by)} · ${esc((r.sources || []).length)} sources · AI calls ${esc(r.ai_calls)} · saved ${esc(r.saved)}`],
+    ['Check of the AI answer', r.check && r.check.problems && r.check.problems.length ? r.check.problems.map((p) => `<div class="small">• ${esc(p)}</div>`).join('') : `<span class="none">${r.check && r.check.passed ? 'passed' : 'no AI answer'}</span>`],
+    ['Not found or not done', (r.limits || []).length ? r.limits.map((l) => `<div class="small">• ${esc(l)}</div>`).join('') : '<span class="none">none</span>'],
+  ]);
+}
+
+const SHOW = { receiveQuestion: showStep1, preprocessQuery: showStep2, validateQuery: showStep3, understandQuery: showStep5, planTasks: showStep6, buildWorkflow: showStep7, validateWorkflow: showStep8, runWorkflow: showStep9, generateAnswer: showStep10 };
 
 // ── Draw the whole result ─────────────────────────────────────────────────
 function draw(question, httpStatus, json) {
@@ -399,11 +444,13 @@ function draw(question, httpStatus, json) {
     replyChip = '<span class="chip bad">Plan refused</span>';
     replyText = esc(json.answer);
   } else {
-    replyChip = '<span class="chip ok">Accepted</span>';
-    replyText = '<span class="none">Question understood, planned, turned into jobs and checked. The answer (Steps 9–10) is not built yet.</span>';
+    replyChip = '<span class="chip ok">Answered</span>';
+    replyText = json.answer ? `<pre style="white-space:pre-wrap;font-family:inherit;margin:0">${esc(json.answer)}</pre>` : '<span class="none">(stopped before the answer)</span>';
   }
   const aiCalls = ['validateQuery', 'understandQuery', 'planTasks', 'buildWorkflow']
-    .reduce((sum, k) => sum + ((debug[k] && Number(debug[k].attempts)) || 0), 0);
+    .reduce((sum, k) => sum + ((debug[k] && Number(debug[k].attempts)) || 0), 0)
+    + ((debug.runWorkflow && debug.runWorkflow.ai && Number(debug.runWorkflow.ai.used)) || 0)
+    + ((debug.generateAnswer && Number(debug.generateAnswer.ai_calls)) || 0);
   html += `<div class="card reply"><div class="step-head"><h2>What the user sees</h2>${replyChip}<span class="time">total ${secs(timings.total)}</span></div>
     <div class="small" style="margin-top:4px">Question: ${esc(question)} · AI calls so far: <b>${aiCalls}</b></div>
     <div class="msg">${replyText}</div></div>`;

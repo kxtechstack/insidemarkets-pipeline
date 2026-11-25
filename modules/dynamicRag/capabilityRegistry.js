@@ -74,7 +74,7 @@ const CAPABILITIES = [
     title: 'Search client data',
     description: 'Search the client data by meaning (Policy, Market Dynamics, Forward Outlook, Competitive Intelligence) and return the matching signals. Only signals the user can see in the tabs.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'no',
     data_access: ['client_data'],
     inputs: {
@@ -84,6 +84,8 @@ const CAPABILITIES = [
       date_to: { type: 'date', required: false },
       companies: { type: 'array_of_text', required: false, max: 20, note: 'company names from Step 5' },
       countries: { type: 'array_of_text', required: false, max: 20, note: 'places from Step 5 (standard names)' },
+      not_countries: { type: 'array_of_text', required: false, max: 20, note: 'places the user left out ("except Kuwait"), from Step 5' },
+      not_companies: { type: 'array_of_text', required: false, max: 20, note: 'companies the user left out ("except Lancôme"), from Step 5' },
       label: { type: 'text', required: false, max_chars: 80, note: 'name of this evidence set, e.g. "UAE retail"' },
     },
     output: 'EvidenceSet',
@@ -96,7 +98,7 @@ const CAPABILITIES = [
     title: 'Read exact records',
     description: 'Read signals directly from the database, newest or highest impact first. For "latest", "list", "this week", "competitor moves" questions.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'no',
     data_access: ['client_data'],
     inputs: {
@@ -105,6 +107,8 @@ const CAPABILITIES = [
       date_to: { type: 'date', required: false },
       companies: { type: 'array_of_text', required: false, max: 20 },
       countries: { type: 'array_of_text', required: false, max: 20, note: 'places from Step 5 (standard names)' },
+      not_countries: { type: 'array_of_text', required: false, max: 20, note: 'places the user left out, from Step 5' },
+      not_companies: { type: 'array_of_text', required: false, max: 20, note: 'companies the user left out, from Step 5' },
       impact: { type: 'array_of_text', required: false, allowed: ['Critical', 'High', 'Medium', 'Low'] },
       sub_category: { type: 'text', required: false, max_chars: 100 },
       order: { type: 'text', required: false, allowed: ['newest', 'impact'], note: 'default: newest' },
@@ -142,7 +146,7 @@ const CAPABILITIES = [
     title: 'Pull out facts',
     description: 'Pull out exact facts from the evidence: numbers, amounts, dates, launches, deals. Every fact keeps its source.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -159,7 +163,7 @@ const CAPABILITIES = [
     title: 'Summarise',
     description: 'Write short points about the evidence or earlier findings, each with its sources.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -177,7 +181,7 @@ const CAPABILITIES = [
     title: 'Compare',
     description: 'Compare 2 to 4 labelled evidence sets side by side, point by point. A point with no evidence stays empty.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -194,7 +198,7 @@ const CAPABILITIES = [
     title: 'Group related items',
     description: 'Group related items. Uses the groups that already exist first (Market Dynamics card, Forward Outlook trend, CI card); the AI only groups and names what is left.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'sometimes',
     data_access: ['client_data'],
     inputs: {
@@ -210,7 +214,7 @@ const CAPABILITIES = [
     title: 'Find trends over time',
     description: 'Find repeated signals and change over time. A trend needs 2 or more sources on different dates; otherwise it is a one-off event.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -227,7 +231,7 @@ const CAPABILITIES = [
     title: 'Find gaps',
     description: 'Find unmet needs and market gaps from earlier results. Always marked as interpretation, never as fact.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -243,7 +247,7 @@ const CAPABILITIES = [
     title: 'Find opportunities',
     description: 'Suggest business opportunities from patterns, gaps and comparisons. Each one shows its evidence chain and is marked as a hypothesis.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -260,7 +264,7 @@ const CAPABILITIES = [
     title: 'Find risks',
     description: 'Find and rank risks (mostly Policy & Risk and competitor moves). Keeps the impact level already stored on each signal.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'yes',
     data_access: ['client_data'],
     inputs: {
@@ -291,7 +295,7 @@ const CAPABILITIES = [
     title: 'Check the evidence',
     description: 'Check that every finding has a real source, enough support and dates inside what the user asked; flag conflicts. Code first, AI only if needed.',
     offered_to_planner: true,
-    available: false,
+    available: true,
     uses_ai: 'sometimes',
     data_access: ['client_data'],
     inputs: {

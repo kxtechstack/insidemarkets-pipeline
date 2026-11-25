@@ -74,13 +74,88 @@ module.exports = {
   // Which row of the prompts table holds the Step 7 instruction for the AI.
   WORKFLOW_PROMPT_ID: 'dynamic_rag_build_workflow_v1',
 
+  // ── Step 9 (runWorkflow.js) ────────────────────────────────────────────
+  // The module ids of the four client-data modules (the same ids the news
+  // pipeline saves on every signal and every Qdrant point).
+  MODULE_IDS: {
+    policy: '777a2b2e-8bb2-44ef-a4f2-1c0c1e03b960',      // Policy & Risk
+    market: '55c5ee19-bfca-468b-81b3-b89ca4f303c8',      // Market Dynamics
+    outlook: '2eb989fd-0ea0-4320-b73a-f7eb8b970473',     // Forward Outlook
+    competitor: '5e953748-931d-4212-99e9-08c9a050cfef',  // Competitive Radar
+  },
+  // The Qdrant collection that holds the text of all four modules.
+  SEARCH_COLLECTION: process.env.POLICY_QDRANT_COLLECTION || 'policy_articles',
+  // A text piece less similar than this to the search words is not used
+  // (0 = unrelated, 1 = the same text). Tuned on real questions.
+  MIN_SEARCH_SCORE: Number(process.env.DR_MIN_SEARCH_SCORE) || 0.2,
+  // Places and companies are checked on each signal after the search, so
+  // a search with them reads this many times more pieces first (40 x 5).
+  SEARCH_WIDEN: Number(process.env.DR_SEARCH_WIDEN) || 5,
+  // A search reads page after page until it has 20 signals that pass every
+  // filter, the rest is too far from the question, or it has read this
+  // many text pieces (search by meaning) / signal rows per module (exact read).
+  SEARCH_MAX_PIECES: Number(process.env.DR_SEARCH_MAX_PIECES) || 600,
+  EXACT_READ_MAX_ROWS: Number(process.env.DR_EXACT_READ_MAX_ROWS) || 1000,
+  // A search naming a place or a company first reads which signals are
+  // tagged with it (newest first, at most this many per module), and
+  // searches by meaning among those.
+  TAGGED_MAX_SIGNALS: Number(process.env.DR_TAGGED_MAX_SIGNALS) || 2000,
+  // Step 9 part 2 — the AI jobs. Their prompts (public.prompts, DI – 5 … 12):
+  JOB_PROMPT_IDS: {
+    extract_facts: 'dynamic_rag_job_extract_facts_v1',
+    summarise: 'dynamic_rag_job_summarise_v1',
+    compare: 'dynamic_rag_job_compare_v1',
+    cluster: 'dynamic_rag_job_group_v1',
+    identify_patterns: 'dynamic_rag_job_patterns_v1',
+    identify_gaps: 'dynamic_rag_job_gaps_v1',
+    discover_opportunities: 'dynamic_rag_job_opportunities_v1',
+    analyse_risks: 'dynamic_rag_job_risks_v1',
+  },
+  AI_ITEM_CHARS: 300,          // letters of a signal's text shown to an AI job
+  AI_MAX_FINDINGS_IN: 20,      // earlier findings given to one AI job
+  CLUSTER_AI_MIN: 4,           // grouping asks the AI only when this many items are in no existing group
+  ANSWER_AI_CALLS: 1,          // AI calls kept for the answer (Step 10)
+  AI_CALL_TIMEOUT_MS: 40000,   // one AI call
+  // news about a period that is over may be written this many days after it
+  // ends; kept only when its text names the period ("Q3 2026")
+  REPORTED_LATER_DAYS: 60,
+  // the evidence check says "sufficient" from this many supported points
+  MIN_SUPPORTED: 3,
+  // Step 10 — the answer. Its prompt (public.prompts, DI – 13. Write the Answer):
+  ANSWER_PROMPT_ID: 'dynamic_rag_answer_v1',
+  // the fixed words of the answer (written by code, not by the AI)
+  ANSWER_TEXT: {
+    nothing_found: 'I could not find news in your data that answers this question. The searches below found nothing, so I am not giving an answer that the news does not support.',
+    list_intro: 'Here are the {n} news items from your data that match the question, with their sources.',
+    no_news_for_heading: 'No news found for this.',
+    no_news_cell: 'no news found',
+    evidence_title: 'How good the evidence is',
+    limits_title: 'Not found or not done',
+    sources_title: 'Sources',
+    conflicts: 'Some sources give different numbers for the same thing (see the facts)',
+    compare_by_code: 'The AI could not write the comparison, so the main news of each side is shown side by side instead',
+    compare_by_code_point: 'main news found',
+    confidence: {
+      good: 'Good evidence: several news items support the main points.',
+      some: 'Some evidence: the answer rests on a few news items, so read it with care.',
+      not_enough: 'Not enough evidence in your data to answer this.',
+    },
+  },
+  // The whole run of one question may take at most this long.
+  RUN_TIME_LIMIT_MS: Number(process.env.DR_RUN_TIME_LIMIT_MS) || 90 * 1000,
+  // Letters of a signal's summary passed on to the analysis jobs.
+  ITEM_TEXT_CHARS: 600,
+
   // ── Step 8 (validateWorkflow.js) ───────────────────────────────────────
   // What the user sees when the list of jobs breaks a rule (nothing runs).
   PLAN_FAILED_MESSAGE:
     'I could not put together a safe way to answer this question. Please try asking it in a simpler way, ' +
     'for example one company, market or topic at a time.',
   // true = Step 8 also refuses jobs whose real code (Step 9) is not ready.
-  // Off until Step 9 is built; then switch it on.
+  // 25 Nov: every job the planner can use is built; the two that are not
+  // (filter_data, forecast) are never planned. Kept off on purpose: if one
+  // ever came, Step 9 marks it "not built" (recorded) and the rest of the
+  // question is still answered, instead of refusing the whole question.
   REQUIRE_READY_JOBS: false,
 
   // ── Test tools ─────────────────────────────────────────────────────────

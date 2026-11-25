@@ -172,6 +172,31 @@ function checkFilters(task, understood, today, problems) {
   for (const c of i.companies || []) {
     if (!okCompanies.includes(plain(c))) problems.push(`${task.task_id}: company "${c}" is not from Step 5 or the client list`);
   }
+  if (searches) checkLeftOut(task, understood, problems);
+}
+
+// What the user LEFT OUT (Step 5 "excluded", "GCC trends except Kuwait",
+// 24 Nov): no search looks there or names it, and every search carries
+// exactly the left-out places / companies so Step 9 drops that news.
+const PLACE_FORMS = (() => { try { return require('../placeNames').PLACES || {}; } catch (e) { return {}; } })();
+function leftOutNamedIn(text, ex) {
+  const w = ` ${plain(text)} `;
+  return [...ex.places, ...ex.companies].filter((n) => [n, ...(ex.places.includes(n) ? (PLACE_FORMS[n] || []) : [])]
+    .some((f) => plain(f).length >= 2 && w.includes(` ${plain(f)} `)));
+}
+function checkLeftOut(task, understood, problems) {
+  const i = task.inputs || {};
+  const e = understood.excluded || {};
+  const ex = { places: e.places || [], companies: e.companies || [] };
+  for (const c of i.countries || []) if (ex.places.some((x) => plain(x) === plain(c))) problems.push(`${task.task_id}: looks in "${c}", which the user left out`);
+  for (const c of i.companies || []) if (ex.companies.some((x) => plain(x) === plain(c))) problems.push(`${task.task_id}: looks at "${c}", which the user left out`);
+  const sameSet = (a, b) => a.length === b.length && a.every((x) => b.some((y) => plain(x) === plain(y)));
+  if (!sameSet(i.not_countries || [], ex.places)) problems.push(`${task.task_id}: places left out [${(i.not_countries || []).join(', ')}] are not the Step 5 ones [${ex.places.join(', ')}]`);
+  if (!sameSet(i.not_companies || [], ex.companies)) problems.push(`${task.task_id}: companies left out [${(i.not_companies || []).join(', ')}] are not the Step 5 ones [${ex.companies.join(', ')}]`);
+  if (i.query) {
+    const hit = leftOutNamedIn(i.query, ex);
+    if (hit.length) problems.push(`${task.task_id}: the search "${i.query}" names ${hit.join(', ')}, which the user left out`);
+  }
 }
 
 // ── The run order: batches of jobs that can run at the same time ─────────
@@ -214,6 +239,14 @@ function wordSidesNotAsked(sides, understood, question) {
 
 function checkSides(task, tasks, problems, understood = {}, question = '') {
   const sides = (task.inputs && task.inputs.sides) || [];
+  {
+    const e = (understood && understood.excluded) || {};
+    const ex = { places: e.places || [], companies: e.companies || [] };
+    for (const x of sides) {
+      const hit = leftOutNamedIn(x && x.label, ex);
+      if (hit.length) problems.push(`${task.task_id}: the side "${x.label}" is ${hit.join(', ')}, which the user left out`);
+    }
+  }
   for (const x of wordSidesNotAsked(sides, understood, question)) {
     problems.push(`${task.task_id}: the side "${x.label}" is not something the question compares ("${x.missing.join(' ')}" was never typed)`);
   }
@@ -409,4 +442,4 @@ function validateWorkflow(workflow, understood, plan) {
   };
 }
 
-module.exports = { validateWorkflow, runBatches, refsOf, checkSides };
+module.exports = { validateWorkflow, runBatches, refsOf, checkSides, checkLeftOut };

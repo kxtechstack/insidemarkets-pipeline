@@ -17,7 +17,8 @@
  *   Step 6  planTasks.js         work plan: what info each goal needs + what analysis (AI + code checks)
  *   Step 7  buildWorkflow.js     the numbered list of jobs (searches + analysis), in order (AI + code)
  *   Step 8  validateWorkflow.js  checks that list before anything runs; approved list + run order (code only)
- *   Step 8+ not built yet
+ *   Step 9  runWorkflow.js       runs the jobs: the searches, then the AI jobs (code + AI)
+ *   Step 10 generateAnswer.js    the answer the user reads, with sources (code + one AI call), saved in dr_messages
  *
  * Helpers (not steps):
  *   capabilityRegistry.js the job list the planner may use (Steps 6-9)
@@ -27,8 +28,9 @@
  *   chatTracing.js       sends a step-by-step record of each question to
  *                        Phoenix (only when .env has PHOENIX_COLLECTOR_ENDPOINT)
  *
- * Reply on success : { ok: true, request_id, conversation_id, status, answer, debug }
- *     status = accept         -> answer is null for now (later steps will fill it)
+ * Reply on success : { ok: true, request_id, conversation_id, status, answer, answer_details, debug }
+ *     status = accept         -> answer is the whole answer (markdown); answer_details its parts,
+ *                                sources, evidence and limits (null when a test stops early)
  *     status = reject         -> answer is a polite message
  *     status = clarification  -> answer is one question back to the user
  * Reply on problem : { ok: false, error: { code, message }, failed_step, debug }
@@ -53,6 +55,8 @@ const { understandQuery } = require('./understandQuery');   // Step 5
 const { planTasks } = require('./planTasks');               // Step 6
 const { buildWorkflow } = require('./buildWorkflow');       // Step 7
 const { validateWorkflow } = require('./validateWorkflow'); // Step 8
+const { runWorkflow } = require('./runWorkflow');           // Step 9 (the searches and the AI jobs)
+const { generateAnswer, saveAnswer } = require('./generateAnswer'); // Step 10 (the answer)
 const { traceChat, traceStep, traceChatResult } = require('./chatTracing'); // Phoenix records (off unless PHOENIX_COLLECTOR_ENDPOINT is set)
 
 function registerDynamicRagRoute(app) {
@@ -96,15 +100,25 @@ async function handleChat(req, res) {
       `| ${Date.now() - startedAt}ms`
     );
 
-    const reply = (status, answer) => {
+    const reply = async (status, answer, details = null) => {
       debug.timings.total = Date.now() - startedAt;
       traceChatResult(status, answer, request.conversation_id);
+      // a reject, a question back or a refused plan is saved as the chat's
+      // reply too (the answer of Step 10 saves itself)
+      if (!details && answer && typeof answer === 'string' && status !== 'stopped_for_test') {
+        await saveAnswer(request, status, answer, null);
+      }
       return res.json({
         ok: true,
         request_id: request.request_id,
         conversation_id: request.conversation_id,
         status,
         answer,
+        // Step 10: the parts, sources, evidence and limits of the answer (for the screen)
+        answer_details: details ? {
+          status: details.status, summary: details.summary, sections: details.sections, confidence: details.confidence,
+          limits: details.limits, sources: details.sources,
+        } : null,
         debug,
       });
     };
@@ -134,7 +148,7 @@ async function handleChat(req, res) {
     );
 
     // Reject or clarification: the chat stops here and replies.
-    // (Saving this reply in the chat history comes with Step 10.)
+    // (This reply is saved in the chat history by reply().)
     if (validation.status !== 'accept') return reply(validation.status, validation.message);
 
     if (stopAfterStep === 3) return reply('accept', null);
@@ -194,9 +208,35 @@ async function handleChat(req, res) {
       return reply('plan_failed', PLAN_FAILED_MESSAGE);
     }
 
-    // ── Step 9 onwards will be added here ──────────────────────────
+    if (stopAfterStep === 8) return reply('accept', null);
 
-    return reply('accept', null);
+    // ── Step 9: run the jobs (the searches, then the AI jobs) ──────
+    // The client is the logged-in client from Step 1, never from the plan.
+    currentStep = 'runWorkflow';
+    const run = await traceStep('Step 9 – runWorkflow', { checkedPlan, workflow },
+      () => runWorkflow(checkedPlan, workflow, understood, request));
+    stepDone('runWorkflow', run);
+    console.log(
+      `[DynamicRAG] runWorkflow ${run.status} | done=${run.counts.done} failed=${run.counts.failed} ` +
+      `blocked=${run.counts.blocked} skipped=${run.counts.skipped} notBuilt=${run.counts.not_built} signals=${run.counts.signals} ` +
+      `aiCalls=${run.ai.used}/${run.ai.budget} ` +
+      `| ${Date.now() - startedAt}ms`
+    );
+
+    if (stopAfterStep === 9) return reply('accept', null);
+
+    // ── Step 10: the answer the user reads (code + one AI call) ────
+    currentStep = 'generateAnswer';
+    const answer = await traceStep('Step 10 – generateAnswer', { run },
+      () => generateAnswer(run, workflow, understood, request));
+    stepDone('generateAnswer', answer);
+    console.log(
+      `[DynamicRAG] generateAnswer ${answer.status} | evidence=${answer.confidence.level} by=${answer.summary_by} ` +
+      `sources=${answer.sources.length} aiCalls=${answer.ai_calls} check=${answer.check.passed} saved=${answer.saved} ` +
+      `| ${Date.now() - startedAt}ms`
+    );
+
+    return reply('accept', answer.answer_text, answer);
 
   } catch (err) {
     debug.timings.total = Date.now() - startedAt;

@@ -879,6 +879,99 @@ function placeInCompany(item, question, checkCapitals) {
   return null;
 }
 
+// ── What the user LEFT OUT ("GCC trends except Kuwait") ──────────────────
+// Govind's doc (Step 5, constraint types): "Excluded countries or
+// entities". Before 24 Nov nothing read this: the AI could even put Kuwait
+// in places, so Kuwait was searched. Code finds it, with a small fixed set
+// of grammar words (not a word list about markets):
+//   strong: except (for), excluding, exclude(s/d), other than, apart from,
+//           not including, leaving / leave out, but not
+//   weak:   not, without  -> only a place or company name right after counts
+//           ("not growing", "without discounts" are not exclusions)
+// The list after the word runs to the end of the sentence or to the next
+// grammar word ("except Kuwait in 2025" -> Kuwait), split at , and or &.
+const EXCLUDE_RE = /\b(except\s+for|except|excluding|exclude[sd]?|other\s+than|apart\s+from|not\s+including|leaving\s+out|leave\s+out|but\s+not|not|without)\b/giu;
+const WEAK_EXCLUDE = new Set(['not', 'without']);
+const EXCLUDE_STOP = new Set(['in', 'for', 'during', 'since', 'from', 'with', 'by', 'on', 'at', 'about', 'over', 'between',
+  'within', 'across', 'under', 'after', 'before', 'until', 'till', 'what', 'which', 'how', 'who', 'when', 'where', 'why',
+  'is', 'are', 'was', 'were', 'be', 'do', 'does', 'did', 'show', 'give', 'tell', 'list', 'compare', 'vs', 'versus', 'than',
+  'to', 'please', 'pls', 'just', 'only', 'but', 'also', 'yet', 'so', 'then', 'if', 'that', 'this', 'these', 'those',
+  'should', 'could', 'would', 'can', 'will', 'whose', 'whether', 'growing', 'doing']);
+const EXCLUDE_MAX_WORDS = 8;
+function excludedItems(question) {
+  const q = String(question || '');
+  const out = [];
+  let m;
+  EXCLUDE_RE.lastIndex = 0;
+  while ((m = EXCLUDE_RE.exec(q)) !== null) {
+    const word = m[1].toLowerCase().replace(/\s+/g, ' ');
+    const after = q.slice(m.index + m[0].length).split(/[.;:?!()\n]/)[0];
+    const toks = after.split(/\s+/).filter(Boolean);
+    const kept = [];
+    for (const tok of toks) {
+      const bare = tok.toLowerCase().replace(/[^\p{L}\p{N}&'-]/gu, '');
+      if (kept.length && EXCLUDE_STOP.has(bare)) break;
+      if (!kept.length && EXCLUDE_STOP.has(bare)) break;
+      kept.push(tok);
+      if (kept.length >= EXCLUDE_MAX_WORDS) break;
+    }
+    const items = kept.join(' ').split(/\s*(?:,|\band\b|\bor\b|\bnor\b|&|\/)\s*/i)
+      .map((x) => x.replace(/^(?:the)\s+/i, '').replace(/[^\p{L}\p{N}'’&.-]+$/u, '').trim())
+      .filter((x) => x.length >= 2);
+    const start = m.index;
+    const end = m.index + m[0].length + kept.join(' ').length + (after.length - after.trimStart().length);
+    for (const text of items) out.push({ word, text, weak: WEAK_EXCLUDE.has(word), start, end });
+  }
+  return out;
+}
+// The places a piece of text names (1 to 3 words at a time, and place
+// adjectives: "Korean").
+function placesNamedInText(text) {
+  const raw = String(text || '').split(/\s+/).map((w) => w.replace(/[^\p{L}\p{N}'-]/gu, '')).filter(Boolean);
+  const found = new Set();
+  for (let size = 3; size >= 1; size -= 1) {
+    for (let i = 0; i + size <= raw.length; i += 1) {
+      const piece = raw.slice(i, i + size).join(' ');
+      if (piece.length < 2) continue;
+      const std = standardPlace(piece);
+      if (STANDARD_PLACES.has(std) && (piece.length > 2 || piece === piece.toUpperCase())) found.add(std);
+      if (size === 1) { const adj = placeFromAdjective(piece); if (adj) found.add(adj); }
+    }
+  }
+  return found;
+}
+// What each left-out item is: a place, a company, a date or something else.
+// A place that the question ALSO names outside the "except" part ("UAE
+// trends except Dubai": Dubai is stored as UAE) cannot be left out — the
+// news is stored by country — so it is recorded, not used.
+function readExclusions(question, companyList, checkCapitals) {
+  const items = excludedItems(question);
+  const outside = items.reduce((t, x) => t.slice(0, x.start) + ' '.repeat(Math.max(0, x.end - x.start)) + t.slice(x.end), String(question || ''));
+  const named = placesNamedInText(outside);
+  const result = { places: [], companies: [], dates: [], other: [], not_used: [] };
+  const add = (list, v) => { if (!list.some((x) => normalise(x) === normalise(v))) list.push(v); };
+  for (const it of items) {
+    if (it.text.split(/\s+/).some((w) => OWN_WORDS.has(w.toLowerCase()))) continue;   // "other than us"
+    const isDate = preprocessText(it.text, [], [], { fixWords: false }).time_expressions.length > 0;
+    if (isDate && !it.weak) { add(result.dates, it.text); continue; }
+    const placeHere = placesNamedInText(it.text);
+    const p = placeKind(it.text);
+    const std = p.kind === 'place' && p.known ? p.standard : (placeHere.size === 1 ? [...placeHere][0] : null);
+    if (std) {
+      if (named.has(std)) { add(result.not_used, `${it.text} (stored as ${std}, which the question also asks for)`); continue; }
+      add(result.places, std);
+      continue;
+    }
+    const listed = matchCompany(it.text, companyList);
+    if (listed && listed.type !== 'own_company') { add(result.companies, listed.name); continue; }
+    const capital = checkCapitals ? typedWithCapital(it.text, question) : /\p{Lu}/u.test(it.text);
+    if (capital) { add(result.companies, it.text); continue; }
+    if (!it.weak) add(result.other, it.text);
+  }
+  return result;
+}
+const sameName = (a, b) => normalise(a) === normalise(b);
+
 // `typed`: { original, spellingFixed } from Step 2 — the question exactly as
 // the user typed it, and the spelling fixes ("frgrance -> fragrance").
 function checkForm(form, question, names, typed = {}) {
@@ -1083,13 +1176,47 @@ function checkForm(form, question, names, typed = {}) {
     }
   }
 
+  // What the user LEFT OUT never stays in places / companies / topics,
+  // also when the AI put it there or a listed name was found in the
+  // question ("all competitors except Lancôme").
+  const ex = skipChecks ? { places: [], companies: [], dates: [], other: [], not_used: [] }
+    : readExclusions(question, companyList, true);
+  let placesKept = places;
+  let companiesKept = companiesOut;
+  let topicsKept = topics;
+  if (ex.places.length || ex.companies.length || ex.other.length) {
+    placesKept = places.filter((pl) => {
+      if (!ex.places.some((x) => sameName(x, pl))) return true;
+      removed.push({ field: 'places', value: pl, why: 'the user left it out ("except" / "not"): excluded' });
+      return false;
+    });
+    companiesKept = companiesOut.filter((c) => {
+      const n = (c.matched && c.matched.name) || c.name;
+      if (!ex.companies.some((x) => sameName(x, n) || sameName(x, c.name) || (c.matched && matchCompany(x, companyList) && matchCompany(x, companyList).name === c.matched.name))) return true;
+      removed.push({ field: 'companies', value: n, why: 'the user left it out ("except" / "not"): excluded' });
+      return false;
+    });
+    const leftOutWords = [...ex.places, ...ex.companies, ...ex.other];
+    topicsKept = topics.filter((t) => {
+      if (!leftOutWords.some((x) => sameName(x, t))) return true;
+      removed.push({ field: 'topics', value: t, why: 'the user left it out ("except" / "not"): excluded' });
+      return false;
+    });
+  }
+  for (const x of ex.not_used) removed.push({ field: 'excluded', value: x, why: 'cannot be left out: news is stored by country' });
+  const placesNotInListKept = placesNotInList.filter((x) => placesKept.includes(x));
+
   const { cut_by_limit: cutByLimit, ...rest } = form;   // already recorded in removed
   const checked = {
     ...rest,
-    companies: companiesOut,
-    places,
-    places_not_in_list: placesNotInList,
-    topics,
+    companies: companiesKept,
+    places: placesKept,
+    places_not_in_list: placesNotInListKept,
+    topics: topicsKept,
+    products: (rest.products || []).filter((t) => !ex.other.some((x) => sameName(x, t))),
+    // what the user left out ("except Kuwait"): every search carries it, so
+    // Step 9 drops that news even inside a region (GCC minus Kuwait)
+    excluded: { places: ex.places, companies: ex.companies, dates: ex.dates, other: ex.other },
     metrics: withoutDates('metrics'),
     // the question is about the client's competitors in general (search all of them)
     all_competitors: ownCompetitors,
@@ -1165,8 +1292,16 @@ async function understandQuery(request, cleaned, options = {}) {
 
   // A date we could not read is never guessed: a wrong date gives a wrong
   // answer that looks right. Ask the user first (this costs no AI call).
-  const time = resolveTime(cleaned.time_expressions, today);
-  const unclear = unreadDates(cleaned, time);
+  // A date the user LEFT OUT ("2025 except December") is not a period to
+  // search on its own. The rest of the period is searched; the left-out
+  // part is still inside it (a period cannot be cut out yet) and the
+  // result says so.
+  const leftOutDates = excludedItems(question).filter((x) => !x.weak)
+    .filter((x) => preprocessText(x.text, [], [], { fixWords: false }).time_expressions.length > 0)
+    .map((x) => normalise(x.text));
+  const timeExpressions = (cleaned.time_expressions || []).filter((t) => !leftOutDates.includes(normalise(t.text)));
+  const time = resolveTime(timeExpressions, today);
+  const unclear = unreadDates({ ...cleaned, time_expressions: timeExpressions }, time);
   if (unclear.length) {
     console.log(`[DynamicRAG] understandQuery: could not read the date (${unclear.join(', ')}), asking the user back`);
     return askBack(TIME_UNCLEAR_MESSAGE.replace('{words}', unclear.join(', ')), names, {
@@ -1261,6 +1396,9 @@ async function understandQuery(request, cleaned, options = {}) {
     checks_skipped,
     attempts,
   };
+  for (const d of (checked.excluded && checked.excluded.dates) || []) {
+    removed.push({ field: 'time', value: d, why: 'the user left this period out: it is not searched on its own, but it is still inside the searched dates (a period cannot be cut out yet)' });
+  }
 
   // A question that names only a time ("what changed this month vs last
   // month?", "compare January and February", "what happened on 1 March?")
@@ -1304,6 +1442,8 @@ function addComparisonGoal(result, questionText) {
 
 module.exports = {
   understandQuery,
+  excludedItems,
+  readExclusions,
   addComparisonGoal,
   // parts, exported for the test file
   GOAL_TYPES,

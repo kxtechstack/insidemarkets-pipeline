@@ -96,7 +96,8 @@ async function ask(body) {
   // Steps 1-2 use no AI. Up to Step 3 = 1 AI call, up to Step 5 = 2,
   // up to Step 6 = 3, the full chat = 4 (Steps 3, 5, 6 and 7).
   const stop = Number(body && body.stopAfterStep) || null;
-  const aiCalls = stop === 1 || stop === 2 ? 0 : stop === 3 ? 1 : stop === 5 ? 2 : stop === 6 ? 3 : 4;
+  // (25 Nov: the full chat now also runs Steps 9 and 10 — up to about 8 AI calls)
+  const aiCalls = stop === 1 || stop === 2 ? 0 : stop === 3 ? 1 : stop === 5 ? 2 : stop === 6 ? 3 : stop === 7 || stop === 8 ? 4 : 8;
   const isValidRequest = body && typeof body.question === 'string' && body.question.trim() && body.userId && body.clientId;
   if (aiCalls > 0 && isValidRequest) await waitForAiSlot(aiCalls);
 
@@ -1012,6 +1013,41 @@ async function testStep5() {
     topics: [], metrics: [], about_own_business: false, dashboard_request: false, constraints: [], implied: [],
     answer_format: '', ...extra,
   });
+  // ---- 24 Nov: what the user LEFT OUT ("except", Govind's doc: excluded countries or entities) ----
+  for (const [q, f, want] of [
+    ['GCC beauty trends except Kuwait', { places: ['GCC', 'Kuwait'], topics: ['beauty trends'] }, { places: ['GCC'], exPlaces: ['Kuwait'] }],
+    ['Trends in the GCC excluding Kuwait and Bahrain in 2025', { places: ['GCC', 'Kuwait', 'Bahrain'] }, { places: ['GCC'], exPlaces: ['Kuwait', 'Bahrain'] }],
+    ['Middle East news, not Saudi', { places: ['Middle East', 'Saudi Arabia'] }, { places: ['Middle East'], exPlaces: ['Saudi Arabia'] }],
+    ['Apart from UAE, which GCC markets are growing?', { places: ['UAE', 'GCC'] }, { places: ['GCC'], exPlaces: ['United Arab Emirates'] }],
+    ['Everything except the Korean market', { places: ['South Korea'] }, { places: [], exPlaces: ['South Korea'] }],
+    ['What are all competitors doing except Shiseido?', { companies: ['competitors'] }, { companies: [], exCompanies: ['Shiseido'], all: true }],
+    ['Compare Dior and Chanel, but not Sephora', { companies: ['Dior', 'Chanel', 'Sephora'] }, { companies: ['Dior', 'Chanel'], exCompanies: ['Sephora'] }],
+    ['Beauty trends except skincare in India', { places: ['India'], topics: ['beauty trends', 'skincare'] }, { places: ['India'], exOther: ['skincare'], topics: ['beauty trends'] }],
+    // cannot be left out: Dubai is stored as UAE, which the question asks for (recorded)
+    ['UAE trends except Dubai', { places: ['UAE', 'Dubai'] }, { places: ['United Arab Emirates'] }],
+    // must NOT change
+    ['Why is Shiseido not growing in UAE?', { companies: ['Shiseido'], places: ['UAE'] }, { places: ['United Arab Emirates'], companies: ['Shiseido'] }],
+    ['Skincare trends without discounts', { topics: ['skincare trends', 'discounts'] }, { topics: ['skincare trends', 'discounts'] }],
+    ['Is UAE not just a good market but also a hub?', { places: ['UAE'] }, { places: ['United Arab Emirates'] }],
+    ['competitors other than us', { companies: ['competitors'] }, { all: true }],
+    ['compare uae and ksa', { places: ['UAE', 'KSA'] }, { places: ['United Arab Emirates', 'Saudi Arabia'] }],
+  ]) {
+    await check(`Left out: "${q}" -> places ${JSON.stringify(want.places || [])}, left out ${JSON.stringify([...(want.exPlaces || []), ...(want.exCompanies || []), ...(want.exOther || [])])}`, async () => {
+      const r = understand.checkForm(form(f), q, names, { original: q });
+      const c = r.checked;
+      const ex = c.excluded || {};
+      const eq = (a, b) => JSON.stringify(a || []) === JSON.stringify(b || []);
+      const okAll = eq(c.places, want.places || []) && eq(ex.places, want.exPlaces) && eq(ex.companies, want.exCompanies) && eq(ex.other, want.exOther) &&
+        (!want.companies || eq(c.companies.map((x) => x.name), want.companies)) && (!want.topics || eq(c.topics, want.topics)) &&
+        (want.all === undefined || c.all_competitors === want.all);
+      return okAll || { places: c.places, companies: c.companies.map((x) => x.name), topics: c.topics, all: c.all_competitors, excluded: ex };
+    });
+  }
+  await check('Left out: "Skincare news in 2025 except December" -> December is a left-out date (not searched on its own)', async () => {
+    const r = understand.readExclusions('Skincare news in 2025 except December', understand.buildCompanyList(names), true);
+    return JSON.stringify(r.dates) === '["December"]' || r;
+  });
+
   await check('Check: a place the user did not say is removed', async () => {
     const r = understand.checkForm(form({ places: ['UAE', 'Qatar'] }), 'compare retail in UAE', names);
     return (r.checked.places.join() === 'United Arab Emirates' &&
@@ -2075,12 +2111,13 @@ async function testShow(mode) {
   const results = [];
   for (let i = 0; i < items.length; i++) {
     const t = items[i];
-    let r = await good(t.q);
+    // the big tests check Steps 1 to 8 (Steps 9 and 10 are read in the "real" report)
+    let r = await good(t.q, { stopAfterStep: 8 });
     const busy = !r.json || (r.json.ok === false && ['AI_UNAVAILABLE', 'SERVER_ERROR'].includes(r.json.error && r.json.error.code));
     if (busy) {
       console.log('  (AI busy — waiting 60 s and trying this question once more)');
       await sleep(60000);
-      r = await good(t.q);
+      r = await good(t.q, { stopAfterStep: 8 });
     }
     const verdict = judge(t, r.json);
     printOne(i, t, r.status, r.json, verdict);
@@ -2691,6 +2728,28 @@ function judgeWorkflow(u, p, w) {
   const ids = tasks.map((t) => t.task_id);
   const LIMITS = registry.RUN_LIMITS;
   const searchJobs = ['retrieve_data', 'structured_search'];
+
+  // 0. (24 Nov) what the user LEFT OUT ("GCC trends except Kuwait"): no
+  // search looks there or names it, every search carries exactly the
+  // left-out places / companies, and no compare side is a left-out thing
+  {
+    const pl = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const exP = ((u.excluded && u.excluded.places) || []);
+    const exC = ((u.excluded && u.excluded.companies) || []);
+    const forms = (n) => [n, ...(exP.includes(n) ? (require('../modules/placeNames').PLACES[n] || []) : [])];
+    const names = (text) => [...exP, ...exC].filter((n) => forms(n).some((f) => pl(f).length >= 2 && ` ${pl(text)} `.includes(` ${pl(f)} `)));
+    const same = (a, b) => a.length === b.length && a.every((x) => b.some((y) => pl(x) === pl(y)));
+    for (const t of tasks) {
+      const i = t.inputs || {};
+      if (searchJobs.includes(t.capability)) {
+        for (const c of i.countries || []) if (exP.some((x) => pl(x) === pl(c))) serious.push(`${t.task_id}: looks in ${c}, which the user left out`);
+        for (const c of i.companies || []) if (exC.some((x) => pl(x) === pl(c))) serious.push(`${t.task_id}: looks at ${c}, which the user left out`);
+        if (!same(i.not_countries || [], exP) || !same(i.not_companies || [], exC)) serious.push(`${t.task_id}: the left-out places / companies are not the Step 5 ones`);
+        if (i.query && names(i.query).length) serious.push(`${t.task_id}: the search "${i.query}" names ${names(i.query).join(', ')}, which the user left out`);
+      }
+      if (t.capability === 'compare') for (const x of i.sides || []) if (names(x.label).length) serious.push(`${t.task_id}: the side "${x.label}" was left out by the user`);
+    }
+  }
 
   // 1. every job is a real job the planner may use, with its required inputs
   tasks.forEach((t, i) => {
@@ -4168,6 +4227,53 @@ async function testStep7() {
     }
   }
 
+  // ---- 24 Nov: what the user left out, Steps 7 and 8 + the checker ----
+  {
+    const exU = (u0, ex) => ({ ...und(u0), excluded: { places: [], companies: [], dates: [], other: [], ...ex } });
+    for (const [q, u, ai, want] of [
+      ['GCC beauty trends except Kuwait', exU({ primary_goal: 'trends', places: ['GCC'], topics: ['beauty trends'], industries: [] }, { places: ['Kuwait'] }),
+        [['GCC beauty trends excluding Kuwait', null], ['Kuwait and GCC beauty market', null]], (wf) => wf.tasks.filter((t) => t.inputs.query).every((t) => !/kuwait|exclud/i.test(t.inputs.query) && JSON.stringify(t.inputs.not_countries) === '["Kuwait"]')],
+      ['What are all competitors doing except Lancôme?', exU({ primary_goal: 'competitor_analysis', all_competitors: true, companies: [] }, { companies: ['Lancôme'] }),
+        [['competitor moves', null], ['Lancôme launches', null]], (wf) => !JSON.stringify(wf.tasks.map((t) => [t.inputs.companies, t.inputs.sides, t.inputs.query])).includes('Lancôme')],
+      ['Compare GCC countries except Kuwait', exU({ primary_goal: 'comparison', places: ['Saudi Arabia', 'United Arab Emirates'] }, { places: ['Kuwait'] }),
+        [['Saudi market', 'Saudi Arabia'], ['UAE market', 'United Arab Emirates'], ['Kuwait market', 'Kuwait']], (wf) => sidesOf9(wf) === 'Saudi Arabia vs United Arab Emirates'],
+      ['Middle East news, not Saudi', exU({ primary_goal: 'list', places: ['Middle East'] }, { places: ['Saudi Arabia'] }),
+        [['middle east beauty news, ksa and uae retail', null]], (wf) => wf.tasks.filter((t) => t.inputs.query).every((t) => !/\bksa\b|saudi/i.test(t.inputs.query))],
+      // must NOT change: nothing left out -> no left-out inputs at all
+      ['GCC beauty trends', und({ primary_goal: 'trends', places: ['GCC'], topics: ['beauty trends'], industries: [] }),
+        [['GCC beauty trends', null]], (wf) => wf.tasks.every((t) => !t.inputs.not_countries && !t.inputs.not_companies)],
+    ]) {
+      await check(`Left out (Step 7): "${q}" -> never searched, never a side, every search carries it; Step 8 and the checker approve`, async () => {
+        const wf = wfOf(u, q, ai.map(([words, side]) => ({ for: ['IR1'], words, side })));
+        const uq = { ...u, question_text: q };
+        return (want(wf) && ok(uq, wf) === true && step8(uq, wf).status === 'approved') ||
+          { tasks: wf.tasks.map((t) => `${t.task_id} ${t.capability} ${JSON.stringify(t.inputs).slice(0, 200)}`), judge: ok(uq, wf), s8: step8(uq, wf).problems };
+      });
+    }
+    // Step 8 AND the checker refuse a search that ignores what was left out
+    const v = require('../modules/dynamicRag/validateWorkflow');
+    const uK = exU({ primary_goal: 'trends', places: ['GCC'], industries: [] }, { places: ['United Arab Emirates'] });
+    const good = { query: 'gcc beauty trends', modules: ['policy', 'market', 'outlook', 'competitor'], countries: ['GCC'], not_countries: ['United Arab Emirates'], label: 'x' };
+    for (const [name, inputs, refused] of [
+      ['looks in the left-out place', { ...good, countries: ['United Arab Emirates'] }, true],
+      ['does not carry the left-out place', { ...good, not_countries: undefined }, true],
+      ['names it in the words ("uae")', { ...good, query: 'gcc and uae beauty trends' }, true],
+      ['carries a place nobody left out', { ...good, not_countries: ['United Arab Emirates', 'Qatar'] }, true],
+      ['everything right (must NOT be refused)', good, false],
+    ]) {
+      await check(`Left out (Step 8 + checker): a search that ${name} -> ${refused ? 'refused by both' : 'fine for both'}`, async () => {
+        const clean = JSON.parse(JSON.stringify(inputs));
+        const wf = { question_text: 'GCC beauty trends except UAE', ai_budget: 11, counts: { tasks: 2, searches: 1, ai_jobs: 1 }, goals_left_out: [], tasks: [
+          { task_id: 'T1', capability: 'retrieve_data', inputs: clean, depends_on: [], for_requirements: ['IR1'] }] };
+        const probs = [];
+        v.checkLeftOut(wf.tasks[0], uK, probs);
+        const j = judgeWorkflow({ ...uK, question_text: wf.question_text }, { requirements: [] }, wf).serious.some((x) => /left out|left-out/.test(x));
+        return ((probs.length > 0) === refused && j === refused) || { probs, judge: j };
+      });
+    }
+  }
+
+
   // ---- round 8 (20 Nov, from the v9/v10 reports) ----
   await check('Sides: "Compare online and stores in Kuwait" with NO AI sides ("online store ..." / "store ...") -> sides "online" and "stores", compared, approved', async () => {
     const q = 'Compare online and stores in Kuwait and find opportunities';
@@ -4351,7 +4457,7 @@ async function testStep7() {
   for (const t of STEP7_QUESTIONS) {
     const q = fill(t.q);
     await check(`workflow | ${q}`, async () => {
-      const r = await good(q);
+      const r = await good(q, { stopAfterStep: 8 });
       if (r.status !== 200 || !r.json) return { status: r.status, body: r.json };
       const d = r.json.debug || {};
       if (!d.buildWorkflow) return { status: r.json.status, answer: r.json.answer, note: 'Step 7 did not run', failed: r.json.failed_step };
@@ -4508,9 +4614,9 @@ async function testStep8() {
     const all = batches.flat().length === wf.tasks.length;
     return (okOrder && okSize && all) || batches;
   });
-  await check('Jobs not ready yet (Step 9) are listed, but do not stop the plan while Step 9 is not built', async () => {
+  await check('Every job of a normal plan is built now (Step 9, 25 Nov): nothing listed as not ready, the plan is approved', async () => {
     const v = verdict(base());
-    return (v.status === 'approved' && v.not_ready.includes('retrieve_data')) || v;
+    return (v.status === 'approved' && v.not_ready.length === 0) || v;
   });
   await check('Step 8 uses no AI and does not change the plan', async () => {
     const b = base();
@@ -4695,6 +4801,941 @@ async function testBig7(bank = 'old') {
 // ═════════════════════════════════════════════════════════════════════════
 // JOB LIST — capabilityRegistry.js  (no server, no AI)
 // ═════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
+// STEP 9 — runWorkflow.js (part 1: the runner and the two search jobs)
+// Fake data, no server, no AI, no database: the real code reads through a
+// fake "store". `9 real` (below) checks the searches on the real data.
+// ═════════════════════════════════════════════════════════════════════════
+function fakeStep9Store(opts = {}) {
+  const C1 = 'client-1';
+  const C2 = 'client-2';
+  const { MODULE_IDS } = require('../modules/dynamicRag/chatConfig');
+  const rows = {
+    policy_signals: [
+      { id: 'p1', client_id: C1, article_id: 'a1', signal_title: 'UAE bans parabens in cosmetics', summary: 'New rule in the UAE.', country: 'United Arab Emirates', source_published_date: '2025-03-10T08:00:00Z', impact_level: 'High', source_article_url: 'https://x/1' },
+      { id: 'p2', client_id: C1, article_id: 'a2', signal_title: 'Kuwait labelling rule for imports', summary: 'Kuwait asks for Arabic labels.', country: 'Kuwait', source_published_date: '2025-04-01T08:00:00Z', impact_level: 'Medium' },
+      { id: 'p3', client_id: C1, article_id: 'a3', signal_title: 'Saudi Arabia sets halal rules for cosmetics', summary: 'A wide rule.', country: 'Global', source_published_date: '2025-04-05T08:00:00Z', impact_level: 'Critical' },
+      { id: 'p4', client_id: C1, article_id: 'a4', signal_title: 'UAE bans parabens again', summary: 'dup', country: 'United Arab Emirates', source_published_date: '2025-03-11T08:00:00Z', is_duplicate: true },
+      { id: 'p5', client_id: C1, article_id: 'a5', signal_title: 'Worldwide microplastics ban talks', summary: 'Talks continue.', country: 'Global', source_published_date: '2025-02-01T08:00:00Z', impact_level: 'Low' },
+      { id: 'p9', client_id: C2, article_id: 'a9', signal_title: 'OTHER CLIENT news', summary: 'must never show', country: 'United Arab Emirates', source_published_date: '2025-03-10T08:00:00Z' },
+    ],
+    market_dynamics_signals: [
+      { id: 'm1', client_id: C1, article_id: 'b1', signal_title: 'Lancôme opens a flagship store in Dubai', summary: 'Retail move.', organization: 'Lancôme', country: 'United Arab Emirates', published_date: '2025-03-20T08:00:00Z', insight_id: 'card1' },
+      { id: 'm2', client_id: C1, article_id: 'b2', signal_title: 'Card-less market news', summary: 'not on a card', organization: 'Unknown', country: 'United Arab Emirates', published_date: '2025-03-21T08:00:00Z', insight_id: null },
+    ],
+    trend_signals: [
+      { id: 'o1', client_id: C1, article_id: 'c1', signal_title: 'Refill packaging spreads across the GCC', summary: 'Brands test refills.', organization: 'Various', source_published_date: '2025-03-15T08:00:00Z' },
+      { id: 'o2', client_id: C1, article_id: 'c2', signal_title: 'A candidate trend signal', summary: 'not active', source_published_date: '2025-03-16T08:00:00Z' },
+    ],
+    competitor_changes: [
+      { id: 'x1', client_id: C1, article_id: 'd1', signal_title: 'Estée Lauder launches a serum in Saudi Arabia', chat_text: 'Launch news.', organization: 'Estée Lauder', status: 'verified', event_date: '2025-05-01', importance: 'High', country: 'Saudi Arabia' },
+      { id: 'x2', client_id: C1, article_id: 'd2', signal_title: 'Unverified rumour', chat_text: 'Rumour.', organization: 'Estée Lauder', status: 'pending', event_date: '2025-05-02' },
+    ],
+  };
+  const piece = (module, key, score, client = C1) => ({ id: `${key}-0`, score, payload: { client_id: client, module_id: MODULE_IDS[module], article_id: key, change_id: module === 'competitor' ? key : undefined } });
+  const pieces = [
+    piece('policy', 'a1', 0.81), piece('policy', 'a2', 0.62), piece('policy', 'a3', 0.6), piece('policy', 'a4', 0.7), piece('policy', 'a5', 0.5),
+    piece('policy', 'a9', 0.95, C2), piece('policy', 'a1', 0.11),
+    piece('market', 'b1', 0.77), piece('market', 'b2', 0.76),
+    piece('outlook', 'c1', 0.55), piece('outlook', 'c2', 0.54),
+    piece('competitor', 'x1', 0.58), piece('competitor', 'x2', 0.57),
+    piece('policy', 'zz-low', 0.12),
+  ];
+  // many NEWER Kuwait signals with closer pieces, so the UAE one is only on a later page
+  for (let k = 0; k < (opts.filler || 0); k++) {
+    const day = String(10 + (k % 18)).padStart(2, '0');
+    rows.policy_signals.push({ id: `f${k}`, client_id: C1, article_id: `fa${k}`, signal_title: `Kuwait filler rule number ${k}`, summary: 'Kuwait.', country: 'Kuwait', source_published_date: `2025-06-${day}T08:00:00Z`, impact_level: 'Low' });
+    pieces.push(piece('policy', `fa${k}`, 0.9 - k / 100000));
+  }
+  // many closer pieces of OTHER news (no country tag at all), more than the
+  // wide search ever reads: tagged news can only be found by its tag
+  for (let k = 0; k < (opts.deep || 0); k++) {
+    rows.policy_signals.push({ id: `g${k}`, client_id: C1, article_id: `ga${k}`, signal_title: `Untagged general rule number ${k}`, summary: 'General.', country: 'Kenya', source_published_date: '2025-01-05T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', `ga${k}`, 0.95 - k / 100000));
+  }
+  // news written AFTER Q1 2025 that is about Q1 2025 (and some that is not)
+  if (opts.laterNews) {
+    const add = (id, title, day, score) => {
+      rows.policy_signals.push({ id, client_id: C1, article_id: `a-${id}`, signal_title: title, summary: 'Results.', country: 'Global', source_published_date: `${day}T08:00:00Z`, impact_level: 'Medium' });
+      pieces.push(piece('policy', `a-${id}`, score));
+    };
+    add('p7', 'Brand results for Q1 2025 beat forecasts', '2025-04-20', 0.79);
+    add('p8', 'Unrelated rule announced in April', '2025-04-21', 0.78);
+    add('p9', 'Brand had a strong first quarter of 2025', '2025-05-02', 0.77);
+    add('p10', 'Brand results for Q1 2025 looked back on', '2025-07-15', 0.76);
+  }
+  // a second Lancôme signal on the same Market Dynamics card
+  if (opts.cardMates) {
+    rows.market_dynamics_signals.push({ id: 'm3', client_id: C1, article_id: 'b3', signal_title: 'Lancôme adds a beauty bar in Abu Dhabi', summary: 'Second store.', organization: 'Lancôme', country: 'United Arab Emirates', published_date: '2025-03-25T08:00:00Z', insight_id: 'card1' });
+    pieces.push(piece('market', 'b3', 0.74));
+  }
+  let calls = 0;
+  let taggedReads = 0;
+  const keyCol = { policy_signals: 'article_id', market_dynamics_signals: 'article_id', trend_signals: 'article_id', competitor_changes: 'id' };
+  const dateCol = { policy_signals: 'source_published_date', market_dynamics_signals: 'published_date', trend_signals: 'source_published_date', competitor_changes: 'event_date' };
+  return {
+    clientId: C1,
+    otherClient: C2,
+    embed: async () => [0.1, 0.2],
+    pieceReads: () => calls,
+    taggedReads: () => taggedReads,
+    async readTagged(table, { keyCol: kc, column, patterns, from, to, limit }) {
+      taggedReads += 1;
+      if (opts.noTags) return [];
+      const like = (pt) => new RegExp(String(pt).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '.'), 'i');
+      return rows[table].filter((r) => r.client_id === C1 && r[column] && patterns.some((pt) => like(pt).test(String(r[column]))))
+        .filter((r) => (!from || String(r[dateCol[table]]).slice(0, 10) >= from) && (!to || String(r[dateCol[table]]).slice(0, 10) <= to))
+        .slice(0, limit).map((r) => r[kc]);
+    },
+    async searchPieces({ moduleIds, limit, offset = 0, only = null }) {
+      calls += 1;
+      if (opts.hang) await new Promise((r) => setTimeout(r, opts.hang));
+      if (opts.failTimes && calls <= opts.failTimes) throw new Error('Qdrant is down');
+      // like Qdrant: only the modules asked; the client filter is in Qdrant,
+      // but a wrong piece is still put in here to prove the code drops it
+      const inOnly = (p) => !only || (only.articleIds || []).includes(p.payload.article_id) || (only.pointIds || []).includes(p.payload.change_id);
+      return { pieces: pieces.filter((p) => moduleIds.includes(p.payload.module_id) && inOnly(p)).sort((a, b) => b.score - a.score).slice(offset, offset + limit), dates_in_search: false };
+    },
+    async readRows(table, col, ids) { return rows[table].filter((r) => ids.includes(r[col] || r[keyCol[table]])); },
+    async readRecent(table, { from, to, limit, offset = 0 }) {
+      return rows[table].filter((r) => r.client_id === C1)
+        .filter((r) => (!from || String(r[dateCol[table]]).slice(0, 10) >= from) && (!to || String(r[dateCol[table]]).slice(0, 10) <= to))
+        .sort((a, b) => String(b[dateCol[table]]).localeCompare(String(a[dateCol[table]]))).slice(offset, offset + limit);
+    },
+    async readActiveTrends(ids) { return new Map(ids.filter((i) => i === 'o1').map((i) => [i, { id: 't1', name: 'Refill packaging' }])); },
+    async readCards(ids) { return new Map(ids.map((i) => [i, 'Luxury retail expansion'])); },
+  };
+}
+
+// ── Step 9 part 2: the AI jobs, with a FAKE AI (no cost) ─────────────────
+async function testStep9Ai() {
+  console.log('\nSTEP 9 part 2 — the AI jobs and the evidence check (fake data, FAKE AI, no cost)');
+  const runner = require('../modules/dynamicRag/runWorkflow');
+  const understood = { client: { company_name: 'Lumière Beauty Group', industry: 'Cosmetics', competitors: ['Lancôme', 'Estée Lauder', 'Dior'] }, companies: [], question_text: 'test question' };
+  const MODS = ['policy', 'market', 'outlook', 'competitor'];
+  // prompts: just the job id and the numbered items, so the fake AI can read them
+  const missing = new Set();
+  runner.usePrompts((id) => (missing.has(id) ? null : `PROMPT ${id}\n{{evidence}}\nDIMS: {{dimensions}}`));
+  // the fake AI: a reply per prompt id; a function gets the prompt text
+  let replies = {};
+  let aiCalls = 0;
+  const temps = [];
+  runner.useAi(async (messages, opts) => {
+    aiCalls += 1;
+    temps.push(opts && opts.temperature);
+    const text = messages[0].content;
+    const id = (text.match(/^PROMPT (\S+)/) || [])[1];
+    const list = replies[id];
+    const next = Array.isArray(list) ? list.shift() : list;
+    if (next === undefined) throw new Error(`fake AI: no reply for ${id}`);
+    return typeof next === 'function' ? next(text) : next;
+  });
+  // the number an item got in the prompt, found by words of its title
+  const code = (text, words) => { const line = text.split('\n').find((l) => l.includes(words)); return line ? line.match(/^\[([A-Z]\d+)\]/)[1] : 'NONE'; };
+  const P = (job) => ({ extract_facts: 'dynamic_rag_job_extract_facts_v1', summarise: 'dynamic_rag_job_summarise_v1', compare: 'dynamic_rag_job_compare_v1', cluster: 'dynamic_rag_job_group_v1', identify_patterns: 'dynamic_rag_job_patterns_v1', identify_gaps: 'dynamic_rag_job_gaps_v1', discover_opportunities: 'dynamic_rag_job_opportunities_v1', analyse_risks: 'dynamic_rag_job_risks_v1' }[job]);
+  const search = (id, extra = {}) => ({ task_id: id, capability: 'retrieve_data', inputs: { query: 'cosmetics rules', modules: MODS, ...extra }, depends_on: [] });
+  const job = (id, capability, inputs, deps) => ({ task_id: id, capability, inputs, depends_on: deps });
+  const go = async (tasks, { storeOpts = {}, u = understood, options = {}, wfExtra = {}, batches = null } = {}) => {
+    const st = fakeStep9Store(storeOpts);
+    runner.useStore(st);
+    aiCalls = 0;
+    const b = batches || tasks.map((t) => [t.task_id]);
+    return runner.runWorkflow({ status: 'approved', batches: b }, { tasks, ...wfExtra }, u, { client_id: st.clientId }, { aiBudget: 10, ...options });
+  };
+  const J = (x) => JSON.stringify(x);
+
+  await check('Facts: the AI names items by number, code gives back the real signals; a point naming an item it was not given, with no source, or with a number not in its sources is removed (counted)', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'ban', text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'ban', text: 'Made up fact', sources: ['S99'] },
+      { about: 'ban', text: 'No source at all', sources: [] },
+      { about: 'ban', text: 'The ban covers 45% of products', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'ban', text: 'Saudi Arabia sets halal rules from 2025', sources: [code(t, 'Saudi Arabia sets halal')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['ban'] }, ['T1'])]);
+    const o = out.results.T2.output;
+    const rs = o.removed.reasons;
+    return (out.results.T2.status === 'done' && o.findings.length === 2 && o.findings[0].sources.join() === 'policy:p1' && o.findings[1].sources.join() === 'policy:p3' &&
+      o.findings.every((f) => f.kind === 'fact' && f.about === 'ban') && rs['named an item it was not given'] === 1 && rs['no source'] === 2 && rs['a number that is not in its sources'] === 1 &&
+      out.results.T2.ai_calls === 1) || { o, r: out.results.T2 };
+  });
+  await check('Numbers: counts below 10 are fine, a % or a big number must be in the sources (1,200 = 1200; 2.6 found)', async () => {
+    const ctx = { understood, sources: new Map([['x:1', { title: 'Sales 1200 units', text: 'EUR 2.6 million deal', date: '2026-01-02' }]]) };
+    const ok = (t) => runner.numbersOk([t], ['x:1'], ctx);
+    return (ok('3 brands moved') && ok('a EUR 2.6 million deal') && ok('1,200 units') && !ok('45% growth') && !ok('EUR 3.1 million') && ok('in 2026')) || 'wrong';
+  });
+  await check('No evidence (the search found nothing) -> NO AI call, an empty result that says so (done, not failed)', async () => {
+    replies = {};
+    const out = await go([search('T1', { companies: ['Dior'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['ban'] }, ['T1'])]);
+    const r = out.results.T2;
+    return (r.status === 'done' && r.output.findings.length === 0 && /no evidence/.test(r.output.note) && aiCalls === 0 && out.ai.used === 0) || r;
+  });
+  await check('AI reply not readable: asked once more (2 AI calls) and used', async () => {
+    replies = { [P('analyse_risks')]: ['Sorry, here you go: risks are many', (t) => J({ risks: [{ risk: 'Halal rules', why_it_matters: 'costs', sources: [code(t, 'halal rules')] }] })] };
+    const out = await go([search('T1'), job('T2', 'analyse_risks', { evidence: ['T1.output'] }, ['T1'])]);
+    const r = out.results.T2;
+    return (r.status === 'done' && r.ai_calls === 2 && r.output.findings.length === 1 && (r.ai_problems || []).length === 1) || r;
+  });
+  await check('AI reply not readable twice -> the job fails (never guessed) and is NOT tried again (2 AI calls, not 4)', async () => {
+    replies = { [P('analyse_risks')]: ['nope', '{"something": 1}'] };
+    const out = await go([search('T1'), job('T2', 'analyse_risks', { evidence: ['T1.output'] }, ['T1'])]);
+    const r = out.results.T2;
+    return (r.status === 'failed' && /could not be used/.test(r.error) && r.tries === 1 && r.ai_calls === 2 && out.ai.used === 2) || r;
+  });
+  await check('A prompt missing in the table -> the job fails with a clear reason, no AI call', async () => {
+    missing.add(P('analyse_risks'));
+    const out = await go([search('T1'), job('T2', 'analyse_risks', { evidence: ['T1.output'] }, ['T1'])]);
+    missing.clear();
+    const r = out.results.T2;
+    return (r.status === 'failed' && /prompt dynamic_rag_job_risks_v1 is missing/.test(r.error) && r.tries === 1 && aiCalls === 0) || r;
+  });
+  await check('AI calls used up -> the next AI job is "skipped" (recorded), a job that needs it is blocked; never over the limit', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [{ about: 'ban', text: 'UAE ban', sources: [code(t, 'UAE bans parabens')] }] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['ban'] }, ['T1']),
+      job('T3', 'analyse_risks', { evidence: ['T1.output'] }, ['T1']), job('T4', 'summarise', { input: ['T3.output'] }, ['T3'])], { options: { aiBudget: 1 } });
+    return (out.results.T2.status === 'done' && out.results.T3.status === 'skipped' && out.results.T4.status === 'blocked' && out.ai.used === 1 &&
+      out.counts.skipped === 1 && out.status === 'partial' && out.notes.some((n) => /used up/.test(n))) || { s: Object.values(out.results).map((r) => r.status), ai: out.ai };
+  });
+  await check('One AI call is always kept for the answer (Step 10): budget = what Steps 3–7 left minus 1', async () => {
+    const st = fakeStep9Store();
+    runner.useStore(st);
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, { tasks: [search('T1')], ai_budget: 9 }, understood, { client_id: st.clientId });
+    return (out.ai.budget === 8 && out.ai.kept_for_answer === 1) || out.ai;
+  });
+  await check('Summarise with SWOT headings: "Strengths" = "SWOT: Strengths"; a heading not asked is removed; at most 4 points per heading; empty headings are listed', async () => {
+    const H = ['SWOT: Strengths', 'SWOT: Weaknesses', 'SWOT: Opportunities', 'SWOT: Threats'];
+    replies = { [P('summarise')]: (t) => { const s = code(t, 'UAE bans parabens'); return J({ points: [
+      { heading: 'Strengths', text: 'Strong in the UAE', sources: [code(t, 'Lancôme opens')] },
+      { heading: 'Price', text: 'Not a heading', sources: [s] },
+      ...[1, 2, 3, 4, 5].map((k) => ({ heading: 'SWOT: Threats', text: `Threat number ${k}`, sources: [s] })),
+    ] }); } };
+    const out = await go([search('T1'), job('T2', 'summarise', { input: ['T1.output'], focus: 'SWOT', headings: H }, ['T1'])]);
+    const o = out.results.T2.output;
+    return (o.findings.filter((f) => f.heading === 'SWOT: Strengths').length === 1 && o.findings.filter((f) => f.heading === 'SWOT: Threats').length === 4 &&
+      J(o.empty_headings) === J(['SWOT: Weaknesses', 'SWOT: Opportunities']) && o.removed.reasons['under a heading that was not asked'] === 1 && o.removed.reasons['more than 4 points under one heading'] === 1) || o;
+  });
+  await check('Compare: each side only its own news (A1 / B1); a cell using the other side\'s news is emptied; a row with no news for any side is removed; a side with no news is listed and its cells stay empty', async () => {
+    replies = { [P('compare')]: (t) => J({ rows: [
+      { point: 'Rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Uses the UAE news', sources: [code(t, 'UAE bans parabens')] }, C: { text: '', sources: [] } } },
+      { point: 'Nothing', cells: { A: { text: '', sources: [] }, B: { text: '', sources: [] } } },
+    ], differences: [{ text: 'The UAE moved first', sources: [code(t, 'UAE bans parabens'), code(t, 'Estée Lauder launches')] }] }) };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }), search('T3', { countries: ['Qatar'] }),
+      job('T4', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }, { label: 'Qatar', ref: 'T3.output' }], dimensions: ['rules'] }, ['T1', 'T2', 'T3'])]);
+    const o = out.results.T4.output;
+    const row = o.rows[0];
+    return (o.rows.length === 1 && row.cells['United Arab Emirates'].sources.join() === 'policy:p1' && row.cells['Saudi Arabia'].text === '' && row.cells.Qatar.text === '' &&
+      J(o.empty_sides) === J(['Qatar']) && o.removed.reasons["used another side's news"] === 1 && o.removed.reasons['a row with no news for any side'] === 1 &&
+      o.differences.length === 1 && o.differences[0].sources.length === 2 && /SIDE A = United Arab Emirates/.test(JSON.stringify(out.results.T4))=== false) || o;
+  });
+  await check('Group: the groups that already exist come first (a Market Dynamics card), no AI call when few items are left', async () => {
+    replies = {};
+    const out = await go([search('T1', { companies: ['Lancôme'] }), job('T2', 'cluster', { evidence: ['T1.output'] }, ['T1'])], { storeOpts: { cardMates: true } });
+    const o = out.results.T2.output;
+    return (o.groups.length === 1 && o.groups[0].from === 'card' && o.groups[0].name === 'Luxury retail expansion' && o.groups[0].sources.length === 2 && aiCalls === 0) || { o, aiCalls };
+  });
+  await check('Group: the AI groups only what is left; a group of 1 or an item put in two groups is removed (counted)', async () => {
+    replies = { [P('cluster')]: (t) => J({ groups: [
+      { name: 'Gulf cosmetics rules', items: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling'), code(t, 'Saudi Arabia sets halal')] },
+      { name: 'Alone', items: [code(t, 'microplastics')] },
+      { name: 'Twice', items: [code(t, 'UAE bans parabens'), code(t, 'Refill packaging')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'cluster', { evidence: ['T1.output'] }, ['T1'])]);
+    const o = out.results.T2.output;
+    return (o.groups.length === 1 && o.groups[0].from === 'ai' && o.groups[0].sources.length === 3 && o.removed.reasons['an item put in two groups'] === 1 &&
+      o.ungrouped.includes('policy:p5') && aiCalls === 1) || o;
+  });
+  await check('Trends: code (not the AI) decides trend (2+ sources on different dates) or one-off event, with the first and last date from the data; trends first', async () => {
+    replies = { [P('identify_patterns')]: (t) => J({ patterns: [
+      { name: 'One talk', description: 'Talks on microplastics', sources: [code(t, 'microplastics')] },
+      { name: 'Gulf rules spread', description: 'More Gulf rules', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'], topic: 'rules' }, ['T1'])]);
+    const ps = out.results.T2.output.patterns;
+    return (ps[0].name === 'Gulf rules spread' && ps[0].kind === 'trend' && ps[0].first_date === '2025-03-10' && ps[0].last_date === '2025-04-01' && ps[0].source_count === 2 &&
+      ps[1].kind === 'one_off') || ps;
+  });
+  await check('Risks: the level comes from the impact saved on the signals (never the AI), Critical first; no impact = no level', async () => {
+    replies = { [P('analyse_risks')]: (t) => J({ risks: [
+      { risk: 'Labelling rule', why_it_matters: 'relabel', sources: [code(t, 'Kuwait labelling')] },
+      { risk: 'Trend risk', why_it_matters: 'demand', sources: [code(t, 'Refill packaging')] },
+      { risk: 'Halal rules', why_it_matters: 'certify', sources: [code(t, 'Saudi Arabia sets halal')], level: 'Low' },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'analyse_risks', { evidence: ['T1.output'] }, ['T1'])]);
+    const f = out.results.T2.output.findings;
+    return (J(f.map((x) => x.level)) === J(['Critical', 'Medium', null]) && f.every((x) => x.kind === 'interpretation')) || f;
+  });
+  await check('Earlier findings: F1 stands for the signals behind it; opportunities are always "hypothesis", and a summary built on them stays "hypothesis"', async () => {
+    replies = {
+      [P('identify_patterns')]: (t) => J({ patterns: [{ name: 'Gulf rules spread', description: 'More Gulf rules', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] }] }),
+      [P('discover_opportunities')]: J({ opportunities: [{ text: 'Offer a paraben-free range for the Gulf', why: 'the Gulf rules pattern', sources: ['F1'] }] }),
+      [P('summarise')]: J({ points: [{ heading: '', text: 'Paraben-free range for the Gulf', sources: ['F1'] }] }),
+    };
+    const out = await go([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']),
+      job('T3', 'discover_opportunities', { inputs: ['T2.output'] }, ['T2']), job('T4', 'summarise', { input: ['T3.output'] }, ['T3'])]);
+    const op = out.results.T3.output.findings[0];
+    const sm = out.results.T4.output.findings[0];
+    return (op.kind === 'hypothesis' && op.sources.sort().join() === 'policy:p1,policy:p2' && op.why === 'the Gulf rules pattern' && sm.kind === 'hypothesis' && sm.sources.length === 2) || { op, sm };
+  });
+  await check('More than 25 news items: the best of each search in turn (both searches present), every signal once, the rest counted', async () => {
+    const mk = (p, n) => Array.from({ length: n }, (_, k) => ({ source_id: `${p}:${k}` }));
+    const a = mk('a', 20);
+    const r = runner.pickItems([a, [a[0], ...mk('b', 19)]], 25);
+    return (r.items.length === 25 && r.items.slice(0, 3).some((i) => i.source_id === 'b:0') && new Set(r.items.map((i) => i.source_id)).size === 25 && r.left_out === 14) || r;
+  });
+  await check('Evidence check (code, no AI): runs even when a job before it failed (listed, never hidden); 2+ sources = supported, 1 = weak; facts about the same thing with different numbers = a conflict', async () => {
+    missing.add(P('analyse_risks'));
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'ban', text: 'The ban covers 3 products', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
+      { about: 'ban', text: 'The ban covers 5 products', sources: [code(t, 'Saudi Arabia sets halal')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['ban'] }, ['T1']),
+      job('T3', 'analyse_risks', { evidence: ['T1.output'] }, ['T1']), job('T4', 'validate_evidence', { findings: ['T2.output', 'T3.output'] }, ['T2', 'T3'])]);
+    missing.clear();
+    const o = out.results.T4.output;
+    return (out.results.T4.status === 'done' && o.status === 'partial' && o.supported.length === 1 && o.weak.length === 1 && o.conflicts.length === 1 &&
+      o.limitations.some((l) => /T3 \(analyse_risks\) did not finish: failed/.test(l)) && out.results.T4.ai_calls === 0) || { o, st: out.results.T4 };
+  });
+  await check('Evidence check: nothing found anywhere -> "insufficient", and each empty search is listed', async () => {
+    replies = {};
+    const out = await go([search('T1', { companies: ['Dior'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']),
+      job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    const o = out.results.T3.output;
+    return (o.status === 'insufficient' && o.limitations.some((l) => /search T1 .* found nothing/.test(l))) || o;
+  });
+  await check('Evidence check: 3+ points with 2+ sources and nothing missing -> "sufficient"', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'a', text: 'Gulf rules tighten', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
+      { about: 'b', text: 'Halal and retail move', sources: [code(t, 'Saudi Arabia sets halal'), code(t, 'Lancôme opens')] },
+      { about: 'b', text: 'Serum and refill news', sources: [code(t, 'Estée Lauder launches'), code(t, 'Refill packaging')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['a', 'b'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return out.results.T3.output.status === 'sufficient' || out.results.T3.output;
+  });
+  // 25 Nov, from the first real AI report
+  const q1 = { ...understood, time: { from: '2025-01-01', to: '2025-03-31', ranges: [{ text: 'Q1 2025', kind: 'quarter', from: '2025-01-01', to: '2025-03-31' }] } };
+  await check('Reported later: news written after a period that is over, naming it ("Q1 2025" / "first quarter of 2025"), up to 60 days after -> kept (noted); other later news, or 3 months later -> not', async () => {
+    replies = {};
+    const out = await go([search('T1', { query: 'brand results', date_from: '2025-01-01', date_to: '2025-03-31' })], { storeOpts: { laterNews: true }, u: q1 });
+    const got = out.results.T1.output.items.map((i) => i.signal_id);
+    return (got.includes('p7') && got.includes('p9') && !got.includes('p8') && !got.includes('p10') && /written after the period/.test(out.results.T1.output.note)) || { got, note: out.results.T1.output.note };
+  });
+  await check('Reported later (must not change): a period with no number typed ("last month") is not widened', async () => {
+    const u = { ...q1, time: { ...q1.time, ranges: [{ text: 'last month', kind: 'month', from: '2025-01-01', to: '2025-03-31' }] } };
+    const out = await go([search('T1', { query: 'brand results', date_from: '2025-01-01', date_to: '2025-03-31' })], { storeOpts: { laterNews: true }, u });
+    const got = out.results.T1.output.items.map((i) => i.signal_id);
+    return (!got.includes('p7') && !got.includes('p9')) || got;
+  });
+  await check('Compare: the points to compare lose the side names ("beauty market trends in UAE" and "... in Saudi Arabia" = one point), so each row compares both sides', async () => {
+    let dims = null;
+    replies = { [P('compare')]: (t) => { dims = (t.match(/DIMS: (.*)/) || [])[1]; return J({ rows: [], differences: [] }); } };
+    await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }],
+        dimensions: ['beauty market trends in United Arab Emirates', 'beauty market trends in UAE', 'regulatory environment in Saudi Arabia', 'prices'] }, ['T1', 'T2'])]);
+    return dims === 'beauty market trends, regulatory environment, prices' || dims;
+  });
+  await check('Compare (must not change): company sides lose their names too ("launches by Lancôme" -> "launches"); a point with no side name stays as it is', async () => {
+    let dims = null;
+    replies = { [P('compare')]: (t) => { dims = (t.match(/DIMS: (.*)/) || [])[1]; return J({ rows: [], differences: [] }); } };
+    await go([search('T1', { companies: ['Lancôme'] }), search('T2', { companies: ['Estée Lauder'] }),
+      job('T3', 'compare', { sides: [{ label: 'Lancôme', ref: 'T1.output' }, { label: 'Estée Lauder', ref: 'T2.output' }], dimensions: ['product launches by Lancôme', 'product launches by Estee Lauder', 'launch dates'] }, ['T1', 'T2'])]);
+    return dims === 'product launches, launch dates' || dims;
+  });
+  await check('A point that says nothing ("4", "5") is removed; the item numbers are read under other names too ("source", "items"); removed points are kept as examples', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'x', text: '4', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: 'The UAE bans parabens', source: code(t, 'UAE bans parabens') },
+      { about: 'x', text: 'Saudi sets halal rules', items: [code(t, 'Saudi Arabia sets halal')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1'])]);
+    const r = out.results.T2;
+    return (r.output.findings.length === 2 && r.output.removed.reasons['too short to mean anything'] === 1 && (r.removed_examples || []).length === 1) || r;
+  });
+  await check('Evidence check: a list answer counts each signal (7 signals -> "sufficient"); 1 signal -> "partial"', async () => {
+    replies = {};
+    const a = await go([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    const b = await go([search('T1', { companies: ['Estée Lauder'] }), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    return (a.results.T2.output.status === 'sufficient' && a.results.T2.output.counts.supported >= 3 && b.results.T2.output.status === 'partial') || [a.results.T2.output, b.results.T2.output];
+  });
+  // 25 Nov, second real AI report
+  await check('A reply cut off in the middle (or not one clean object) is read item by item: every whole row kept, the half one left out, 1 AI call, noted', async () => {
+    replies = { [P('compare')]: (t) => `Here is the table: {"rows": [{"point": "rules", "cells": {"A": {"text": "Parabens ban", "sources": ["${code(t, 'UAE bans parabens')}"]}, "B": {"text": "", "sources": []}}}, "side": "A"], {"point": "pri` };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2'])]);
+    const r = out.results.T3;
+    const items = runner.salvageList('{"rows": [{"point": "a", "cells": {}}, "x"]], {"point": "b {tricky}", "cells": {}}, {"point": "c", "cel', 'rows');
+    return (r.status === 'done' && r.ai_calls === 1 && r.output.rows.length === 1 && items.map((x) => x.point).join() === 'a') || { r, items };
+  });
+  await check('A reply with no whole item at all is still asked again (must not change), and the failure keeps the start and end of the reply', async () => {
+    replies = { [P('compare')]: ['Sorry, I cannot make the table.', 'Here: rows are rules and prices.'] };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2'])]);
+    const r = out.results.T3;
+    // (25 Nov: a comparison the AI could not write shows each side's main news, by code)
+    return (r.status === 'done' && r.output.made_by === 'code' && r.output.rows.length === 1 && r.output.rows[0].point === 'main news found' &&
+      r.output.rows[0].cells['United Arab Emirates'].sources.length >= 1 && r.ai_calls === 2 && (r.ai_problems || []).length === 2 && /letters\)/.test(r.ai_problems[0]) &&
+      /shown side by side/.test(r.output.note)) || r;
+  });
+  // 25 Nov, final real run
+  await check('A comparison reply that is read but where no row passes the checks (a row whose cells have no source of their side) shows each side\'s main news by code; a good row is kept as before (must not change)', async () => {
+    const sidesJob = job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']);
+    replies = { [P('compare')]: J({ rows: [{ point: 'launches', cells: { A: { text: '4 new products, and 1 new product', sources: [] }, B: { text: '', sources: [] } } }], differences: [] }) };
+    const bad = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }), sidesJob]);
+    replies = { [P('compare')]: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: '', sources: [] } } }], differences: [] }) };
+    const good = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }), sidesJob]);
+    const b = bad.results.T3.output;
+    const g = good.results.T3.output;
+    return (b.made_by === 'code' && b.rows.length === 1 && b.rows[0].point === 'main news found' && b.rows[0].cells['United Arab Emirates'].sources.length >= 1 &&
+      /no row of the AI comparison passed the checks/.test(b.note) && bad.results.T3.ai_calls === 1 &&
+      g.made_by !== 'code' && g.rows.length === 1 && g.rows[0].point === 'rules') || { b, g };
+  });
+  await check('Facts where the AI wrote points but none passed the checks say so first ("nothing the AI wrote passed the checks"); an honest empty list stays "found nothing" (must not change)', async () => {
+    const plan = [search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])];
+    replies = { [P('extract_facts')]: J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] }) };
+    const bad = await go(plan);
+    replies = { [P('extract_facts')]: J({ facts: [] }) };
+    const none = await go(plan);
+    const lb = bad.results.T3.output.limitations.find((l) => /^T2 /.test(l)) || '';
+    const ln = none.results.T3.output.limitations.find((l) => /^T2 /.test(l)) || '';
+    return (/^T2 \(extract_facts\) found nothing: nothing the AI wrote passed the checks/.test(lb) && /^T2 \(extract_facts\) found nothing/.test(ln) && !/passed the checks/.test(ln)) || [lb, ln];
+  });
+  await check('Conflict only when two facts say the SAME thing with different numbers ("covers 3" vs "covers 5"); two different launches ("4 new products: …" vs "2 new products: …") are not a conflict', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'launches', text: 'Lancome launched 4 new products: lip blur and highlighter', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'launches', text: 'Lancome launched 2 new products: peptide cream and palace collection', sources: [code(t, 'Kuwait labelling')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['launches'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return out.results.T3.output.conflicts.length === 0 || out.results.T3.output.conflicts;
+  });
+  // 25 Nov, Step 10 report
+  await check('A reply with no whole item (went round in circles until cut off) is asked again first, a little less fixed (temperature 0.3); the second reply is used', async () => {
+    temps.length = 0;
+    replies = { [P('compare')]: ['{"rows": [{"point": "launches", "cells": {"A": {"text": "4 new products, and 2 new products, and 4 new products, and 2 new pro',
+      (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: '', sources: [] } } }], differences: [] })] };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2'])]);
+    const r = out.results.T3;
+    return (r.status === 'done' && r.ai_calls === 2 && r.output.rows.length === 1 && J(temps) === J([0, 0.3])) || { r, temps };
+  });
+  // 25 Nov, third real AI report
+  await check('A reply cut off at its end: only the WHOLE rows are used (the half-written last row is not "repaired" into an empty row), noted with the length', async () => {
+    replies = { [P('compare')]: (t) => `{"rows": [{"point": "rules", "cells": {"A": {"text": "Parabens ban", "sources": ["${code(t, 'UAE bans parabens')}"]}, "B": {"text": "", "sources": []}}}, {"point": "prices", "cells": {"A": {"text": "Higher pri` };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2'])]);
+    const r = out.results.T3;
+    return (r.output.rows.length === 1 && !r.output.removed.reasons['a row with no news for any side'] && /letters\): read item by item, 1 rows/.test((r.ai_problems || []).join()) &&
+      r.ai_replies.length === 1 && /Higher pri$/.test(r.ai_replies[0].end)) || r;
+  });
+  await check('The same point twice (same words inside a longer point, same source) is kept once, the longer one', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'x', text: 'Shiseido returned to profit', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: 'Shiseido returned to profit in the third quarter', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: 'Shiseido returned to profit', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: 'Shiseido returned to profit', sources: [code(t, 'Kuwait labelling')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1'])]);
+    const f = out.results.T2.output.findings;
+    return (f.length === 2 && f[0].text === 'Shiseido returned to profit in the third quarter' && out.results.T2.output.removed.reasons['the same point twice'] === 2) || f;
+  });
+  await check('Evidence check: a signal found by two searches counts once', async () => {
+    replies = {};
+    const out = await go([search('T1'), search('T2'), job('T3', 'validate_evidence', { findings: ['T1.output', 'T2.output'] }, ['T1', 'T2'])]);
+    const n = out.results.T1.output.items.length;
+    return out.results.T3.output.counts.supported === n || { got: out.results.T3.output.counts, n };
+  });
+  await check('Run result (must not change for the searches): every signal a job may cite is given back by its source id, with the AI calls used', async () => {
+    replies = {};
+    const out = await go([search('T1')]);
+    return (out.status === 'done' && out.sources['policy:p1'] && out.sources['policy:p1'].title === 'UAE bans parabens in cosmetics' && out.ai.used === 0) || out;
+  });
+  runner.useAi(null);
+  runner.usePrompts(null);
+}
+
+// ── Step 10: the answer (fake data, FAKE AI, no cost) ────────────────────
+async function testStep10() {
+  console.log('\nSTEP 10 — generateAnswer.js  (the answer the user reads; fake data, FAKE AI, no cost)');
+  const runner = require('../modules/dynamicRag/runWorkflow');
+  const answerer = require('../modules/dynamicRag/generateAnswer');
+  const understood = { client: { company_name: 'Lumière Beauty Group', industry: 'Cosmetics', competitors: ['Lancôme', 'Estée Lauder', 'Dior'] }, companies: [], question_text: 'test question' };
+  const MODS = ['policy', 'market', 'outlook', 'competitor'];
+  const missing = new Set();
+  runner.usePrompts((id) => (missing.has(id) ? null : `PROMPT ${id}\n{{evidence}}{{points}}\nLIMITS: {{limits}}\nEVIDENCE: {{confidence}}`));
+  let replies = {};
+  let aiCalls = 0;
+  runner.useAi(async (messages) => {
+    aiCalls += 1;
+    const text = messages[0].content;
+    const id = (text.match(/^PROMPT (\S+)/) || [])[1];
+    const list = replies[id];
+    const next = Array.isArray(list) ? list.shift() : list;
+    if (next === undefined) throw new Error(`fake AI: no reply for ${id}`);
+    return typeof next === 'function' ? next(text) : next;
+  });
+  const saved = [];
+  let saveFails = false;
+  answerer.useSaver(async (row) => { if (saveFails) throw new Error('db down'); saved.push(row); });
+  const code = (text, words) => { const line = text.split('\n').find((l) => l.includes(words)); return line ? line.match(/^\[([A-Z]\d+)\]/)[1] : 'NONE'; };
+  // the source numbers a point carries in the answer prompt ("[P2] (fact) … [1][3]")
+  const nums = (text, words) => { const line = text.split('\n').find((l) => l.includes(words)) || ''; return (line.match(/\[\d+\]/g) || []).join(''); };
+  const J = (x) => JSON.stringify(x);
+  const search = (id, extra = {}) => ({ task_id: id, capability: 'retrieve_data', inputs: { query: 'cosmetics rules', modules: MODS, ...extra }, depends_on: [] });
+  const job = (id, capability, inputs, deps) => ({ task_id: id, capability, inputs, depends_on: deps });
+  const request = { request_id: 'r-1', conversation_id: 'c-1', client_id: 'client-1', user_id: 'u-1', original_query: 'test question' };
+  const answerFor = async (tasks, { aiOpts = {}, u = understood } = {}) => {
+    const st = fakeStep9Store();
+    runner.useStore(st);
+    aiCalls = 0;
+    saved.length = 0;
+    const wf = { tasks };
+    const run = await runner.runWorkflow({ status: 'approved', batches: tasks.map((t) => [t.task_id]) }, wf, u, { client_id: st.clientId }, { aiBudget: 10 });
+    const before = J(run);
+    const callsBefore = aiCalls;
+    const a = await answerer.generateAnswer(run, wf, u, request, aiOpts);
+    return { a, run, unchanged: J(run) === before, answerCalls: aiCalls - callsBefore };
+  };
+  const FACTS = (t) => J({ facts: [
+    { about: 'rules', text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
+    { about: 'rules', text: 'Saudi Arabia sets halal rules', sources: [code(t, 'Saudi Arabia sets halal'), code(t, 'Refill packaging')] },
+    { about: 'rules', text: 'Lancome opens a store in Dubai', sources: [code(t, 'Lancôme opens'), code(t, 'Estée Lauder launches')] },
+  ] });
+  const withFacts = [search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])];
+
+  await check('Nothing found -> NO AI call; the answer says plainly nothing was found and what was searched; no sources; saved as the reply', async () => {
+    replies = {};
+    const { a, answerCalls } = await answerFor([search('T1', { companies: ['Dior'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return (a.status === 'nothing_found' && answerCalls === 0 && /could not find news/.test(a.answer_text) && /No news found for "cosmetics rules"/.test(a.answer_text) &&
+      a.sources.length === 0 && a.confidence.level === 'not_enough' && saved.length === 1 && saved[0].role === 'assistant' && saved[0].payload.status === 'nothing_found') || a;
+  });
+  await check('A plain list of the newest news (exact read) -> NO AI call; code writes the list; sources numbered in order, each once', async () => {
+    replies = {};
+    const { a, answerCalls } = await answerFor([{ task_id: 'T1', capability: 'structured_search', inputs: { modules: ['policy'] }, depends_on: [] }, job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    const ns = a.sources.map((s) => s.n);
+    return (a.status === 'answered' && answerCalls === 0 && a.summary_by === 'code' && /Here are the \d+ news items/.test(a.summary) && a.sections[0].kind === 'list' &&
+      J(ns) === J(ns.map((_, k) => k + 1)) && /\[1\] /.test(a.answer_text)) || a;
+  });
+  await check('AI short answer that passes the check is used ("Sentence. [1]" also read); only the sources really used are listed', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics. ${nums(t, 'UAE bans parabens')} Saudi Arabia sets halal rules ${nums(t, 'halal rules')}.`, points_used: ['P1', 'P2'] }) };
+    const { a, answerCalls } = await answerFor(withFacts);
+    return (a.summary_by === 'ai' && a.check.passed === true && answerCalls === 1 && /The UAE bans parabens in cosmetics \[1\]\[2\]\./.test(a.summary) &&
+      a.sources.length === 6 && /### Facts/.test(a.answer_text) && /\*\*Sources:\*\*/.test(a.answer_text)) || a;
+  });
+  await check('AI short answer with a made-up number ("grew 45%") -> NOT shown; code\'s own short answer is used, the reason recorded', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE market grew 45% after the parabens ban ${nums(t, 'UAE bans parabens')}.` }) };
+    const { a } = await answerFor(withFacts);
+    return (a.summary_by === 'code' && a.check.passed === false && a.check.problems.some((p) => /45%/.test(p)) && /\[1\]/.test(a.summary)) || a;
+  });
+  await check('A sentence no point supports ("This is a big change for everyone") is taken out, the rest is used; a sentence with a source number that does not exist is taken out (nothing left -> code\'s answer)', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [FACTS, FACTS], dynamic_rag_answer_v1: [J({ answer: 'The UAE bans parabens [1]. This is a big change for everyone.' }), J({ answer: 'The UAE bans parabens [99].' })] };
+    const x = await answerFor(withFacts);
+    const y = await answerFor(withFacts);
+    return (x.a.summary_by === 'ai' && x.a.summary === 'The UAE bans parabens [1].' && x.a.check.problems.some((p) => /no point supports it/.test(p)) &&
+      y.a.summary_by === 'code' && y.a.check.problems.some((p) => /do not exist: 99/.test(p))) || [x.a.summary, x.a.check, y.a.check];
+  });
+  await check('The AI wrote no source numbers at all: code gives each sentence the sources of the points it is about; advice no point supports is taken out', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: J({ answer: 'The UAE bans parabens in cosmetics. Saudi Arabia sets new halal rules. The company should be prepared to adapt.' }) };
+    const { a } = await answerFor(withFacts);
+    return (a.summary_by === 'ai' && /^The UAE bans parabens in cosmetics \[1\]\[2\]\. Saudi Arabia sets new halal rules \[3\]\[4\]\.$/.test(a.summary) &&
+      a.check.problems.some((p) => /no point supports it\): The company should be prepared/.test(p))) || [a.summary, a.check];
+  });
+  await check('One sentence with a number that is not in its sources is taken out; the other sentences stay', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: J({ answer: 'The UAE bans parabens in cosmetics. Lancome opened 12 stores in Dubai.' }) };
+    const { a } = await answerFor(withFacts);
+    return (a.summary_by === 'ai' && a.summary === 'The UAE bans parabens in cosmetics [1][2].' && a.check.problems.some((p) => /number 12/.test(p))) || [a.summary, a.check];
+  });
+  // 25 Nov, third Step 10 report
+  await check('A name with dots ("Renergie H.P.N. 300 Peptide Cream") does not end a sentence; a small count the AI made up ("8 new products") takes its sentence out; at most 6 source numbers after a sentence', async () => {
+    const srcs = {};
+    for (let k = 1; k <= 9; k++) srcs[`x:${k}`] = { title: k === 1 ? 'Lancome launches Renergie H.P.N. 300 Peptide Cream' : `Lancome peptide cream launch news ${k}`, text: 'Lancome launches 4 new products', date: '2026-11-10', module: 'competitor' };
+    const book = answerer.sourceBook({ sources: srcs });
+    const pts = [{ code: 'P1', kind: 'fact', text: 'Facts: Lancome launches Renergie H.P.N. 300 Peptide Cream and 4 new products', sources: [] }];
+    for (let k = 1; k <= 9; k++) pts[0].sources.push(book.nums([`x:${k}`])[0]);
+    const r = answerer.checkSummary('Lancome launches Renergie H.P.N. 300 Peptide Cream. Lancome launched 8 new products in total.', book, pts, 'q');
+    const groups = (r.text.match(/(?:\[\d+\])+/g) || []).map((g) => g.match(/\d+/g).length);
+    return (r.ok && /^Lancome launches Renergie H\.P\.N\. 300 Peptide Cream \[1\]\[2\]\[3\]\[4\]\[5\]\[6\]\.$/.test(r.text) && groups.every((n) => n <= 6) &&
+      r.problems.some((p) => /number 8 is not/.test(p))) || r;
+  });
+  await check('A comparison the AI could not write (shown side by side by code) is said in what was not done', async () => {
+    replies = { dynamic_rag_job_compare_v1: ['no', 'still no'], dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']),
+      job('T4', 'validate_evidence', { findings: ['T3.output'] }, ['T3'])], { aiOpts: { aiCalls: 1 } });
+    return (a.limits.some((l) => /could not write the comparison/.test(l)) && /\| main news found \|/.test(a.answer_text)) || a.answer_text;
+  });
+  await check('A step whose AI points all failed the checks is said in plain words in what was not done ("is left out: what the AI wrote did not pass the checks")', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })], dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']),
+      job('T3', 'validate_evidence', { findings: ['T1.output', 'T2.output'] }, ['T1', 'T2'])], { aiOpts: { aiCalls: 1 } });
+    return a.limits.some((l) => /^The .* step is left out: what the AI wrote did not pass the checks$/.test(l)) || a.limits;
+  });
+  await check('AI reply not readable: asked again only when the question still has an AI call left; else code\'s answer', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [FACTS, FACTS], dynamic_rag_answer_v1: ['Sorry no JSON', (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}.` }), 'still no JSON'] };
+    const two = await answerFor(withFacts, { aiOpts: { aiCalls: 2 } });
+    const one = await answerFor(withFacts, { aiOpts: { aiCalls: 1 } });
+    return (two.a.summary_by === 'ai' && two.answerCalls === 2 && one.a.summary_by === 'code' && one.answerCalls === 1) || [two.a.check, one.a.check];
+  });
+  await check('The answer prompt missing -> code\'s answer, no AI call, the reason recorded', async () => {
+    missing.add('dynamic_rag_answer_v1');
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS };
+    const { a, answerCalls } = await answerFor(withFacts);
+    missing.clear();
+    return (a.summary_by === 'code' && answerCalls === 0 && a.check.problems.some((p) => /dynamic_rag_answer_v1 is missing/.test(p))) || a;
+  });
+  await check('Kinds are kept in the answer: an idea is marked "idea to test", a trend shows its sources and dates; a risk shows its level', async () => {
+    replies = {
+      dynamic_rag_job_patterns_v1: (t) => J({ patterns: [{ name: 'Gulf rules spread', description: 'More Gulf rules', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] }] }),
+      dynamic_rag_job_opportunities_v1: J({ opportunities: [{ text: 'Offer a paraben-free range for the Gulf', why: 'the Gulf rules pattern', sources: ['F1'] }] }),
+      dynamic_rag_job_risks_v1: (t) => J({ risks: [{ risk: 'Halal certification costs', why_it_matters: 'costs', sources: [code(t, 'Saudi Arabia sets halal')] }] }),
+      dynamic_rag_answer_v1: 'no json',
+    };
+    const { a } = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'discover_opportunities', { inputs: ['T2.output'] }, ['T2']),
+      job('T4', 'analyse_risks', { evidence: ['T1.output'] }, ['T1']), job('T5', 'validate_evidence', { findings: ['T3.output', 'T4.output'] }, ['T3', 'T4'])], { aiOpts: { aiCalls: 1 } });
+    return (/Offer a paraben-free range.*_\(idea to test\)_/.test(a.answer_text) && /\[Critical\] Halal certification costs/.test(a.answer_text) && a.sections.length === 2) || a.answer_text;
+  });
+  await check('A comparison is a table; a side with no news shows "no news found" in its cells and is listed in what was not found', async () => {
+    replies = { dynamic_rag_job_compare_v1: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] }, C: { text: '', sources: [] } } }], differences: [] }), dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }), search('T3', { countries: ['Qatar'] }),
+      job('T4', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }, { label: 'Qatar', ref: 'T3.output' }] }, ['T1', 'T2', 'T3']),
+      job('T5', 'validate_evidence', { findings: ['T4.output'] }, ['T4'])], { aiOpts: { aiCalls: 1 } });
+    return (/\| \| United Arab Emirates \| Saudi Arabia \| Qatar \|/.test(a.answer_text) && /\| rules \| Parabens ban \[\d\] \| Halal rules \[\d\] \| no news found \|/.test(a.answer_text) &&
+      a.limits.some((l) => /No news found for Qatar \(one side of the comparison\)/.test(l))) || a.answer_text;
+  });
+  await check('What was not found / not done is written in plain words (a failed job, an empty search), never hidden', async () => {
+    missing.add('dynamic_rag_job_risks_v1');
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1'), search('T2', { companies: ['Dior'] }), job('T3', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']),
+      job('T4', 'analyse_risks', { evidence: ['T1.output'] }, ['T1']), job('T5', 'validate_evidence', { findings: ['T3.output', 'T4.output'] }, ['T3', 'T4'])], { aiOpts: { aiCalls: 1 } });
+    missing.clear();
+    return (a.limits.includes('The risks step did not finish (failed)') && a.limits.some((l) => /^No news found for "cosmetics rules"/.test(l)) && /\*\*Not found or not done:\*\*/.test(a.answer_text)) || a.limits;
+  });
+  // 25 Nov, first real Step 10 report
+  await check('A list found by meaning for a topic ("what did our competitors launch") gets the short AI answer on top of the list', async () => {
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a, answerCalls } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    return (answerCalls === 1 && a.summary_by === 'ai' && a.sections[0].kind === 'list') || a;
+  });
+  await check('The AI may name the points ([P1], [P1, P2]) or write [1, 3]: read as their source numbers; a number written twice is listed once', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [FACTS, FACTS], dynamic_rag_answer_v1: [J({ answer: 'The UAE bans parabens in cosmetics [P1]. Saudi Arabia sets halal rules [P1, P2].' }), (t) => J({ answer: `The UAE bans parabens in cosmetics [1, 2][1].` })] };
+    const x = await answerFor(withFacts, { aiOpts: { aiCalls: 1 } });
+    const y = await answerFor(withFacts, { aiOpts: { aiCalls: 1 } });
+    return (x.a.summary_by === 'ai' && /parabens in cosmetics \[1\]\[2\]\. Saudi Arabia sets halal rules \[1\]\[2\]\[3\]\[4\]\./.test(x.a.summary) &&
+      y.a.summary_by === 'ai' && /cosmetics \[1\]\[2\]\./.test(y.a.summary)) || [x.a.summary, x.a.check, y.a.summary, y.a.check];
+  });
+  await check('Code\'s own short answer reads as plain sentences: a comparison row "On rules, A: …; B: … [n]." and a trend without its labels', async () => {
+    replies = { dynamic_rag_job_compare_v1: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] } } }], differences: [] }), dynamic_rag_answer_v1: 'x',
+      dynamic_rag_job_patterns_v1: (t) => J({ patterns: [{ name: 'Gulf rules spread', description: 'More Gulf rules', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] }] }) };
+    const c = await answerFor([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']), job('T4', 'validate_evidence', { findings: ['T3.output'] }, ['T3'])], { aiOpts: { aiCalls: 1 } });
+    replies.dynamic_rag_answer_v1 = 'x';
+    const p = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])], { aiOpts: { aiCalls: 1 } });
+    return (/^On rules, United Arab Emirates: Parabens ban; Saudi Arabia: Halal rules \[\d\]\[\d\]\.$/.test(c.a.summary) && /^The news suggests that more Gulf rules \[1\]\[2\]\.$/.test(p.a.summary)) || [c.a.summary, p.a.summary];
+  });
+  await check('Several searches of a list question are ONE list, every signal once', async () => {
+    replies = {};
+    const { a } = await answerFor([search('T1'), search('T2'), job('T3', 'validate_evidence', { findings: ['T1.output', 'T2.output'] }, ['T1', 'T2'])], { aiOpts: { aiCalls: 0 } });
+    const lists = a.sections.filter((x) => x.kind === 'list');
+    const ids = lists[0].items.map((i) => i.sources.join());
+    return (lists.length === 1 && new Set(ids).size === ids.length && /Here are the \d+ news items/.test(a.summary) && Number(a.summary.match(/\d+/)[0]) === ids.length) || a.sections;
+  });
+  await check('Saving the answer fails -> the answer is still given (saved = false), never an error', async () => {
+    saveFails = true;
+    replies = {};
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 0 } });
+    saveFails = false;
+    return (a.saved === false && a.status === 'answered') || a;
+  });
+  await check('Must not change: Step 10 never changes the Step 9 result, and every source it lists is a signal of this run', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: 'x' };
+    const { a, run, unchanged } = await answerFor(withFacts, { aiOpts: { aiCalls: 1 } });
+    return (unchanged && a.sources.every((s) => run.sources[s.source_id])) || { unchanged };
+  });
+  runner.useAi(null);
+  runner.usePrompts(null);
+  answerer.useSaver(null);
+}
+
+async function testStep9() {
+  console.log('\nSTEP 9 — runWorkflow.js  (run the jobs: part 1, the searches; fake data, no AI)');
+  const runner = require('../modules/dynamicRag/runWorkflow');
+  const understoodFor = (extra = {}) => ({ client: { company_name: 'Lumière Beauty Group', competitors: ['Lancôme', 'Estée Lauder', 'Dior'] }, companies: [], ...extra });
+  // one search as a whole approved plan
+  const runSearch = async (capability, inputs, u = understoodFor(), storeOpts = {}) => {
+    const st = fakeStep9Store(storeOpts);
+    runner.useStore(st);
+    const wf = { tasks: [{ task_id: 'T1', capability, inputs: { modules: ['policy', 'market', 'outlook', 'competitor'], ...inputs }, depends_on: [] }] };
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, wf, u, { client_id: st.clientId });
+    return out.results.T1;
+  };
+  const ids = (r) => (r.output ? r.output.items.map((i) => i.signal_id).sort().join(',') : `(${r.status}: ${r.error})`);
+
+  await check('Search: only signals the user can open in a tab (no duplicate, Market Dynamics on a card, Forward Outlook in an ACTIVE trend, competitor change verified), never another client, never a far-off piece', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetics rules' });
+    const got = ids(r);
+    const reasons = r.output.removed.reasons;
+    return (got === 'm1,o1,p1,p2,p3,p5,x1' && reasons['marked duplicate'] === 1 && reasons['not on a Market Dynamics card'] === 1 &&
+      reasons['Forward Outlook signal not in an active trend'] === 1 && reasons['competitor change not verified'] === 1 && reasons['too far from the question'] >= 1) || { got, reasons };
+  });
+  await check('Search: every item keeps its source (id, module, title, date, link, card / trend name, score)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetics rules' });
+    const m1 = r.output.items.find((i) => i.signal_id === 'm1');
+    const o1 = r.output.items.find((i) => i.signal_id === 'o1');
+    const p1 = r.output.items.find((i) => i.signal_id === 'p1');
+    return (m1.source_id === 'market:m1' && m1.group.name === 'Luxury retail expansion' && o1.group.name === 'Refill packaging' &&
+      p1.date === '2025-03-10' && p1.url === 'https://x/1' && p1.impact === 'High' && typeof p1.score === 'number') || { m1, o1, p1 };
+  });
+  for (const [name, inputs, want] of [
+    ['a country (UAE): its own news only; Global news and Forward Outlook only when their text names it', { countries: ['United Arab Emirates'] }, 'm1,p1'],
+    ['a region (GCC): every member country, and Global / Forward Outlook news whose text names it or a member', { countries: ['GCC'] }, 'm1,o1,p1,p2,p3,x1'],
+    ['GCC except Kuwait: Kuwait news is dropped', { countries: ['GCC'], not_countries: ['Kuwait'] }, 'm1,o1,p1,p3,x1'],
+    ['a "Global" comparison side: worldwide news only (tagged Global or no country)', { countries: ['Global'] }, 'o1,p3,p5'],
+    ['dates (March 2025): only news inside them', { date_from: '2025-03-01', date_to: '2025-03-31' }, 'm1,o1,p1'],
+    ['a known competitor (Lancôme): its news only', { companies: ['Lancôme'] }, 'm1'],
+    ['a company written another way ("Estee Lauder")', { companies: ['Estee Lauder'] }, 'x1'],
+    ['left out (Estée Lauder): its news is dropped', { not_companies: ['Estée Lauder'] }, 'm1,o1,p1,p2,p3,p5'],
+  ]) {
+    await check(`Search filters: ${name}`, async () => {
+      const r = await runSearch('retrieve_data', { query: 'cosmetics news', ...inputs });
+      return ids(r) === want || { got: ids(r), reasons: r.output && r.output.removed.reasons };
+    });
+  }
+  await check('Search filters: a known competitor with no news (Dior) -> an empty set that says "nothing found" (never other news instead)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetics news', companies: ['Dior'] });
+    return (r.status === 'done' && r.output.items.length === 0 && /nothing found/.test(r.output.note)) || r;
+  });
+  await check('Search filters: a "company" the client list does not know and the data never names ("K-beauty") -> searched by the words, not an empty filter (recorded)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'k-beauty cosmetics news', companies: ['K-beauty'] });
+    return (r.output.items.length > 0 && /K-beauty found nowhere/.test(r.output.note)) || r.output;
+  });
+  await check('Exact read: policy, High impact, newest first', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'], impact: ['High'], order: 'newest' });
+    return ids(r) === 'p1' || ids(r);
+  });
+  await check('Exact read: all modules, ordered by impact (Critical first), only signals the user can see', async () => {
+    const r = await runSearch('structured_search', { order: 'impact' });
+    const order = r.output.items.map((i) => i.signal_id);
+    return (order[0] === 'p3' && !order.includes('p4') && !order.includes('m2') && !order.includes('o2') && !order.includes('x2') && !order.includes('p9')) || order;
+  });
+  await check('Exact read: newest first, at most max_items', async () => {
+    const r = await runSearch('structured_search', { order: 'newest', max_items: 3 });
+    const order = r.output.items.map((i) => i.date);
+    return (order.length === 3 && order[0] >= order[1] && order[1] >= order[2]) || order;
+  });
+
+  // the runner
+  const st = fakeStep9Store();
+  const plan = {
+    tasks: [
+      { task_id: 'T1', capability: 'retrieve_data', inputs: { query: 'uae rules', countries: ['United Arab Emirates'] }, depends_on: [] },
+      { task_id: 'T2', capability: 'structured_search', inputs: { modules: ['competitor'] }, depends_on: [] },
+      // (25 Nov: the AI jobs are built now; forecast is the job not built in Layer 1)
+      { task_id: 'T3', capability: 'forecast', inputs: {}, depends_on: ['T1', 'T2'] },
+      { task_id: 'T4', capability: 'summarise', inputs: { input: ['T3.output'] }, depends_on: ['T3'] },
+    ],
+  };
+  await check('Runner: searches run first (together), a job not built yet is "not built", a job waiting for it is "blocked" (never run on half the evidence)', async () => {
+    runner.useStore(st);
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1', 'T2'], ['T3'], ['T4']] }, plan, understoodFor(), { client_id: st.clientId });
+    const s = Object.fromEntries(Object.entries(out.results).map(([k, v]) => [k, v.status]));
+    return (s.T1 === 'done' && s.T2 === 'done' && s.T3 === 'not_built' && s.T4 === 'blocked' && out.status === 'partial' && out.counts.signals > 0) || { s, out: out.counts };
+  });
+  await check('Runner: a search that fails once is tried again and works (tries = 2)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'x' }, understoodFor(), { failTimes: 1 });
+    return (r.status === 'done' && r.tries === 2) || r;
+  });
+  await check('Runner: a search that keeps failing -> "failed" with the reason, and every job using it is blocked', async () => {
+    runner.useStore(fakeStep9Store({ failTimes: 99 }));
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1', 'T2'], ['T3'], ['T4']] }, plan, understoodFor(), { client_id: 'client-1' });
+    const s = Object.fromEntries(Object.entries(out.results).map(([k, v]) => [k, v.status]));
+    return (s.T1 === 'failed' && /Qdrant is down/.test(out.results.T1.error) && s.T3 === 'blocked' && out.status === 'failed_jobs') || { s, e: out.results.T1.error };
+  });
+  await check('Runner: the client is ALWAYS the logged-in one; a plan not approved by Step 8, or no client, never runs', async () => {
+    runner.useStore(fakeStep9Store());
+    let a = false; let b = false;
+    try { await runner.runWorkflow({ status: 'rejected', batches: [] }, plan, understoodFor(), { client_id: 'client-1' }); } catch (e) { a = true; }
+    try { await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, plan, understoodFor(), {}); } catch (e) { b = true; }
+    const other = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, { tasks: [plan.tasks[0]] }, understoodFor(), { client_id: 'client-1' });
+    const leak = JSON.stringify(other.results.T1.output).includes('OTHER CLIENT');
+    return (a && b && !leak) || { a, b, leak };
+  });
+  // 24 Nov, from the real-data report: a search reads page after page
+  await check('Pages: exact read "latest regulations in the UAE" when 250 NEWER Kuwait signals come first -> the UAE one is still found (reads more pages)', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'], countries: ['United Arab Emirates'] }, understoodFor(), { filler: 250 });
+    return (ids(r) === 'p1' && r.output.timing.pages >= 3) || { got: ids(r), timing: r.output && r.output.timing };
+  });
+  await check('Pages: search by meaning for the UAE when 250 closer Kuwait pieces come first -> the UAE signals are still found (next page)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'rules', countries: ['United Arab Emirates'] }, understoodFor(), { filler: 250 });
+    return (ids(r) === 'm1,p1' && r.output.timing.pages >= 2) || { got: ids(r), timing: r.output && r.output.timing };
+  });
+  await check('Pages (must not change): no place asked -> one page is enough, no extra reads', async () => {
+    const r = await runSearch('retrieve_data', { query: 'rules' }, understoodFor(), { filler: 250 });
+    return (r.output.items.length === 20 && r.output.timing.pages === 1) || r.output.timing;
+  });
+  await check('Pages: exact read by impact reads the whole period, Critical first', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'], order: 'impact' }, understoodFor(), { filler: 250 });
+    return (r.output.items[0].signal_id === 'p3' && r.output.items[1].signal_id === 'p1') || r.output.items.slice(0, 3).map((i) => i.signal_id);
+  });
+  await check('Runner: a search that runs out of time is NOT tried again (it would double the load), it is "failed" with the reason', async () => {
+    const st2 = fakeStep9Store({ hang: 300 });
+    runner.useStore(st2);
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, { tasks: [plan.tasks[0]] }, understoodFor(), { client_id: 'client-1' }, { jobTimeoutMs: 100 });
+    await new Promise((r) => setTimeout(r, 350));
+    return (out.results.T1.status === 'failed' && /took longer/.test(out.results.T1.error) && out.results.T1.tries === 1) || out.results.T1;
+  });
+  await check('Search: every search says where its time went (vector, search, rows, pages)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'rules' });
+    const t = r.output.timing || {};
+    return ['embed_ms', 'search_ms', 'rows_ms', 'pages'].every((k) => typeof t[k] === 'number') || t;
+  });
+  // 25 Nov, second real-data report: a place / company asked is first read from its tag
+  await check('Tagged: UAE news further from the words than the 600 closest pieces is still found (searched among the UAE-tagged signals)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'rules', countries: ['United Arab Emirates'] }, understoodFor(), { deep: 700 });
+    return (ids(r) === 'm1,p1' && r.output.timing.tagged_signals >= 2) || { got: ids(r), timing: r.output && r.output.timing };
+  });
+  await check('Tagged: a region (GCC) reads its countries\' tags (Kuwait, UAE, Saudi) and still Global news naming a member', async () => {
+    const r = await runSearch('retrieve_data', { query: 'rules', countries: ['GCC'] }, understoodFor(), { deep: 700 });
+    return ['m1', 'p1', 'p2', 'x1'].every((k) => ids(r).split(',').includes(k)) || { got: ids(r) };
+  });
+  await check('Tagged: a known company in a place ("Estee Lauder" in the Middle East) -> its news, found by its company tag, place checked after', async () => {
+    const r = await runSearch('retrieve_data', { query: 'moves', companies: ['Estee Lauder'], countries: ['Middle East'] }, understoodFor(), { deep: 700 });
+    return ids(r) === 'x1' || { got: ids(r), reasons: r.output && r.output.removed.reasons };
+  });
+  await check('Tagged (must not change): no place and no company -> no tag read, the search as before', async () => {
+    const st = fakeStep9Store({ deep: 10 });
+    runner.useStore(st);
+    const wf = { tasks: [{ task_id: 'T1', capability: 'retrieve_data', inputs: { query: 'rules', modules: ['policy', 'market', 'outlook', 'competitor'] }, depends_on: [] }] };
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, wf, understoodFor(), { client_id: st.clientId });
+    return (st.taggedReads() === 0 && out.results.T1.status === 'done') || { reads: st.taggedReads() };
+  });
+  await check('Tagged (must not change): an unknown "company" (K-beauty) is not read by tag; with a place, the place tag is used', async () => {
+    const r = await runSearch('retrieve_data', { query: 'k-beauty', companies: ['K-beauty'], countries: ['United Arab Emirates'] }, understoodFor(), { deep: 700 });
+    return (ids(r) === 'm1,p1' && /K-beauty found nowhere/.test(r.output.note)) || { got: ids(r), note: r.output && r.output.note };
+  });
+  await check('Tagged (must not change): a "Global" side is not narrowed by tag (worldwide news)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetics news', countries: ['Global'] });
+    return (ids(r) === 'o1,p3,p5' && r.output.timing.tagged_signals == null) || { got: ids(r), timing: r.output.timing };
+  });
+  await check('Tagged: nothing tagged -> the wide search still runs (same answer as before)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetics news', countries: ['United Arab Emirates'] }, understoodFor(), { noTags: true });
+    return ids(r) === 'm1,p1' || { got: ids(r) };
+  });
+  await check('Fair share: newest over all modules when one module has many newer signals -> the other modules still get places', async () => {
+    const r = await runSearch('structured_search', {}, understoodFor(), { filler: 250 });
+    const mods = new Set(r.output.items.map((i) => i.module));
+    return (r.output.items.length === 20 && ['policy', 'market', 'outlook', 'competitor'].every((m) => mods.has(m))) || [...mods];
+  });
+  await check('Fair share (must not change): one module asked -> plain newest first', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'] }, understoodFor(), { filler: 250 });
+    const dates = r.output.items.map((i) => i.date);
+    return (r.output.items.length === 20 && dates.every((d, k) => k === 0 || dates[k - 1] >= d)) || dates;
+  });
+  await check('Runner: a task in no batch is never skipped silently (failed, with the reason)', async () => {
+    runner.useStore(fakeStep9Store());
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, { tasks: plan.tasks.slice(0, 2) }, understoodFor(), { client_id: 'client-1' });
+    return (out.results.T2.status === 'failed' && /not in any batch/.test(out.results.T2.error)) || out.results.T2;
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// `9 real`: the searches on the REAL data (needs the server). For each
+// question: every search, its filters, how many signals came back, the top
+// ones with date / place / company / score, and why others were dropped.
+// The report is saved in scripts/logs/step9_<time>.txt to read by hand.
+// ═════════════════════════════════════════════════════════════════════════
+const STEP9_REAL_QUESTIONS = [
+  'What are the latest cosmetics regulations in the UAE?',
+  'Give me all high impact signals from last month',
+  'What did our competitors launch in the last 3 months?',
+  'Compare Saudi Arabia and UAE beauty markets',
+  'GCC beauty trends except Kuwait',
+  'What are the risks for us from new cosmetics rules in the EU?',
+  'Refill packaging trends',
+  'What is Estée Lauder doing in the Middle East?',
+  'Halal cosmetics opportunities in Indonesia and Malaysia',
+  'Competitor moves this week',
+  'Forward outlook signals about sustainability',
+  'Show me market dynamics news about fragrance in Saudi Arabia',
+  'SWOT analysis of Lumière Beauty Group',
+  'Is K-beauty growing in India?',
+  'What changed in my market this month?',
+  // 25 Nov, for the AI jobs: a fact question and a company comparison
+  'How did Shiseido do in Q3 2026?',
+  'Compare Lancôme and Estée Lauder on product launches',
+];
+async function testStep9Real() {
+  console.log('\nSTEP 9 + 10 on the REAL data — the searches, the AI jobs and the answers of real questions (read the report by hand)');
+  const fs = require('fs');
+  const path = require('path');
+  const lines = [];
+  const out = (t = '') => { console.log(t); lines.push(t); };
+  for (const q of STEP9_REAL_QUESTIONS) {
+    const r = await good(q);
+    const run = r.json && r.json.debug && r.json.debug.runWorkflow;
+    out(`\nQ: ${q}`);
+    if (!run) {
+      out(`   no Step 9: ${r.json && r.json.status ? r.json.status : r.status} ${r.json && r.json.error ? r.json.error.message : ''} ${r.json && r.json.failed_step ? `(stopped at ${r.json.failed_step})` : ''}`);
+      continue;
+    }
+    const tasks = (r.json.debug.buildWorkflow && r.json.debug.buildWorkflow.tasks) || [];
+    out(`   run: ${run.status} · done ${run.counts.done} · failed ${run.counts.failed} · blocked ${run.counts.blocked} · not built ${run.counts.not_built} · skipped ${run.counts.skipped || 0} · AI calls ${run.ai ? `${run.ai.used} of ${run.ai.budget}` : '-'} · ${run.ms} ms`);
+    const src = run.sources || {};
+    const cite = (ids) => (ids || []).map((x) => { const it = src[x]; return it ? `${x} "${String(it.title).slice(0, 40)}"` : `${x} (?)`; }).slice(0, 3).join('; ') + ((ids || []).length > 3 ? ` +${ids.length - 3}` : '');
+    for (const [id, res] of Object.entries(run.results)) {
+      if (!['retrieve_data', 'structured_search'].includes(res.capability)) {
+        // an AI job (or the evidence check)
+        const o = res.output;
+        out(`   ${id} ${res.capability} -> ${res.status} · AI calls ${res.ai_calls || 0} · ${res.ms} ms${res.error ? ` (${res.error})` : ''}`);
+        const replyInfo = () => (res.ai_replies || []).map((x) => `${x.letters} letters, ends: ${JSON.stringify(x.end)}`).join(' /// ');
+        if (!o) { if (res.ai_problems) out(`      AI reply problems: ${res.ai_problems.join(' /// ')}`); if (res.ai_replies) out(`      AI replies: ${replyInfo()}`); continue; }
+        const empty = ['findings', 'patterns', 'rows', 'groups'].some((k) => Array.isArray(o[k]) && !o[k].length) && (res.ai_calls || 0) > 0;
+        if (empty && res.ai_replies) out(`      (nothing kept from the AI) AI replies: ${replyInfo()}`);
+        for (const f of (o.findings || []).slice(0, 6)) out(`      [${f.kind}${f.level ? ` ${f.level}` : ''}]${f.heading ? ` ${f.heading}:` : ''}${f.about ? ` (${f.about})` : ''} ${f.text}${f.why ? ` — why: ${f.why}` : ''}${f.why_it_matters ? ` — matters: ${f.why_it_matters}` : ''}\n         sources: ${cite(f.sources)}`);
+        for (const p of (o.patterns || []).slice(0, 6)) out(`      [${p.kind}, ${p.source_count} sources, ${p.first_date}..${p.last_date}] ${p.name}: ${p.description}`);
+        for (const g of (o.groups || []).slice(0, 6)) out(`      group (${g.from}) "${g.name}": ${g.sources.length} items`);
+        if (o.ungrouped && o.ungrouped.length) out(`      in no group: ${o.ungrouped.length}`);
+        for (const row of (o.rows || []).slice(0, 6)) out(`      row "${row.point}": ${Object.entries(row.cells).map(([k, c]) => `${k}: ${c.text || '(empty)'} [${c.sources.length}]`).join(' | ')}`);
+        for (const d of (o.differences || [])) out(`      difference: ${d.text}`);
+        if (o.status) out(`      evidence: ${o.status} · supported ${o.counts ? o.counts.supported : o.supported.length} · weak ${o.weak.length} · conflicts ${o.conflicts.length}${o.limitations.length ? ` · limits: ${o.limitations.slice(0, 5).join(' / ')}` : ''}`);
+        if (res.removed_examples) out(`      removed, e.g.: ${res.removed_examples.join(' / ')}`);
+        const why = Object.entries((o.removed && o.removed.reasons) || {}).map(([k, v]) => `${k} ${v}`).join(', ');
+        if (why) out(`      removed: ${why}`);
+        if (o.note) out(`      note: ${o.note}`);
+        if (res.ai_problems) out(`      AI reply problems: ${res.ai_problems.join(' /// ')}`);
+        continue;
+      }
+      const t = tasks.find((x) => x.task_id === id) || { inputs: {} };
+      const i = t.inputs;
+      const filters = [i.modules && i.modules.length < 4 ? `modules ${i.modules.join('/')}` : null, i.date_from || i.date_to ? `dates ${i.date_from || '…'}..${i.date_to || '…'}` : null,
+        i.countries ? `places ${i.countries.join('/')}` : null, i.not_countries ? `NOT ${i.not_countries.join('/')}` : null,
+        i.companies ? `companies ${i.companies.join('/')}` : null, i.not_companies ? `NOT ${i.not_companies.join('/')}` : null,
+        i.impact ? `impact ${i.impact.join('/')}` : null].filter(Boolean).join(' · ');
+      const tm = res.output && res.output.timing ? ` · ${res.ms} ms (${Object.entries(res.output.timing).map(([k, v]) => `${k.replace('_ms', '')} ${v}`).join(', ')})` : ` · ${res.ms} ms`;
+      out(`   ${id} ${res.capability} "${i.query || '(newest)'}" ${filters ? `[${filters}]` : ''} -> ${res.status}${res.output ? `, ${res.output.items.length} signals` : ''}${res.error ? ` (${res.error})` : ''}${tm}`);
+      if (res.output) {
+        for (const it of res.output.items.slice(0, 5)) {
+          out(`      ${it.score != null ? it.score.toFixed(2) : '    '} ${it.date || '          '} ${it.module.padEnd(10)} ${(it.countries.join('/') || '-').slice(0, 25).padEnd(25)} ${(it.companies.join('/') || '-').slice(0, 18).padEnd(18)} ${it.title.slice(0, 90)}`);
+        }
+        const per = {};
+        for (const it of res.output.items) per[it.module] = (per[it.module] || 0) + 1;
+        out(`      by module: ${Object.entries(per).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`);
+        const why = Object.entries(res.output.removed.reasons).map(([k, v]) => `${k} ${v}`).join(', ');
+        if (why) out(`      dropped: ${why}`);
+        if (res.output.note) out(`      note: ${res.output.note}`);
+      }
+    }
+    // Step 10: the answer the user reads
+    const ans = r.json.debug.generateAnswer;
+    if (ans) {
+      out(`   STEP 10 answer: ${ans.status} · evidence ${ans.confidence.level} · short answer by ${ans.summary_by} · AI calls ${ans.ai_calls} · ${ans.sources.length} sources · saved ${ans.saved}`);
+      if (ans.check && ans.check.problems && ans.check.problems.length) out(`      check: ${ans.check.problems.join(' / ')}${ans.check.ai_text ? `\n      AI answer as written: ${ans.check.ai_text}` : ''}`);
+      out(String(r.json.answer || '').split('\n').map((l) => `      | ${l}`).join('\n'));
+    }
+  }
+  const dir = path.join(__dirname, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `step9_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`);
+  fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+  console.log(`\nReport saved: ${file}`);
+}
+
 async function testRegistry() {
   console.log('\nJOB LIST — capabilityRegistry.js  (the jobs the planner may use)');
   const ids = registry.CAPABILITIES.map((c) => c.id);
@@ -4721,9 +5762,10 @@ async function testRegistry() {
     const bad = Object.entries(registry.GOAL_GUIDE).filter(([, jobs]) => jobs[jobs.length - 1] !== 'validate_evidence').map(([g]) => g);
     return bad.length === 0 || { bad };
   });
-  await check('No job is marked ready yet (the real code comes in Step 9)', async () => {
-    const ready = registry.CAPABILITIES.filter((c) => c.available).map((c) => c.id);
-    return ready.length === 0 || { ready };
+  await check('Every job built in Step 9 is marked ready; filter_data (never planned) and forecast (not in Layer 1) are not', async () => {
+    const ready = registry.CAPABILITIES.filter((c) => c.available).map((c) => c.id).sort();
+    const want = ['analyse_risks', 'cluster', 'compare', 'discover_opportunities', 'extract_facts', 'identify_gaps', 'identify_patterns', 'retrieve_data', 'structured_search', 'summarise', 'validate_evidence'];
+    return JSON.stringify(ready) === JSON.stringify(want) || { ready };
   });
   await check('Layer 1: every job reads client data only (no SEC, no custom data)', async () => {
     const other = registry.CAPABILITIES.filter((c) => c.data_access.some((d) => d !== 'client_data')).map((c) => c.id);
@@ -4779,9 +5821,11 @@ async function main() {
   const wantShow = args.includes('show');
   const wantRegistry = args.includes('registry');
   const wanted = args.map(Number).filter(Boolean);
-  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry;
+  // ("real" alone runs only the real-data Step 9 check, not every step)
+  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry && !args.includes('real');
   const run = (n) => runAll || wanted.includes(n);
-  const needsServer = [1, 2, 3, 5, 6, 7].some(run) || wantShow;
+  const want9Real = args.includes('real');
+  const needsServer = [1, 2, 3, 5, 6, 7].some(run) || wantShow || want9Real;
 
   if (needsServer) {
     try {
@@ -4801,6 +5845,9 @@ async function main() {
     if (run(6)) await testStep6();
     if (run(7)) await testStep7();
     if (run(8)) await testStep8();
+    if (run(9) && !want9Real) { await testStep9(); await testStep9Ai(); }
+    if (run(10) && !want9Real) await testStep10();
+    if (want9Real) await testStep9Real();
     if (runAll || wantRegistry) await testRegistry();
     if (wantBig) await testBig();
     if (wantBig5) await testBig5();

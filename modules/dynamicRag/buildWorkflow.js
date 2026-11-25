@@ -792,7 +792,8 @@ function buildMessage(question, understood, plan) {
  *   searches  [{ for: ['IR1'], words, side }] or null if nothing usable
  *   problem   why it cannot be used, in words the AI can act on
  */
-function checkAiSearches(replyText, plan, understood) {
+function checkAiSearches(replyText, plan, understoodIn) {
+  const understood = withoutLeftOut(understoodIn);
   const removed = [];
   const text = String(replyText || '');
   const start = text.indexOf('{');
@@ -1100,8 +1101,11 @@ function completeSearches(aiSearches, plan, understood, notes) {
         // user compares ("skincare or makeup": one search names skincare,
         // the other makeup): those words are the sides.
         if (uniq(mine().filter((x) => x.side).map((x) => x.side)).length < 2) {
-          let found = sidesFromSearches(mine(), question, ownName, understood);
-          if (found.length < 2) found = sidesFromPair(mine(), question, ownName, understood);
+          // a thing the user left out ("all competitors except Lancôme") is
+          // never a side, even when a search names it
+          const notLeftOut = (list) => list.filter((f) => !namesLeftOut(f.label, userLeftOut(understood)).length);
+          let found = notLeftOut(sidesFromSearches(mine(), question, ownName, understood));
+          if (found.length < 2) found = notLeftOut(sidesFromPair(mine(), question, ownName, understood));
           if (found.length >= 2) {
             for (const f of found) searches[searches.indexOf(f.search)] = { ...f.search, side: f.label };
             notes.push(`${id}: no sides from the AI; the searches name the things the question compares, so the sides are ${uniq(found.map((f) => f.label)).map((l) => `"${l}"`).join(' and ')} (found by code)`);
@@ -1356,6 +1360,35 @@ const todayOf = (understood) => {
   return new Date().toISOString().slice(0, 10);
 };
 
+// What Step 5 says the user left out, and which of those a text names.
+const userLeftOut = (understood) => {
+  const e = (understood && understood.excluded) || {};
+  return { places: e.places || [], companies: e.companies || [] };
+};
+function namesLeftOut(text, ex) {
+  const w = ` ${plain(text)} `;
+  return [...ex.places, ...ex.companies].filter((n) => {
+    const forms = [n, ...(ex.places.includes(n) ? placeShortNames(n) : [])];
+    return forms.some((f) => plain(f).length >= 2 && w.includes(` ${plain(f)} `));
+  });
+}
+// the short ways a place is written in search words ("uae", "ksa", "saudi")
+function placeShortNames(place) {
+  const out = [];
+  for (const f of (PLACES && PLACES[place]) || []) if (String(f).length >= 2) out.push(String(f));
+  return out;
+}
+// Step 5's result as Step 7 must see it: the client's competitor list
+// without the companies the user left out (the same object when nothing is
+// left out). Used by checkAiSearches AND finishWorkflow.
+function withoutLeftOut(understood) {
+  const ex = userLeftOut(understood);
+  const list = (understood && understood.client && understood.client.competitors) || [];
+  if (!ex.companies.length || !list.some((c) => ex.companies.some((x) => same(x, c)))) return understood;
+  return { ...understood, client: { ...understood.client, competitors: list.filter((c) => !ex.companies.some((x) => same(x, c))) } };
+}
+const EXCLUDE_WORDS_RE = /\b(?:except\s+for|except|excluding|exclude[sd]?|other\s+than|apart\s+from|not\s+including|leaving\s+out|but\s+not|without)\b/gi;
+
 /**
  * One search -> one search job, with the filters from Step 5:
  *   - a search that names some of the Step 5 companies looks only at those
@@ -1530,6 +1563,28 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');
     }
   }
+  // A name the user left out never stays in the search words ("GCC trends
+  // excluding Kuwait" would pull Kuwait news by meaning), nor in the filters.
+  const ex = userLeftOut(understood);
+  const leftNamed = namesLeftOut(search.words, ex);
+  if (leftNamed.length) {
+    const KEEP = '\u0000keep';
+    let w = wordsForSide(search.words, [{ label: KEEP }, ...leftNamed.map((label) => ({ label }))], KEEP, null);
+    for (const n of leftNamed) for (const f of placeShortNames(n)) w = w.replace(new RegExp(`(?<![\\p{L}\\p{N}])${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), ' ');
+    w = tidyJoins(w.replace(EXCLUDE_WORDS_RE, ' ').replace(/\s+/g, ' ').trim());
+    search = { ...search, words: w || search.words };
+    filterWhy = [filterWhy, `words: ${leftNamed.join(', ')} taken out (the user left ${leftNamed.length > 1 ? 'them' : 'it'} out)`].filter(Boolean).join('; ');
+  }
+  countries = countries.filter((c) => !ex.places.some((x) => same(x, c)));
+  // "Global" / "worldwide" means every country, not only the news tagged
+  // "Global" (24 Nov, Sneha OK): a search that is not one side of a
+  // comparison then has no country filter. (A "Global" side, "UAE vs
+  // global", keeps the filter: that side IS the worldwide news.)
+  if (!(side && side.countries) && countries.includes('Global')) {
+    countries = [];
+    filterWhy = [filterWhy, 'places: "Global" means every country, so no country filter'].filter(Boolean).join('; ');
+  }
+  companies = companies.filter((c) => !ex.companies.some((x) => same(x, c)));
   const inputs = {};
   if (!exactRead) inputs.query = cleanSearchWords(withoutOwnWords(search.words, understood));
   inputs.modules = (exactRead || allList) && named.length ? named : [...MODULES];
@@ -1537,6 +1592,8 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
   if (dateTo) inputs.date_to = dateTo;
   if (companies.length) inputs.companies = companies.slice(0, 20);
   if (countries.length) inputs.countries = countries.slice(0, 20);
+  if (ex.places.length) inputs.not_countries = ex.places.slice(0, 20);
+  if (ex.companies.length) inputs.not_companies = ex.companies.slice(0, 20);
   if (exactRead) {
     const impact = impactAsked(question);
     if (impact) inputs.impact = impact;
@@ -1739,6 +1796,21 @@ const countOf = (tasks) => ({
  */
 function finishWorkflow(plan, understood, question, aiSearches, aiBudget, removed, aiSideNames = null) {
   const notes = [];
+  // What the user LEFT OUT (Step 5, "except Kuwait") is never searched: the
+  // client's competitor list loses it (all competitors except Lancôme), an
+  // AI side naming it is not a side, and every search carries it so Step 9
+  // drops that news (also inside a region: GCC minus Kuwait).
+  const ex = userLeftOut(understood);
+  if (ex.places.length || ex.companies.length) {
+    const view = withoutLeftOut(understood);
+    if (view !== understood) notes.push(`competitors: ${ex.companies.join(', ')} left out, as the user said`);
+    understood = view;
+    if (aiSideNames && aiSideNames.length) {
+      const kept = aiSideNames.filter((n) => !namesLeftOut(n, ex).length);
+      if (kept.length < aiSideNames.length) notes.push(`sides: ${aiSideNames.filter((n) => !kept.includes(n)).join(', ')} not a side (the user left it out)`);
+      aiSideNames = kept;
+    }
+  }
   // the sides of any comparison are chosen once, for every part of the build
   if (!understood.question_text) understood = { ...understood, question_text: question };
   understood = { ...understood, compare_sides: codeSides(understood, aiSideNames) };
