@@ -511,7 +511,9 @@ async function ask(questionFromHistory) {
 
   let httpStatus = 0, json = null;
   try {
-    const res = await fetch('/dynamic-rag/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // the playground is a test tool: it sends the key from its own link (?key=...)
+    const key = new URLSearchParams(location.search).get('key') || '';
+    const res = await fetch('/dynamic-rag/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { 'x-playground-key': key } : {}) }, body: JSON.stringify(body) });
     httpStatus = res.status;
     json = await res.json();
   } catch (e) {

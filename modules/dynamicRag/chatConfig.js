@@ -171,4 +171,8 @@ module.exports = {
   // Without the right key the page says it is off. On the laptop leave
   // DR_PLAYGROUND_KEY out and the page opens without a key, as before.
   PLAYGROUND_KEY: process.env.DR_PLAYGROUND_KEY || '',
+  // Previous Chats in the DI tab: at most this many chats in the list, and
+  // this many messages when one chat is opened (chatHistory.js)
+  HISTORY_MAX_CHATS: 100,
+  HISTORY_MAX_MESSAGES: 200,
 };

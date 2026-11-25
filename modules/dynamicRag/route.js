@@ -4,7 +4,12 @@
  * The API door of the Decision Intelligence chat.
  *
  *   POST /dynamic-rag/chat
- *   body: { question, clientId, userId, conversationId? }
+ *   header: Authorization: Bearer <Supabase login token>   (the dashboard's DI tab)
+ *   body: { question, conversationId? }
+ *   Who is asking (client + user) comes from the login token, never from
+ *   the body (chatAccess.js). Only test tools (playground, test file) may
+ *   send clientId / userId in the body - see chatAccess.js.
+ *   The chat list, one chat, delete and suggested questions: chatHistory.js.
  *
  * It only calls the step files in order. Which file is which step of the
  * manager's doc:
@@ -35,7 +40,7 @@
  *     status = clarification  -> answer is one question back to the user
  * Reply on problem : { ok: false, error: { code, message }, failed_step, debug }
  *
- * FOR TESTING ONLY (to be switched off before real clients use the chat):
+ * FOR TEST TOOLS ONLY (a real user with a login token never gets these):
  *   - "debug" in the reply shows what every step produced, and
  *     debug.timings how long each step took (milliseconds).
  *   - body.stopAfterStep = 1, 2, 3, 5, 6 or 7 stops the chat after that step, so the
@@ -58,6 +63,8 @@ const { validateWorkflow } = require('./validateWorkflow'); // Step 8
 const { runWorkflow } = require('./runWorkflow');           // Step 9 (the searches and the AI jobs)
 const { generateAnswer, saveAnswer } = require('./generateAnswer'); // Step 10 (the answer)
 const { traceChat, traceStep, traceChatResult } = require('./chatTracing'); // Phoenix records (off unless PHOENIX_COLLECTOR_ENDPOINT is set)
+const { whoIsAsking } = require('./chatAccess');                // who is asking: the login token (test tools: playground key)
+const { registerChatHistoryRoutes } = require('./chatHistory'); // chat list, one chat, delete, suggested questions
 
 function registerDynamicRagRoute(app) {
   // ── Test page: type a question, see every step ─────────────────────────
@@ -73,11 +80,16 @@ function registerDynamicRagRoute(app) {
   // ── The chat ───────────────────────────────────────────────────────────
   // traceChat makes one Phoenix record per question (does nothing when off).
   app.post('/dynamic-rag/chat', (req, res) => traceChat(req.body, () => handleChat(req, res)));
+
+  // ── Previous Chats + suggested questions for the DI tab ───────────────
+  registerChatHistoryRoutes(app);
 }
 
 async function handleChat(req, res) {
   const startedAt = Date.now();
-  const stopAfterStep = Number(req.body && req.body.stopAfterStep) || null;
+  // set once we know who is asking: only a test tool may stop early or see "debug"
+  let stopAfterStep = null;
+  let isTest = false;
 
   // What every step produced, and how long it took. Filled in as we go,
   // so on an error we can still show the steps that worked.
@@ -91,8 +103,17 @@ async function handleChat(req, res) {
   };
 
   try {
+    // ── Who is asking: the login token (never the client / user the screen sends) ──
+    currentStep = 'login';
+    const who = await whoIsAsking(req);
+    isTest = who.test;
+    if (isTest) stopAfterStep = Number(req.body && req.body.stopAfterStep) || null;
+    const body = { ...(req.body || {}), clientId: who.clientId, userId: who.userId };
+    currentStep = 'receiveQuestion';
+    stepStartedAt = Date.now();
+
     // ── Step 1: receive the question ───────────────────────────────
-    const request = await traceStep('Step 1 – receiveQuestion', req.body, () => receiveQuestion(req.body));
+    const request = await traceStep('Step 1 – receiveQuestion', body, () => receiveQuestion(body));
     stepDone('receiveQuestion', request);
     console.log(
       `[DynamicRAG] receiveQuestion ok | request=${request.request_id} ` +
@@ -119,7 +140,7 @@ async function handleChat(req, res) {
           status: details.status, summary: details.summary, sections: details.sections, confidence: details.confidence,
           limits: details.limits, sources: details.sources,
         } : null,
-        debug,
+        ...(isTest ? { debug } : {}),
       });
     };
 
@@ -248,7 +269,7 @@ async function handleChat(req, res) {
         ok: false,
         error: { code: err.code, message: err.message },
         failed_step: currentStep,
-        debug,
+        ...(isTest ? { debug } : {}),
       });
     }
 
@@ -260,7 +281,7 @@ async function handleChat(req, res) {
       ok: false,
       error: { code: 'SERVER_ERROR', message: 'Something went wrong. Please try again.' },
       failed_step: currentStep,
-      debug,
+      ...(isTest ? { debug } : {}),
     });
   }
 }

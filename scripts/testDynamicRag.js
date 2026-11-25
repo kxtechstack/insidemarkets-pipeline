@@ -103,7 +103,8 @@ async function ask(body) {
 
   const res = await fetch(`${BASE_URL}/dynamic-rag/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // a test tool: the playground key (when .env has one) lets it send clientId / userId itself
+    headers: { 'Content-Type': 'application/json', ...(process.env.DR_PLAYGROUND_KEY ? { 'x-playground-key': process.env.DR_PLAYGROUND_KEY } : {}) },
     body: JSON.stringify(body),
   });
   let json = null;
@@ -5916,6 +5917,104 @@ async function testRegistry() {
   });
 }
 
+// ── The DI tab's doors: who is asking (login token), Previous Chats, suggested questions ──
+// (26 Nov) Fake login store and fake tables: no server, no AI, no cost.
+async function testAccess() {
+  console.log('\nACCESS — chatAccess.js + chatHistory.js  (login token, Previous Chats, suggested questions; fake data, no AI)');
+  const access = require('../modules/dynamicRag/chatAccess');
+  const history = require('../modules/dynamicRag/chatHistory');
+  const C1 = '11111111-1111-4111-8111-111111111111';
+  const C2 = '22222222-2222-4222-8222-222222222222';
+  const U1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const U2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const people = {
+    good: { email: 'hannah@lumiere.test', rows: [{ id: U1, client_id: C1, is_active: true }] },
+    banned: { email: 'ban@lumiere.test', banned_until: '2999-01-01T00:00:00Z', rows: [{ id: U1, client_id: C1, is_active: true }] },
+    off: { email: 'off@lumiere.test', rows: [{ id: U1, client_id: C1, is_active: false }] },
+    none: { email: 'ghost@lumiere.test', rows: [] },
+    two: { email: 'two@x.test', rows: [{ id: U1, client_id: C1, is_active: true }, { id: U2, client_id: C2, is_active: true }] },
+  };
+  access.useAccessStore({
+    async userOfToken(t) { const p = people[t]; return p ? { email: p.email, banned_until: p.banned_until || null } : null; },
+    async usersByEmail(e) { const p = Object.values(people).find((x) => x.email === e); return p ? p.rows : []; },
+  });
+  const req = (token, extra = {}) => ({ headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(extra.headers || {}) }, body: extra.body || {}, query: extra.query || {} });
+  const codeOf = async (fn) => { try { await fn(); return 'none'; } catch (e) { return e.code || e.message; } };
+  try {
+    access.useAccessSettings({ on: false, key: '' });
+    await check('Login: the client and user come from the login token; a clientId / userId in the body is NEVER used (another client asked for)', async () => {
+      const w = await access.whoIsAsking(req('good', { body: { clientId: C2, userId: U2 } }));
+      return (w.clientId === C1 && w.userId === U1 && w.test === false) || w;
+    });
+    await check('Login: no token -> 401 LOGIN_NEEDED; a bad / expired token -> 401; a blocked login -> USER_INACTIVE; no account -> USER_NOT_FOUND; inactive in the console -> USER_INACTIVE', async () => {
+      const got = [await codeOf(() => access.whoIsAsking(req('', { body: { clientId: C1, userId: U1 } }))), await codeOf(() => access.whoIsAsking(req('nope'))),
+        await codeOf(() => access.whoIsAsking(req('banned'))), await codeOf(() => access.whoIsAsking(req('none'))), await codeOf(() => access.whoIsAsking(req('off')))];
+      return JSON.stringify(got) === JSON.stringify(['LOGIN_NEEDED', 'LOGIN_NEEDED', 'USER_INACTIVE', 'USER_NOT_FOUND', 'USER_INACTIVE']) || got;
+    });
+    await check('Login: one email in two workspaces -> refused (never guessed)', async () => (await codeOf(() => access.whoIsAsking(req('two')))) === 'MORE_THAN_ONE_WORKSPACE');
+    await check('Test tools: with the playground on and the right key, the body may say who it is (test = true: debug allowed); a wrong key or the playground off -> 401', async () => {
+      access.useAccessSettings({ on: true, key: 'k1' });
+      const ok = await access.whoIsAsking(req('', { headers: { 'x-playground-key': 'k1' }, body: { clientId: C1, userId: U1 } }));
+      const wrong = await codeOf(() => access.whoIsAsking(req('', { headers: { 'x-playground-key': 'k2' }, body: { clientId: C1, userId: U1 } })));
+      access.useAccessSettings({ on: true, key: '' });
+      const noKeySet = await access.whoIsAsking(req('', { body: { clientId: C1, userId: U1 } }));
+      access.useAccessSettings({ on: false, key: 'k1' });
+      const off = await codeOf(() => access.whoIsAsking(req('', { headers: { 'x-playground-key': 'k1' }, body: { clientId: C1, userId: U1 } })));
+      return (ok.test && ok.clientId === C1 && wrong === 'LOGIN_NEEDED' && noKeySet.test && off === 'LOGIN_NEEDED') || { ok, wrong, noKeySet, off };
+    });
+    await check('Test tools (must not change for real users): a login token still decides who it is, also with the playground key', async () => {
+      access.useAccessSettings({ on: true, key: 'k1' });
+      const w = await access.whoIsAsking(req('good', { headers: { 'x-playground-key': 'k1' }, body: { clientId: C2, userId: U2 } }));
+      return (w.clientId === C1 && w.userId === U1 && w.test === true) || w;
+    });
+
+    // ---- Previous Chats ----
+    const T = '2026-11-26T01:00:00Z';
+    const chats = {
+      c1: { id: 'c1c1c1c1-0000-4000-8000-000000000001', client_id: C1, user_id: U1, title: 'Shiseido Q3', updated_at: T, deleted_at: null },
+      c2: { id: 'c1c1c1c1-0000-4000-8000-000000000002', client_id: C1, user_id: U2, title: 'Someone else', updated_at: T, deleted_at: null },
+      c3: { id: 'c1c1c1c1-0000-4000-8000-000000000003', client_id: C1, user_id: U1, title: 'Deleted', updated_at: T, deleted_at: T },
+      c4: { id: 'c1c1c1c1-0000-4000-8000-000000000004', client_id: C2, user_id: U1, title: 'Other workspace', updated_at: T, deleted_at: null },
+    };
+    const hidden = [];
+    let listedWith = null;
+    let suggestedWith = null;
+    history.useHistoryStore({
+      async conversations(c, u, limit) { listedWith = [c, u, limit]; return Object.values(chats).filter((x) => x.client_id === c && x.user_id === u && !x.deleted_at); },
+      async conversation(id) { return Object.values(chats).find((x) => x.id === id) || null; },
+      async messages(id) { return [{ id: 'm1', role: 'user', content: 'How did Shiseido do?', created_at: T }, { id: 'm2', role: 'assistant', content: 'Back to profit [1].', created_at: T, payload: { sources: [1] } }]; },
+      async hide(id) { hidden.push(id); },
+      async suggested(c, surface) { suggestedWith = [c, surface]; return [{ id: 'q1', client_id: null, category: 'list', title: 'Rules', question: 'Latest UAE rules?', description: null, icon_name: 'ShieldCheck', sort_order: 1 }]; },
+    });
+    const me = { clientId: C1, userId: U1 };
+    await check('Previous Chats: only MY chats in MY workspace, not deleted, in the shape the DI tab reads ({ conversations: [{ id, title, updated_at }] })', async () => {
+      const r = await history.listChats(me);
+      return (r.conversations.length === 1 && r.conversations[0].title === 'Shiseido Q3' && Object.keys(r.conversations[0]).join() === 'id,title,updated_at' && listedWith[0] === C1 && listedWith[1] === U1) || r;
+    });
+    await check('Open a chat: my own chat -> every message (role, content, created_at, payload); another person\'s, another workspace\'s, a deleted one or a bad id -> the SAME "This chat could not be found."', async () => {
+      const r = await history.openChat(me, chats.c1.id);
+      const codes = [await codeOf(() => history.openChat(me, chats.c2.id)), await codeOf(() => history.openChat(me, chats.c3.id)), await codeOf(() => history.openChat(me, chats.c4.id)), await codeOf(() => history.openChat(me, 'not-an-id'))];
+      return (r.messages.length === 2 && r.messages[1].role === 'assistant' && r.messages[1].payload.sources.length === 1 && codes.every((c) => c === 'CONVERSATION_NOT_FOUND')) || { r, codes };
+    });
+    await check('Delete a chat: my own chat is hidden (deleted_at set, never removed for good); another person\'s chat is NOT touched', async () => {
+      const ok = await history.deleteChat(me, chats.c1.id);
+      const other = await codeOf(() => history.deleteChat(me, chats.c2.id));
+      return (ok.ok && hidden.length === 1 && hidden[0] === chats.c1.id && other === 'CONVERSATION_NOT_FOUND') || { ok, hidden, other };
+    });
+    await check('Suggested questions: read from the table for my client (and every client), "home" or "library" (anything else = home); no client -> refused', async () => {
+      const r = await history.suggestedQuestions(me, 'library');
+      const w1 = suggestedWith.slice();
+      await history.suggestedQuestions(me, 'drop table');
+      const bad = await codeOf(() => history.suggestedQuestions({ clientId: "x' or 1=1", userId: U1 }, 'home'));
+      return (r.questions.length === 1 && r.questions[0].question === 'Latest UAE rules?' && w1[0] === C1 && w1[1] === 'library' && suggestedWith[1] === 'home' && bad === 'MISSING_FIELDS') || { r, w1, suggestedWith, bad };
+    });
+  } finally {
+    access.useAccessStore(null);
+    access.useAccessSettings(null);
+    history.useHistoryStore(null);
+  }
+}
+
 async function main() {
   if (typeof fetch !== 'function') {
     console.log('This test needs Node 18 or newer.');
@@ -5930,9 +6029,10 @@ async function main() {
   const wantBig7 = args.includes('big7');
   const wantShow = args.includes('show');
   const wantRegistry = args.includes('registry');
+  const wantAccess = args.includes('access');
   const wanted = args.map(Number).filter(Boolean);
   // ("real" alone runs only the real-data Step 9 check, not every step)
-  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry && !args.includes('real');
+  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry && !wantAccess && !args.includes('real');
   const run = (n) => runAll || wanted.includes(n);
   const want9Real = args.includes('real');
   const needsServer = [1, 2, 3, 5, 6, 7].some(run) || wantShow || want9Real;
@@ -5959,6 +6059,7 @@ async function main() {
     if (run(10) && !want9Real) await testStep10();
     if (want9Real) await testStep9Real();
     if (runAll || wantRegistry) await testRegistry();
+    if (runAll || wantAccess) await testAccess();
     if (wantBig) await testBig();
     if (wantBig5) await testBig5();
     if (wantBig6) await testBig6(args.includes('all'));
