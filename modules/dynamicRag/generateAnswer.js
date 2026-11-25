@@ -139,6 +139,16 @@ function buildSections(run, workflow, book) {
     if (Array.isArray(o.rows)) {
       const sides = (o.sides || []).map((s) => s.label);
       const rows = o.rows.map((row) => ({ point: row.point, cells: sides.map((s) => { const c = row.cells[s] || { text: '', sources: [] }; return { text: c.text, sources: book.nums(c.sources) }; }) }));
+      // the row made by code: how many news items each side's search found
+      // (26 Nov: "which competitor is the busiest?" — the AI cannot count)
+      if (Array.isArray(o.found) && o.found.length && rows.length) {
+        const byLabel = new Map(o.found.map((f) => [f.label, f]));
+        rows.push({ point: ANSWER_TEXT.compare_count_point, by_code: true, cells: sides.map((s) => {
+          const f = byLabel.get(s);
+          if (!f) return { text: '', sources: [] };
+          return { text: `${f.count} news ${f.count === 1 ? 'item' : 'items'} found`, sources: book.nums(f.sources || []) };
+        }) });
+      }
       const differences = (o.differences || []).map((d) => ({ text: d.text, kind: d.kind || 'interpretation', sources: book.nums(d.sources) })).filter((d) => d.sources.length);
       if (rows.length || differences.length) sections.push({ title, kind: 'table', sides, rows, differences, empty_sides: o.empty_sides || [] });
       continue;
@@ -240,7 +250,8 @@ function codeSummary(sections, nothing) {
       out.push(sentence(`${lead[p.kind] || ''}${t}`, p.sources));
     }
     if (s.kind === 'table') {
-      const row = s.rows.find((r) => r.cells.filter((c) => c.text).length >= 2) || s.rows.find((r) => r.cells.some((c) => c.text));
+      const own = s.rows.filter((r) => !r.by_code);
+      const row = own.find((r) => r.cells.filter((c) => c.text).length >= 2) || own.find((r) => r.cells.some((c) => c.text));
       if (row) {
         const parts = row.cells.map((c, k) => (c.text ? `${s.sides[k]}: ${c.text.replace(/[.;]+$/, '')}` : `${s.sides[k]}: ${ANSWER_TEXT.no_news_cell}`));
         out.push(sentence(`On ${row.point}, ${parts.join('; ')}`, [...new Set(row.cells.flatMap((c) => c.sources))].sort((a, b) => a - b)));

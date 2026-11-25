@@ -135,6 +135,8 @@ module.exports = {
     conflicts: 'Some sources give different numbers for the same thing (see the facts)',
     compare_by_code: 'The AI could not write the comparison, so the main news of each side is shown side by side instead',
     compare_by_code_point: 'main news found',
+    // the comparison row made by code: how many news items each side's search found
+    compare_count_point: 'news items found in your data',
     confidence: {
       good: 'Good evidence: several news items support the main points.',
       some: 'Some evidence: the answer rests on a few news items, so read it with care.',

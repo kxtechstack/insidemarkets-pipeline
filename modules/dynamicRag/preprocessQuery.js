@@ -470,6 +470,16 @@ function shortFormFix(w) {
   const rival = found.find((x) => x !== top && x.cover === top.cover && x.n * CLEAR_WINNER > top.n);
   return rival ? null : top.c;
 }
+// Does word c hold all the letters of w in order, with only vowels added?
+// ("deadln" in "deadline": yes; "shud" in "should": no, the l is added)
+function onlyVowelsAdded(w, c) {
+  let j = 0;
+  for (const ch of c) {
+    if (j < w.length && ch === w[j]) j += 1;
+    else if (!/[aeiou]/.test(ch)) return false;
+  }
+  return j === w.length;
+}
 // Are all the letters of w in word c, in the same order? ("shud" in "should")
 function keepsLetters(w, c) {
   let j = 0;
@@ -484,6 +494,63 @@ function shortFormOfProtected(w, protectedSet) {
     if (c > best) best = c;
   }
   return best;
+}
+// 26 Nov (playground): "indnsia halal deadln" — "indnsia" was kept as a
+// name (never "fixed" into another word), but left as typed, so no later
+// step saw Indonesia and the question was rejected. A word that is clearly
+// ONE place - typed in short ("indnsia", "singpr") or one slip from it
+// ("malysia") - is now written as that place's full name. Only when every
+// closest name is the same place (one whole place name, not a part of one
+// like "arabia"); a tie with a company or another place stays as typed.
+let PLACE_KEYS = null;
+function placeKeys() {
+  if (PLACE_KEYS) return PLACE_KEYS;
+  PLACE_KEYS = new Map();
+  for (const [std, aliases] of Object.entries(PLACES)) {
+    for (const x of [std, ...aliases]) {
+      const parts = plainLower(x).split(/[^a-z0-9]+/).filter(Boolean);
+      const key = parts.join('');
+      if (key.length < 5) continue;
+      if (!PLACE_KEYS.has(key)) PLACE_KEYS.set(key, new Set());
+      PLACE_KEYS.get(key).add(std);
+    }
+  }
+  return PLACE_KEYS;
+}
+function placeTypedAs(w, protectedSet) {
+  const keys = placeKeys();
+  const onePlace = (list) => {
+    if (!list.length || !list.every((p) => keys.has(p))) return null;
+    const stds = new Set(list.flatMap((p) => [...keys.get(p)]));
+    return stds.size === 1 ? [...stds][0] : null;
+  };
+  // one slip (two for long names) from the name
+  let bestD = Infinity;
+  let atD = [];
+  for (const p of protectedSet) {
+    if (p.length < 4) continue;
+    const allowed = Math.max(w.length, p.length) >= 7 ? 2 : 1;
+    if (Math.abs(p.length - w.length) > allowed) continue;
+    const d = slips(w, p);
+    if (d > allowed) continue;
+    if (d < bestD) { bestD = d; atD = [p]; } else if (d === bestD) atD.push(p);
+  }
+  // a tie ("indnsia" is 2 slips from both India and Indonesia) is decided
+  // by the name that holds all the typed letters in order (Indonesia)
+  if (bestD !== Infinity) {
+    const holds = atD.filter((p) => keepsLetters(w, p));
+    return onePlace(atD) || (holds.length ? onePlace(holds) : null);
+  }
+  // typed in short, letters left out
+  let bestC = 0;
+  let atC = [];
+  for (const p of protectedSet) {
+    if (p.length < 5) continue;
+    const c = shortFormCover(w, p);
+    if (!c) continue;
+    if (c > bestC) { bestC = c; atC = [p]; } else if (c === bestC) atC.push(p);
+  }
+  return bestC ? onePlace(atC) : null;
 }
 function nearProtected(w, protectedSet) {
   return nameSlips(w, protectedSet) !== Infinity;
@@ -581,6 +648,12 @@ function fixSpelling(text, protectedNames = []) {
       let fix = sure ? best.c : null;
       if (!oneSlip && short) fix = short;
       if (oneSlip && sure && short && (englishWords.get(short) || 0) > best.n * CLEAR_WINNER) fix = short;
+      // 26 Nov (playground): "deadln" became "deadly" (one letter CHANGED)
+      // instead of "deadline" (only vowels left out, every typed letter
+      // kept). When every word one slip away changes a typed letter, and the
+      // short-form word only adds vowels, the short-form word wins.
+      const oneSlipWords = found.filter((x) => x.d === 1 && x.n >= MIN_COMMON);
+      if (oneSlip && short && oneSlipWords.every((x) => x.c.length === w.length) && onlyVowelsAdded(w, short)) fix = short;
       if (bestMatchCache.size > 5000) bestMatchCache.clear();
       bestMatchCache.set(w, fix);
     }
@@ -588,11 +661,13 @@ function fixSpelling(text, protectedNames = []) {
     if (toName !== Infinity && !(fix && slips(w, fix) < toName)) {
       entry.kind = 'name';             // lancme stays (never "lance"); frgrance -> fragrance
       entry.check = false;
+      entry.place = placeTypedAs(w, protectedSet);   // "malysia" -> Malaysia (one place only)
       continue;
     }
     if (nameCover && !(fix && shortFormCover(w, fix) >= nameCover)) {
-      entry.kind = 'name';             // "singpr" stays (never "singer"); the AI reads it as Singapore
+      entry.kind = 'name';             // "singpr" is never "singer": it is Singapore
       entry.check = false;             // and the next-word check must not "fix" it either
+      entry.place = placeTypedAs(w, protectedSet);
       continue;
     }
     if (fix) { entry.kind = 'typo'; entry.fix = fix; } else entry.kind = 'name';   // unsure: treat as a name, leave it
@@ -644,6 +719,13 @@ function fixSpelling(text, protectedNames = []) {
     if (!best) continue;
     e.kind = 'typo';
     e.fix = best.c;
+  }
+
+  // a place typed in short or with a slip is written in full (see placeTypedAs)
+  for (const e of words) {
+    if (!e.place || e.kind !== 'name') continue;
+    tokens[e.i] = e.raw.replace(e.core, e.place);
+    corrections.push(`${e.core} -> ${e.place}`);
   }
 
   // a word in a list with a name is a name too: "careem and talabat", "nykaa, sephora"

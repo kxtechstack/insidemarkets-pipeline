@@ -444,14 +444,27 @@ async function testStep2() {
   }
   // ---- names typed in short (letters left out) are never turned into another word ----
   // ("singpr" must not become "singer": Step 5 then took Singer as a company)
-  for (const q of [
-    'compare singpr and korean mkt', 'is indnsia a good market', 'phlppines beauty trends', 'compare estlauder and shiseido',
-    'malysia growth', 'vietnm skincare demand', 'thailnd regulations', 'saudi arbia market', 'austrlia trends',
-    'germny and frnce', 'shisedo launches', 'lancme news', 'japn beauty', 'brazl market', 'mexco imports',
-    'argntina tariffs', 'egpt opportunities', 'nigria demand', 'kenya and tanznia', 'singapre vs hong kng',
-    'indonsia vs malasia', 'phillipines retail', 'swtzerland luxury', 'netherlnds retail', 'growth in the indn market',
+  // 26 Nov: a place clearly typed in short or with a slip is written as
+  // that place in full ("indnsia" -> Indonesia: "indnsia halal deadln" was
+  // rejected because no step saw the place); company names stay as typed
+  // (Step 5 matches them), and so does anything that is not clearly ONE place.
+  for (const [q, want] of [
+    ['compare singpr and korean mkt', 'compare singapore and korean mkt'], ['is indnsia a good market', 'is Indonesia a good market'],
+    ['phlppines beauty trends', 'Philippines beauty trends'], ['compare estlauder and shiseido', 'compare estlauder and shiseido'],
+    ['malysia growth', 'Malaysia growth'], ['vietnm skincare demand', 'Vietnam skincare demand'], ['thailnd regulations', 'Thailand regulations'],
+    ['saudi arbia market', 'saudi arbia market'], ['austrlia trends', 'Australia trends'], ['germny and frnce', 'Germany and France'],
+    ['shisedo launches', 'shisedo launches'], ['lancme news', 'lancme news'], ['japn beauty', 'Japan beauty'], ['brazl market', 'Brazil market'],
+    ['mexco imports', 'Mexico imports'], ['argntina tariffs', 'Argentina tariffs'], ['egpt opportunities', 'Egypt opportunities'],
+    ['nigria demand', 'Nigeria demand'], ['kenya and tanznia', 'kenya and Tanzania'], ['singapre vs hong kng', 'Singapore vs hong kng'],
+    ['indonsia vs malasia', 'Indonesia vs Malaysia'], ['phillipines retail', 'Philippines retail'], ['swtzerland luxury', 'Switzerland luxury'],
+    ['netherlnds retail', 'Netherlands retail'], ['growth in the indn market', 'growth in the indn market'],
+    ['indnsia halal deadln', 'Indonesia halal deadline'], ['koera trends', 'South Korea trends'], ['what are the risks in arabai', 'what are the risks in arabai'],
   ]) {
-    await check(`Spelling, a name typed in short stays: "${q}"`, async () => spell(q).preprocessed_query === q || spell(q).preprocessed_query);
+    await check(`Spelling, a name typed in short is never another word (a place clearly typed is written in full): "${q}" -> "${want}"`, async () => spell(q).preprocessed_query === want || spell(q).preprocessed_query);
+  }
+  // ---- 26 Nov: only vowels left out beats one CHANGED letter ("deadln" -> deadline, not deadly) ----
+  for (const [q, want] of [['submission deadln', 'submission deadline'], ['latst regulation', 'latst regulation'], ['shud we enter', 'should we enter'], ['prce changes', 'price changes']]) {
+    await check(`Spelling: only vowels left out beats one changed letter (must-not-change for the rest): "${q}" -> "${want}"`, async () => spell(q).preprocessed_query === want || spell(q).preprocessed_query);
   }
   // ---- ordinary words: real typos and words with letters left out are still fixed ----
   for (const [q, want] of [
@@ -575,8 +588,8 @@ async function testStep2() {
     ['fragrnce market saudi forecast', 'fragrance market saudi forecast'],
     // must NOT change: a name typed wrong stays (a tie, or closer to the name)
     ['compare lancme and shisedo', 'compare lancme and shisedo'],
-    ['germny and frnce', 'germny and frnce'],
-    ['malysia growth', 'malysia growth'],
+    ['germny and frnce', 'Germany and France'],
+    ['malysia growth', 'Malaysia growth'],
   ]) {
     await check(`Spelling: a common word CLOSER than a name wins: "${text}" -> "${want}"`, async () => {
       const got = require('../modules/dynamicRag/preprocessQuery').fixSpelling(text, ['Lancôme', 'Shiseido']).text;
@@ -3673,6 +3686,19 @@ async function testStep7() {
     const q = wf.tasks.find((x) => x.capability === 'retrieve_data').inputs.query;
     return q === 'market risks' || q;
   });
+  // 26 Nov (playground): "Is the Gulf a good place for us to grow?" searched without any business word
+  await check('Industry: a question about OUR business that names no industry, product or company gets the client\'s industry in each search ("Is the Gulf a good place for us to grow?"); a question naming an industry / a company, or not about us, stays as it was (must not change)', async () => {
+    const q = (extra, words = 'market demand signals unmet needs') => {
+      const u = und({ primary_goal: 'opportunities', industries: [], topics: ['market growth'], places: ['GCC'], ...extra });
+      return build(u, [{ for: ['IR1'], words }], 11, 'Is the Gulf a good place for us to grow?').tasks.find((x) => x.capability === 'retrieve_data').inputs.query;
+    };
+    const ours = q({ about_own_business: true });
+    const has = q({ about_own_business: true }, 'cosmetics demand in the gulf');
+    const ev = q({ about_own_business: true, industries: ['EV'] });
+    const co = q({ about_own_business: true, companies: [EL] });
+    const notUs = q({ about_own_business: false });
+    return (/cosmetics/i.test(ours) && has.toLowerCase().split('cosmetics').length === 2 && !/cosmetics/i.test(ev) && !/cosmetics/i.test(co) && !/cosmetics/i.test(notUs)) || { ours, has, ev, co, notUs };
+  });
   await check('Names: a search filtered to Estée Lauder does not carry our own name', async () => {
     const u = und({ primary_goal: 'trends', industries: [], topics: [], companies: [EL] });
     const wf = build(u, [{ for: ['IR1'], words: 'Estee Lauder pricing moves against Test Co' }], 11, 'Estée Lauder pricing moves');
@@ -5219,16 +5245,36 @@ async function testStep9Ai() {
     const f = out.results.T2.output.findings.map((x) => x.text);
     return (f.length === 3 && f.includes('The new regulations, GSO rules, include safety requirements') && f.some((x) => /4 new/.test(x)) && f.some((x) => /2 new/.test(x))) || f;
   });
-  await check('A fact that is only a value ("€100 million") is kept with what it is about ("amount of investment: €100 million"); a bare "4" about one word is still removed (must not change)', async () => {
+  await check('A fact that is only a value ("€5.7 million") is removed as too short, also when the AI says what it is about ("Amount of money invested in refills") — the AI\'s words must not make a claim the news does not make (taken back from v28)', async () => {
     replies = { [P('extract_facts')]: (t) => J({ facts: [
-      { about: 'amount of investment', text: '€2.6 million', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'Amount of money invested in refills', text: '€2.6 million', sources: [code(t, 'UAE bans parabens')] },
       { about: 'x', text: '4', sources: [code(t, 'UAE bans parabens')] },
     ] }) };
-    const st = fakeStep9Store({});
-    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['amount of investment'] }, ['T1'])], { storeOpts: { cardMates: false } });
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['amount of investment'] }, ['T1'])]);
     const f = out.results.T2.output.findings.map((x) => x.text);
     const r = out.results.T2.output.removed.reasons;
-    return (r['too short to mean anything'] === 1 && (f.includes('amount of investment: €2.6 million') || r['a number that is not in its sources'] === 1)) || { f, r, st: !!st };
+    return (f.length === 0 && r['too short to mean anything'] === 2) || { f, r };
+  });
+  await check('Place filter: news TAGGED with another country stays out even when its text names the place asked (Oman news naming the UAE); Global / no-country news naming it still gets in (must not change)', async () => {
+    const mk = (id, countries, title) => ({ source_id: `policy:${id}`, module: 'policy', signal_id: id, title, text: '', date: '2025-03-10', countries, companies: [] });
+    const items = [mk('a', ['Oman'], 'Oman warns importers, also for the UAE'), mk('b', ['Global'], 'Gulf rules: UAE and Qatar act'), mk('c', ['United Arab Emirates'], 'UAE bans parabens'), mk('d', ['South Africa'], "SA's wellness sector rules")];
+    const r1 = runner.applyFilters(items, { countries: ['United Arab Emirates'] }, understood, []);
+    const r2 = runner.applyFilters(items, { countries: ['Saudi Arabia'] }, understood, []);
+    const k1 = r1.items.map((i) => i.signal_id).sort().join(',');
+    const k2 = r2.items.map((i) => i.signal_id).join(',');
+    return (k1 === 'b,c' && k2 === '') || { k1, k2 };
+  });
+  await check('Compare: code counts each side\'s news (the ones kept + the ones over the limit) — the AI cannot count ("which competitor is the busiest?"); the count is given to the AI with each side and kept apart from the AI rows', async () => {
+    let prompt = '';
+    replies = { [P('compare')]: (t) => { prompt = t; return J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: '', sources: [] } } }], differences: [] }); } };
+    const out = await go([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Kuwait'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Kuwait', ref: 'T2.output' }] }, ['T1', 'T2'])], { storeOpts: { filler: 250 } });
+    const o = out.results.T3.output;
+    const f = Object.fromEntries((o.found || []).map((x) => [x.label, x.count]));
+    const k = out.results.T2.output;
+    const over = Object.entries(k.removed.reasons).filter(([w]) => /^more than/.test(w)).reduce((a, [, v]) => a + v, 0);
+    return (f.Kuwait === k.items.length + over && f.Kuwait > 20 && f['United Arab Emirates'] === out.results.T1.output.items.length &&
+      o.rows.length === 1 && o.rows[0].point === 'rules' && /SIDE B = Kuwait \(\d+ news items found in the data\)/.test(prompt)) || { f, rows: o.rows.map((r) => r.point), over, kept: k.items.length };
   });
   await check('Conflict only when two facts say the SAME thing with different numbers ("covers 3" vs "covers 5"); two different launches ("4 new products: …" vs "2 new products: …") are not a conflict', async () => {
     replies = { [P('extract_facts')]: (t) => J({ facts: [
@@ -5483,6 +5529,15 @@ async function testStep10() {
     replies.dynamic_rag_answer_v1 = 'x';
     const p = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])], { aiOpts: { aiCalls: 1 } });
     return (/^On rules, United Arab Emirates: Parabens ban; Saudi Arabia: Halal rules \[\d\]\[\d\]\.$/.test(c.a.summary) && /^The news suggests that more Gulf rules \[1\]\[2\]\.$/.test(p.a.summary)) || [c.a.summary, p.a.summary];
+  });
+  await check('A comparison table ends with the row made by code: "news items found in your data" for each side; code\'s own short answer never uses that row; the short answer may use the numbers', async () => {
+    replies = { dynamic_rag_job_compare_v1: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] } } }], differences: [] }), dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']), job('T4', 'validate_evidence', { findings: ['T3.output'] }, ['T3'])], { aiOpts: { aiCalls: 1 } });
+    const t = a.sections.find((x) => x.kind === 'table');
+    const last = t && t.rows[t.rows.length - 1];
+    return (last && last.point === 'news items found in your data' && last.by_code && last.cells.every((c) => /^\d+ news items? found$/.test(c.text) && c.sources.length) &&
+      t.rows[0].point === 'rules' && /^On rules,/.test(a.summary)) || { rows: t && t.rows, summary: a.summary };
   });
   await check('Several searches of a list question are ONE list, every signal once', async () => {
     replies = {};

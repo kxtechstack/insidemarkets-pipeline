@@ -1563,6 +1563,28 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       if (added.dropped.length) filterWhy = [filterWhy, `words: to fit ${MAX_JOINED_CHARS} letters, left out: ${added.dropped.join(', ')}`].filter(Boolean).join('; ');
     }
   }
+  // 26 Nov (playground): "Is the Gulf a good place for us to grow?" was
+  // searched as "market demand signals unmet needs … growth" - no word said
+  // WHICH business, so it found a fashion app and sovereign funds and still
+  // answered "yes". When the question is about the client's own business
+  // ("us", "we", "our") and names no industry, no product and no company,
+  // a search that does not name the client's industry gets it
+  // ("cosmetics"): the client's business IS the subject. A question that
+  // names an industry ("EV market"), a product or a company, or that is not
+  // about the client, keeps its words as they are.
+  const clientIndustry = understood.client && understood.client.industry;
+  const namesBusiness = (understood.industries || []).length || (understood.products || []).length || companyNames(understood).length;
+  if (!exactRead && !side && !search.side && clientIndustry && understood.about_own_business && !namesBusiness && questionInEnglish(understood)) {
+    const have = new Set(plain(search.words).split(' ').filter(Boolean).map(singular));
+    const ind = plain(clientIndustry).split(' ').filter((w) => w.length > 1);
+    if (ind.length && !ind.every((w) => have.has(singular(w)))) {
+      const added = addWords(search.words, clientIndustry.toLowerCase());
+      if (added.text !== search.words) {
+        search = { ...search, words: added.text };
+        filterWhy = [filterWhy, `words: the client's industry (${clientIndustry.toLowerCase()}) added, the question names no kind of business`].filter(Boolean).join('; ');
+      }
+    }
+  }
   // A name the user left out never stays in the search words ("GCC trends
   // excluding Kuwait" would pull Kuwait news by meaning), nor in the filters.
   const ex = userLeftOut(understood);

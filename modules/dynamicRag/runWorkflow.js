@@ -287,7 +287,12 @@ function filterItems(items, inputs, understood, notes) {
       const tagged = it.countries.filter((c) => c && !/^global$/i.test(c));
       const isGlobalItem = tagged.length === 0;
       const covered = tagged.some((c) => places.some((p) => p !== 'Global' && placeCovers(p, c))) || (globalAsked && isGlobalItem);
-      const named = places.some((p) => p !== 'Global' && textNamesPlace(text, p));
+      // 25 Nov (playground): an Oman-tagged item came into "latest regs in
+      // UAE" and a South Africa one ("SA's wellness sector") into a Saudi
+      // question, because their text named the place. Only news with no
+      // country (or Global) and Forward Outlook may get in by its text, as the
+      // rule says; news tagged with another country stays out.
+      const named = isGlobalItem && places.some((p) => p !== 'Global' && textNamesPlace(text, p));
       if (!covered && !named) return drop(tagged.length ? 'another country' : 'not about the place asked (no country / Global)');
     }
     // left out: a signal only about left-out countries goes (one tagged with
@@ -966,16 +971,11 @@ async function extractFacts(inputs, ctx) {
   const p = await askAi('extract_facts', { what_to_find: asked.join(', '), evidence: n.text }, ctx, needsList('facts'), 1200);
   const findings = p.facts.slice(0, 10).map((f) => {
     const about = asked.find((a) => plain(a) === plain(f && f.about)) || null;
-    // 25 Nov (playground): "How much is L'Oréal investing in refillable
-    // packaging?" — the fact "€100 million" was removed as too short, so the
-    // answer gave no amount. A value with a number (fewer than 2 words) is
-    // kept with what it is about ("amount of investment: €100 million") when
-    // the AI says what it is about in 2+ words; its number is still checked.
-    let text = cut(f && f.text, 400);
-    const aboutText = cut(f && f.about, 120);
-    const wordsIn = (x) => (String(x || '').match(/\p{L}{2,}/gu) || []).length;
-    if (text && /\d/.test(text) && wordsIn(text) < 2 && wordsIn(aboutText) >= 2) text = `${aboutText}: ${text}`;
-    return makePoint(f, n, ctx, reasons, { text, kind: 'fact', extra: { about } });
+    // (25 Nov: a bare value "€100 million" is NOT joined with the AI's
+    // "about". Tried in v28 and taken back: "Amount of money invested in
+    // refills: €5.7 million" was made from a water-plant article — the number
+    // was real, but the AI's "about" made a claim the news does not make.)
+    return makePoint(f, n, ctx, reasons, { text: f && f.text, kind: 'fact', extra: { about } });
   }).filter(Boolean);
   return finishAi({ findings }, reasons, notes, g);
 }
@@ -1023,10 +1023,20 @@ async function compare(inputs, ctx) {
     const r = resultOf(sd.ref, ctx);
     const all = r && Array.isArray(r.output.items) ? r.output.items : [];
     const picked = pickItems([all], Math.floor(RUN_LIMITS.max_items_to_ai / Math.max(2, (inputs.sides || []).length)));
-    return { label: sd.label, letter: letters[k], items: picked.items, left_out: picked.left_out };
+    // how many news items the side's search found in the data: the ones it
+    // kept and the ones over its limit (26 Nov: "Which competitor is the
+    // busiest?" — the AI said Lancôme, 8 news items, while Estée Lauder had
+    // 62; the AI cannot count, code does)
+    const overLimit = r && r.output && r.output.removed && r.output.removed.reasons
+      ? Object.entries(r.output.removed.reasons).filter(([why]) => /^more than \d+ \(the best \d+ kept\)$/.test(why)).reduce((a, [, v]) => a + v, 0) : 0;
+    return { label: sd.label, letter: letters[k], items: picked.items, left_out: picked.left_out, found: all.length + overLimit, all };
   });
   const out = (rows, differences) => ({
     sides: sides.map((sd) => ({ label: sd.label, letter: sd.letter, items: sd.items.length, left_out: sd.left_out })),
+    // made by code, never the AI: how many news items each side's search
+    // found (with the side's best news as its sources); Step 10 shows it as
+    // a row of the table and gives it to the short answer
+    found: sides.map((sd) => ({ label: sd.label, count: sd.found, sources: sd.all.slice(0, 3).map((it) => it.source_id) })),
     rows, differences, empty_sides: sides.filter((sd) => !sd.items.length).map((sd) => sd.label),
   });
   const emptySides = sides.filter((sd) => !sd.items.length).map((sd) => sd.label);
@@ -1036,7 +1046,7 @@ async function compare(inputs, ctx) {
   const blocks = sides.map((sd) => {
     const part = numbered(sd.items, [], sd.letter);
     for (const [k, v] of part.map) n.map.set(k, v);
-    return `SIDE ${sd.letter} = ${sd.label}\n${part.text || '(no news items for this side)'}`;
+    return `SIDE ${sd.letter} = ${sd.label} (${sd.found} news items found in the data)\n${part.text || '(no news items for this side)'}`;
   });
   // The points to compare must not carry a side's name (25 Nov: "beauty
   // market trends in Saudi Arabia" and "... in UAE" became two rows, each
