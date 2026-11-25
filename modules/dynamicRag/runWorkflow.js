@@ -923,7 +923,17 @@ function withoutRepeats(points, reasons) {
   const inside = (a, b) => a.every((x) => b.includes(x));
   for (const f of points) {
     const t = plain(f.text);
-    const k = kept.findIndex((x) => { const u = plain(x.text); return (u.includes(t) || t.includes(u)) && (inside(f.sources, x.sources) || inside(x.sources, f.sources)); });
+    // (25 Nov, playground: "The new regulations, GSO 1943, include …" and
+    // "The regulations, GSO 1943, include …" — all the words of one inside
+    // the other, same source — were both kept; only a run of the same words
+    // was checked)
+    const tw = t.split(' ').filter(Boolean);
+    const k = kept.findIndex((x) => {
+      const u = plain(x.text);
+      const uw = u.split(' ').filter(Boolean);
+      const same = u.includes(t) || t.includes(u) || inside(tw, uw) || inside(uw, tw);
+      return same && (inside(f.sources, x.sources) || inside(x.sources, f.sources));
+    });
     if (k < 0) { kept.push(f); continue; }
     count(reasons, 'the same point twice');
     if (plain(f.text).length > plain(kept[k].text).length) kept[k] = { ...f, sources: [...new Set([...f.sources, ...kept[k].sources])] };
@@ -956,7 +966,16 @@ async function extractFacts(inputs, ctx) {
   const p = await askAi('extract_facts', { what_to_find: asked.join(', '), evidence: n.text }, ctx, needsList('facts'), 1200);
   const findings = p.facts.slice(0, 10).map((f) => {
     const about = asked.find((a) => plain(a) === plain(f && f.about)) || null;
-    return makePoint(f, n, ctx, reasons, { text: f && f.text, kind: 'fact', extra: { about } });
+    // 25 Nov (playground): "How much is L'Oréal investing in refillable
+    // packaging?" — the fact "€100 million" was removed as too short, so the
+    // answer gave no amount. A value with a number (fewer than 2 words) is
+    // kept with what it is about ("amount of investment: €100 million") when
+    // the AI says what it is about in 2+ words; its number is still checked.
+    let text = cut(f && f.text, 400);
+    const aboutText = cut(f && f.about, 120);
+    const wordsIn = (x) => (String(x || '').match(/\p{L}{2,}/gu) || []).length;
+    if (text && /\d/.test(text) && wordsIn(text) < 2 && wordsIn(aboutText) >= 2) text = `${aboutText}: ${text}`;
+    return makePoint(f, n, ctx, reasons, { text, kind: 'fact', extra: { about } });
   }).filter(Boolean);
   return finishAi({ findings }, reasons, notes, g);
 }
@@ -1247,12 +1266,22 @@ async function validateEvidence(inputs, ctx) {
       const real = (pt.sources || []).filter((s) => ctx.sources.has(s));
       if (real.length < (pt.sources || []).length) count(reasons, 'a source that is not a signal of this run', (pt.sources || []).length - real.length);
       if (!real.length) { count(reasons, 'a point with no real source'); continue; }
-      if (time && (time.from || time.to)) {
-        // (news written after the period and naming it is inside, see reportedLater)
-        const until = time.to ? readUntil({ date_from: time.from, date_to: time.to }, ctx.understood) : null;
-        const outside = real.filter((s) => { const d = (ctx.sources.get(s) || {}).date; return d && ((time.from && d < time.from) || (until && d > until)); });
-        if (outside.length === real.length) { count(reasons, 'every source is outside the dates asked'); continue; }
-      }
+      // 25 Nov (playground): "Which EU cosmetics rules will affect formulas
+      // in 2027?" — the search read the last 12 months (2027 is in the
+      // future), but this check used 2027 itself and removed all 9 sources,
+      // so the answer said "nothing found". A source now counts when it is
+      // inside the dates of a search that found it (the same dates the
+      // search used); the question's own dates only for a source no search
+      // recorded.
+      const until = time && time.to ? readUntil({ date_from: time.from, date_to: time.to }, ctx.understood) : null;
+      const inside = (s) => {
+        const d = (ctx.sources.get(s) || {}).date;
+        if (!d) return true;
+        const wins = (ctx.windows && ctx.windows.get(s)) || null;
+        if (wins && wins.length) return wins.some((w) => !(w.from && d < w.from) && !(w.until && d > w.until));
+        return !(time && time.from && d < time.from) && !(until && d > until);
+      };
+      if (!real.some(inside)) { count(reasons, 'every source is outside the dates asked'); continue; }
       (real.length >= 2 ? supported : weak).push({ task_id: id, text: cut(pt.text, 200), sources: real });
     }
     for (const h of o.empty_headings || []) limitations.push(`no news found for ${h}`);
@@ -1339,7 +1368,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
   // the one kept for the answer (Step 10)
   const left = options.aiBudget != null ? options.aiBudget
     : Math.max(0, (workflow.ai_budget != null ? workflow.ai_budget : RUN_LIMITS.max_ai_calls_per_question) - ANSWER_AI_CALLS);
-  const ctx = { clientId, understood, results, sources: new Map(), ai: { budget: left, used: 0 } };
+  const ctx = { clientId, understood, results, sources: new Map(), windows: new Map(), ai: { budget: left, used: 0 } };
   const timeLimit = options.timeLimitMs || RUN_TIME_LIMIT_MS;
 
   async function runOne(id) {
@@ -1382,7 +1411,18 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
     // every AI reply: its length and its end (a cut-off reply shows at its end)
     if (jobCtx.job.replies.length) r.ai_replies = jobCtx.job.replies;
     // the signals of a search: every later job and the answer cite them
-    if (r.status === 'done' && r.output && Array.isArray(r.output.items)) for (const it of r.output.items) ctx.sources.set(it.source_id, it);
+    if (r.status === 'done' && r.output && Array.isArray(r.output.items)) {
+      // the dates this search really read (a future period reads the last
+      // 12 months; "today" meaning "now" reads all dates): the evidence
+      // check uses these, never other dates (25 Nov, playground)
+      const inp = t.inputs || {};
+      const win = { from: inp.date_from || null, until: inp.date_to ? readUntil(inp, ctx.understood) : null };
+      for (const it of r.output.items) {
+        ctx.sources.set(it.source_id, it);
+        if (!ctx.windows.has(it.source_id)) ctx.windows.set(it.source_id, []);
+        ctx.windows.get(it.source_id).push(win);
+      }
+    }
     r.ms = Date.now() - t0;
   }
 

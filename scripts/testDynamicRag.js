@@ -5198,6 +5198,38 @@ async function testStep9Ai() {
     const ln = none.results.T3.output.limitations.find((l) => /^T2 /.test(l)) || '';
     return (/^T2 \(extract_facts\) found nothing: nothing the AI wrote passed the checks/.test(lb) && /^T2 \(extract_facts\) found nothing/.test(ln) && !/passed the checks/.test(ln)) || [lb, ln];
   });
+  // 25 Nov, playground (after the final run)
+  await check('Evidence check uses the dates the searches really read: a future period ("2027" -> the last 12 months) keeps its sources; "today" meaning "now" (search with no dates) keeps them; a normal past period works as before (must not change)', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [{ about: 'rules', text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] }] }) };
+    const plan = (dates) => [search('T1', dates), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])];
+    const fut = await go(plan({ date_from: '2025-01-01', date_to: '2025-12-31' }), { u: { ...understood, time: { from: '2027-01-01', to: '2027-12-31', ranges: [{ text: '2027', kind: 'year', from: '2027-01-01', to: '2027-12-31' }] } } });
+    const now = await go(plan({}), { u: { ...understood, time: { from: '2026-11-25', to: '2026-11-25', ranges: [{ text: 'today', kind: 'day', from: '2026-11-25', to: '2026-11-25' }] } } });
+    const past = await go(plan({ date_from: '2025-01-01', date_to: '2025-06-30' }), { u: { ...understood, time: { from: '2025-01-01', to: '2025-06-30', ranges: [{ text: 'H1 2025', kind: 'half', from: '2025-01-01', to: '2025-06-30' }] } } });
+    const st = (o) => o.results.T3.output;
+    return ([fut, now, past].every((o) => st(o).status !== 'insufficient' && !(st(o).removed.reasons || {})['every source is outside the dates asked'])) || [st(fut), st(now), st(past)];
+  });
+  await check('The same point twice when all the words of one sit inside the other ("The regulations, GSO 1943, include …" / "The new regulations, GSO 1943, include …", same source) is kept once; two launches with different numbers stay two (must not change)', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'rules', text: 'The new regulations, GSO rules, include safety requirements', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'rules', text: 'The regulations, GSO rules, include safety requirements', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'rules', text: 'Lancome launched 4 new products', sources: [code(t, 'Kuwait labelling')] },
+      { about: 'rules', text: 'Lancome launched 2 new products', sources: [code(t, 'Kuwait labelling')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1'])]);
+    const f = out.results.T2.output.findings.map((x) => x.text);
+    return (f.length === 3 && f.includes('The new regulations, GSO rules, include safety requirements') && f.some((x) => /4 new/.test(x)) && f.some((x) => /2 new/.test(x))) || f;
+  });
+  await check('A fact that is only a value ("€100 million") is kept with what it is about ("amount of investment: €100 million"); a bare "4" about one word is still removed (must not change)', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'amount of investment', text: '€2.6 million', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: '4', sources: [code(t, 'UAE bans parabens')] },
+    ] }) };
+    const st = fakeStep9Store({});
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['amount of investment'] }, ['T1'])], { storeOpts: { cardMates: false } });
+    const f = out.results.T2.output.findings.map((x) => x.text);
+    const r = out.results.T2.output.removed.reasons;
+    return (r['too short to mean anything'] === 1 && (f.includes('amount of investment: €2.6 million') || r['a number that is not in its sources'] === 1)) || { f, r, st: !!st };
+  });
   await check('Conflict only when two facts say the SAME thing with different numbers ("covers 3" vs "covers 5"); two different launches ("4 new products: …" vs "2 new products: …") are not a conflict', async () => {
     replies = { [P('extract_facts')]: (t) => J({ facts: [
       { about: 'launches', text: 'Lancome launched 4 new products: lip blur and highlighter', sources: [code(t, 'UAE bans parabens')] },
@@ -5353,6 +5385,29 @@ async function testStep10() {
     const groups = (r.text.match(/(?:\[\d+\])+/g) || []).map((g) => g.match(/\d+/g).length);
     return (r.ok && /^Lancome launches Renergie H\.P\.N\. 300 Peptide Cream \[1\]\[2\]\[3\]\[4\]\[5\]\[6\]\.$/.test(r.text) && groups.every((n) => n <= 6) &&
       r.problems.some((p) => /number 8 is not/.test(p))) || r;
+  });
+  // 25 Nov, playground (after the final run)
+  await check('A sentence ending in a word in capitals ("… in the GCC. The rules …") is split and checked on its own; "H.P.N." still does not end a sentence (must not change)', async () => {
+    const book = answerer.sourceBook({ sources: { 'x:1': { title: 'GCC updates cosmetics rules GSO 1943', text: 'GSO 1943 covers safety', date: '2026-08-27', module: 'policy' } } });
+    const pts = [{ code: 'P1', kind: 'fact', text: 'Facts: The GCC updated cosmetics rules GSO 1943 with safety requirements', sources: book.nums(['x:1']) }];
+    const r = answerer.checkSummary('This is a big change for the whole region of the GCC. The GCC updated cosmetics rules GSO 1943 with safety requirements [1].', book, pts, 'q');
+    const h = answerer.checkSummary('Lancome launches Renergie H.P.N. 300 Peptide Cream [1].', book, pts, 'q');
+    return (r.ok && r.problems.some((p) => /no point supports it\): This is a big change/.test(p)) && /^The GCC updated/.test(r.text) && h.problems.length === 1 && /Renergie H\.P\.N\. 300 Peptide Cream \[1\]\.$/.test(h.problems[0])) || [r, h];
+  });
+  await check('A sentence without source numbers gets only the points it is really about: "Estée Lauder acquired Forest Essentials for $160 million" -> the Forest Essentials item, not the two $210 million lawsuit items that share only the company name and "million"; word endings match ("launched" = "launches")', async () => {
+    const srcs = {
+      'x:1': { title: 'Estée Lauder Acquires Remaining 51% Stake in Forest Essentials for $160 million', text: '', date: '2026-10-05', module: 'competitor' },
+      'x:2': { title: "Estée Lauder's $210 Million Investor Fraud Settlement Wins Final Approval", text: '', date: '2026-10-14', module: 'competitor' },
+      'x:3': { title: 'Estée Lauder Reaches $210 Million Settlement in China Daigou Sales Shareholder Lawsuit', text: '', date: '2026-10-14', module: 'competitor' },
+      'x:4': { title: 'YSL Beauty enters Pakistan with exclusive launch', text: '', date: '2026-09-16', module: 'competitor' },
+    };
+    const book = answerer.sourceBook({ sources: srcs });
+    const pts = Object.keys(srcs).map((id, k) => ({ code: `P${k + 1}`, kind: 'fact', text: `${srcs[id].title} (Competitive Radar, ${srcs[id].date})`, sources: book.nums([id]) }));
+    const a = answerer.checkSummary('Yes, Estée Lauder acquired Forest Essentials for $160 million recently.', book, pts, 'Did Estée Lauder buy any company recently?');
+    const b = answerer.checkSummary('YSL Beauty entered Pakistan with a launched product.', book, pts, 'q');
+    const n1 = book.nums(['x:1'])[0];
+    const n4 = book.nums(['x:4'])[0];
+    return (a.text === `Yes, Estée Lauder acquired Forest Essentials for $160 million recently [${n1}].` && b.text.endsWith(`[${n4}].`)) || [a, b];
   });
   await check('A comparison the AI could not write (shown side by side by code) is said in what was not done', async () => {
     replies = { dynamic_rag_job_compare_v1: ['no', 'still no'], dynamic_rag_answer_v1: 'x' };

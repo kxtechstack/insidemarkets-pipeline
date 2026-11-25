@@ -268,8 +268,20 @@ const tidyCites = (t) => t.replace(/(?:\[\d+\]\s*)+/g, (m) => `${cites([...new S
 const GRAMMAR_WORDS = new Set(['with', 'that', 'this', 'from', 'have', 'been', 'also', 'into', 'their', 'they', 'these', 'those', 'which',
   'while', 'will', 'would', 'could', 'should', 'there', 'about', 'more', 'most', 'some', 'such', 'than', 'then', 'them', 'were', 'what',
   'when', 'where', 'other', 'over', 'very', 'based', 'news', 'limited', 'suggests', 'suggest', 'including', 'both', 'each', 'many', 'being']);
+// one form for a word and its endings ("launched" / "launches" -> "launch",
+// "acquired" / "acquires" -> "acquir", "companies" -> "company")
+const stem = (w) => { const x = stemEnd(w); return x.length > 4 ? x.replace(/e$/, '') : x; };
+const stemEnd = (w) => {
+  if (w.length > 5 && /ies$/.test(w)) return w.replace(/ies$/, 'y');
+  if (w.length > 5 && /(?:ss|x|z|ch|sh)es$/.test(w)) return w.replace(/es$/, '');
+  if (w.length > 5 && /ing$/.test(w)) return w.replace(/ing$/, '');
+  if (w.length > 5 && /ed$/.test(w)) return w.replace(/ed$/, '');
+  if (w.length > 5 && /[^aeiou]es$/.test(w) && !/[^aeiou]ses$/.test(w)) return w.replace(/s$/, '');
+  if (/[^s]s$/.test(w)) return w.replace(/s$/, '');
+  return w;
+};
 const plainWords = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
-  .replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter((w) => w.length >= 4 && !GRAMMAR_WORDS.has(w)).map((w) => w.replace(/s$/, ''));
+  .replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter((w) => w.length >= 4 && !GRAMMAR_WORDS.has(w)).map(stem);
 function pointsFor(sentence, points) {
   const sw = [...new Set(plainWords(sentence))];
   if (!sw.length) return [];
@@ -277,7 +289,13 @@ function pointsFor(sentence, points) {
     const pw = new Set(plainWords(p.text));
     const shared = sw.filter((w) => pw.has(w)).length;
     return { p, shared, score: shared / sw.length };
-  }).filter((x) => x.shared >= 2 && x.score >= 0.25).sort((x, y) => y.shared - x.shared).slice(0, 3).map((x) => x.p);
+  }).filter((x) => x.shared >= 2 && x.score >= 0.25).sort((x, y) => y.shared - x.shared)
+    // 25 Nov (playground): "Estée Lauder acquired Forest Essentials for $160
+    // million" also got the two $210 million lawsuit items, which share only
+    // "Estée Lauder" and "million". Only the points close to the best match
+    // are its sources (at least 60% of the best one's shared words).
+    .filter((x, k, all) => x.shared >= all[0].shared * 0.6)
+    .slice(0, 3).map((x) => x.p);
 }
 function numbersIn(sentence, ns, book, points, question) {
   const bare = sentence.replace(/\[\d+\]/g, ' ');
@@ -307,7 +325,11 @@ function checkSummary(text, book, points, question) {
   // a sentence ends at . ! ? after a small letter, a number or a source
   // number, and the next one starts with a capital (25 Nov: "Renergie
   // H.P.N. 300 Peptide Cream" was cut into two sentences)
-  const sentences = t.split(/(?<=(?:[a-z0-9%)\]]|[a-z]{2}\.)[.!?])\s+(?=["'A-Z])/).filter((x) => x.trim());
+  // 25 Nov (playground): a sentence ending in a word in capitals ("… in the
+  // GCC. The regulations …") was not split, so its first half was never
+  // checked. A word of 2+ capitals ends a sentence too; one capital after a
+  // dot ("H.P.N.", "U.S.") still does not.
+  const sentences = t.split(/(?<=(?:[a-z0-9%)\]]|[a-z]{2}\.|(?:^|[\s(])[A-Z]{2,})[.!?])\s+(?=["'A-Z])/).filter((x) => x.trim());
   const kept = [];
   for (const raw of sentences) {
     let sentence = raw.trim();
