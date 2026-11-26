@@ -5115,6 +5115,20 @@ async function testStep9Ai() {
     const sm = out.results.T4.output.findings[0];
     return (op.kind === 'hypothesis' && op.sources.sort().join() === 'policy:p1,policy:p2' && op.why === 'the Gulf rules pattern' && sm.kind === 'hypothesis' && sm.sources.length === 2) || { op, sm };
   });
+  await check('A point that cites MANY news items (all 20 it was given) keeps only the ones whose title is really about it; a point none of them is about is removed; a point with 6 or fewer sources is NOT checked (must not change)', async () => {
+    const all = (t) => [...new Set(t.match(/\bS\d+\b/g) || [])];
+    replies = { [P('discover_opportunities')]: (t) => J({ opportunities: [
+      { text: 'Offer a paraben-free range of cosmetics for the Gulf', why: 'new paraben rules', sources: all(t) },
+      { text: 'Train the shop staff on new selling skills', why: 'staff', sources: all(t) },
+      { text: 'Hire more staff', why: 'staff', sources: all(t).slice(0, 3) },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'discover_opportunities', { inputs: ['T1.output'] }, ['T1'])], { storeOpts: { filler: 10 } });
+    const o = out.results.T2.output;
+    const rs = o.removed.reasons;
+    const given = out.results.T1.output.items.length;
+    return (given > 6 && o.findings.length === 2 && o.findings[0].sources.includes('policy:p1') && o.findings[0].sources.length < given && !o.findings[0].sources.some((x) => /policy:f/.test(x)) && o.findings[1].text === 'Hire more staff' && o.findings[1].sources.length === 3 &&
+      rs['cited many news items, none really about it'] === 1 && rs['a source not about the point (the point cited many news items)'] > 0) || { given, f: o.findings.map((f) => [f.text, f.sources]), rs };
+  });
   await check('More than 25 news items: the best of each search in turn (both searches present), every signal once, the rest counted', async () => {
     const mk = (p, n) => Array.from({ length: n }, (_, k) => ({ source_id: `${p}:${k}` }));
     const a = mk('a', 20);
@@ -5405,13 +5419,18 @@ async function testStep10() {
   await check('The AI points all fail the checks but the search found news NAMING the company asked -> that news is shown as a list (code only, "some evidence"), never "nothing found"', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
     const { a, answerCalls } = await answerFor([search('T1', { query: 'store', companies: ['Lancôme'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
-    return (a.status === 'answered' && answerCalls === 0 && /^I could not write a checked summary, so here are the 1 news items/.test(a.summary) &&
+    return (a.status === 'answered' && answerCalls === 0 && /^I could not write a checked summary, so here is the 1 news item from your data that names it/.test(a.summary) &&
       a.sources.length === 1 && a.confidence.level === 'some' && /Lancôme opens a flagship store/.test(a.answer_text) && /left out: what the AI wrote did not pass the checks/.test(a.answer_text)) || { s: a.summary, t: a.answer_text };
   });
   await check('Must not change: AI points all fail and the search was NOT kept to a company -> still "The news in your data does not answer this question" (no list of news that may be about something else)', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
     const { a } = await answerFor([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
     return (a.status === 'nothing_found' && /^The news in your data does not answer this question/.test(a.answer_text)) || a.answer_text;
+  });
+  await check('A list of ONE news item says "Here is the 1 news item … with its source" (not "Here are the 1 news items")', async () => {
+    replies = {};
+    const { a } = await answerFor([{ task_id: 'T1', capability: 'structured_search', inputs: { modules: ['competitor'] }, depends_on: [] }, job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    return (a.sources.length === 1 && /^Here is the 1 news item from your data that matches the question, with its source\./.test(a.summary)) || { n: a.sources.length, s: a.summary };
   });
   await check('A plain list of the newest news (exact read) -> NO AI call; code writes the list; sources numbered in order, each once', async () => {
     replies = {};

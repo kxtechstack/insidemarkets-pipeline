@@ -259,6 +259,8 @@ function codeSummary(sections, nothing, foundNews = false, named = false) {
   const lists = sections.filter((s) => s.kind === 'list');
   if (lists.length === sections.length) {
     const n = lists.reduce((a, s) => a + s.items.length, 0);
+    // 26 Nov (DI tab): "Here are the 1 news items" -> "Here is the 1 news item"
+    if (n === 1) return named ? ANSWER_TEXT.named_list_intro_one : ANSWER_TEXT.list_intro_one;
     return (named ? ANSWER_TEXT.named_list_intro : ANSWER_TEXT.list_intro).replace('{n}', String(n));
   }
   const lead = { fact: '', interpretation: 'The news suggests that ', hypothesis: 'One idea to test: ' };
@@ -299,24 +301,9 @@ const tidyCites = (t) => t.replace(/(?:\[\d+\]\s*)+/g, (m) => `${cites([...new S
 // adapt") is taken out, never shown. A sentence with a number that is not
 // in its sources, or a source number that does not exist, is taken out too.
 // When nothing is left, code's own short answer is used.
-// (small fixed set of grammar words, not a topic list)
-const GRAMMAR_WORDS = new Set(['with', 'that', 'this', 'from', 'have', 'been', 'also', 'into', 'their', 'they', 'these', 'those', 'which',
-  'while', 'will', 'would', 'could', 'should', 'there', 'about', 'more', 'most', 'some', 'such', 'than', 'then', 'them', 'were', 'what',
-  'when', 'where', 'other', 'over', 'very', 'based', 'news', 'limited', 'suggests', 'suggest', 'including', 'both', 'each', 'many', 'being']);
-// one form for a word and its endings ("launched" / "launches" -> "launch",
-// "acquired" / "acquires" -> "acquir", "companies" -> "company")
-const stem = (w) => { const x = stemEnd(w); return x.length > 4 ? x.replace(/e$/, '') : x; };
-const stemEnd = (w) => {
-  if (w.length > 5 && /ies$/.test(w)) return w.replace(/ies$/, 'y');
-  if (w.length > 5 && /(?:ss|x|z|ch|sh)es$/.test(w)) return w.replace(/es$/, '');
-  if (w.length > 5 && /ing$/.test(w)) return w.replace(/ing$/, '');
-  if (w.length > 5 && /ed$/.test(w)) return w.replace(/ed$/, '');
-  if (w.length > 5 && /[^aeiou]es$/.test(w) && !/[^aeiou]ses$/.test(w)) return w.replace(/s$/, '');
-  if (/[^s]s$/.test(w)) return w.replace(/s$/, '');
-  return w;
-};
-const plainWords = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
-  .replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter((w) => w.length >= 4 && !GRAMMAR_WORDS.has(w)).map(stem);
+// the words of a text (grammar words out, one form per word): shared with
+// Step 9, which checks the sources of a point the same way (26 Nov)
+const { plainWords } = workflowTools;
 function pointsFor(sentence, points) {
   const sw = [...new Set(plainWords(sentence))];
   if (!sw.length) return [];

@@ -42,7 +42,7 @@ const {
   MODULE_IDS, SEARCH_COLLECTION, MIN_SEARCH_SCORE, SEARCH_WIDEN, RUN_TIME_LIMIT_MS, ITEM_TEXT_CHARS,
   SEARCH_MAX_PIECES, EXACT_READ_MAX_ROWS, TAGGED_MAX_SIGNALS,
   JOB_PROMPT_IDS, AI_ITEM_CHARS, AI_MAX_FINDINGS_IN, CLUSTER_AI_MIN, ANSWER_AI_CALLS, AI_CALL_TIMEOUT_MS,
-  REPORTED_LATER_DAYS, MIN_SUPPORTED, ANSWER_TEXT,
+  REPORTED_LATER_DAYS, MIN_SUPPORTED, ANSWER_TEXT, POINT_SOURCES_CHECK_FROM,
 } = require('./chatConfig');
 const COMPARE_BY_CODE_POINT = ANSWER_TEXT.compare_by_code_point;
 
@@ -984,6 +984,43 @@ function numbersOk(texts, sourceIds, ctx) {
 }
 
 // One point of a reply -> a clean point, or null (reason counted).
+// ── The words of a text (also used by Step 10) ───────────────────────────
+// (small fixed set of grammar words, not a topic list)
+const GRAMMAR_WORDS = new Set(['with', 'that', 'this', 'from', 'have', 'been', 'also', 'into', 'their', 'they', 'these', 'those', 'which',
+  'while', 'will', 'would', 'could', 'should', 'there', 'about', 'more', 'most', 'some', 'such', 'than', 'then', 'them', 'were', 'what',
+  'when', 'where', 'other', 'over', 'very', 'based', 'news', 'limited', 'suggests', 'suggest', 'including', 'both', 'each', 'many', 'being']);
+// one form for a word and its endings ("launched" / "launches" -> "launch",
+// "acquired" / "acquires" -> "acquir", "companies" -> "company")
+const stemEnd = (w) => {
+  if (w.length > 5 && /ies$/.test(w)) return w.replace(/ies$/, 'y');
+  if (w.length > 5 && /(?:ss|x|z|ch|sh)es$/.test(w)) return w.replace(/es$/, '');
+  if (w.length > 5 && /ing$/.test(w)) return w.replace(/ing$/, '');
+  if (w.length > 5 && /ed$/.test(w)) return w.replace(/ed$/, '');
+  if (w.length > 5 && /[^aeiou]es$/.test(w) && !/[^aeiou]ses$/.test(w)) return w.replace(/s$/, '');
+  if (/[^s]s$/.test(w)) return w.replace(/s$/, '');
+  return w;
+};
+const stem = (w) => { const x = stemEnd(w); return x.length > 4 ? x.replace(/e$/, '') : x; };
+const plainWords = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  .replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter((w) => w.length >= 4 && !GRAMMAR_WORDS.has(w)).map(stem);
+
+// 26 Nov (DI tab, "Halal cosmetics opportunities in Indonesia and Malaysia"):
+// two ideas cited ALL 25 news items they were given (mercury raids, Korea
+// news …): the AI named every item, or the idea took every source of the
+// earlier point it was built on, and the evidence looked strong. A point
+// with more than POINT_SOURCES_CHECK_FROM sources keeps only the sources
+// whose TITLE shares at least 2 words with it; none -> the point goes.
+function sourcesAboutPoint(ids, texts, ctx, reasons) {
+  if (ids.length <= POINT_SOURCES_CHECK_FROM) return ids;
+  const pw = new Set(texts.flatMap((t) => plainWords(t)));
+  const kept = ids.filter((id) => {
+    const it = ctx.sources.get(id);
+    return it && [...new Set(plainWords(it.title))].filter((w) => pw.has(w)).length >= 2;
+  });
+  if (kept.length < ids.length) count(reasons, 'a source not about the point (the point cited many news items)', ids.length - kept.length);
+  return kept;
+}
+
 function makePoint(raw, n, ctx, reasons, { text, kind, extra = {}, letter = null }) {
   const t = cut(text, 400);
   if (!t) { count(reasons, 'empty point'); example(ctx, 'empty point', raw); return null; }
@@ -991,6 +1028,8 @@ function makePoint(raw, n, ctx, reasons, { text, kind, extra = {}, letter = null
   if ((t.match(/\p{L}{2,}/gu) || []).length < 2) { count(reasons, 'too short to mean anything'); example(ctx, 'too short', raw); return null; }
   const s = sourcesFrom(rawSources(raw), n, reasons, letter);
   if (!s.ids.length) { count(reasons, 'no source'); example(ctx, 'no source', raw); return null; }
+  s.ids = sourcesAboutPoint(s.ids, [t, ...Object.values(extra).filter((v) => typeof v === 'string')], ctx, reasons);
+  if (!s.ids.length) { count(reasons, 'cited many news items, none really about it'); example(ctx, 'many sources, none about it', raw); return null; }
   if (!numbersOk([t, ...Object.values(extra).filter((v) => typeof v === 'string')], s.ids, ctx)) { count(reasons, 'a number that is not in its sources'); example(ctx, 'number not in sources', raw); return null; }
   return { text: t, kind: weaker(kind, s.kind), sources: s.ids, ...extra };
 }
@@ -1544,7 +1583,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 }
 
 module.exports = {
-  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES,
+  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

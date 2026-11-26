@@ -115,6 +115,9 @@ module.exports = {
   AI_MAX_FINDINGS_IN: 20,      // earlier findings given to one AI job
   CLUSTER_AI_MIN: 4,           // grouping asks the AI only when this many items are in no existing group
   ANSWER_AI_CALLS: 1,          // AI calls kept for the answer (Step 10)
+  // a point with more sources than this: each source must really be about
+  // it (its title shares 2+ words with the point), 26 Nov
+  POINT_SOURCES_CHECK_FROM: 6,
   AI_CALL_TIMEOUT_MS: 40000,   // one AI call
   // news about a period that is over may be written this many days after it
   // ends; kept only when its text names the period ("Q3 2026")
@@ -129,8 +132,10 @@ module.exports = {
     // the searches found news, but none of it answers the question
     nothing_answers: 'The news in your data does not answer this question, so I am not giving an answer that the news does not support.',
     list_intro: 'Here are the {n} news items from your data that match the question, with their sources.',
+    list_intro_one: 'Here is the 1 news item from your data that matches the question, with its source.',
     // the AI points did not pass the checks, but news naming the company was found
     named_list_intro: 'I could not write a checked summary, so here are the {n} news items from your data that name it, with their sources.',
+    named_list_intro_one: 'I could not write a checked summary, so here is the 1 news item from your data that names it, with its source.',
     no_news_for_heading: 'No news found for this.',
     no_news_cell: 'no news found',
     evidence_title: 'How good the evidence is',
