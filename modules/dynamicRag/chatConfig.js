@@ -100,6 +100,10 @@ module.exports = {
   // tagged with it (newest first, at most this many per module), and
   // searches by meaning among those.
   TAGGED_MAX_SIGNALS: Number(process.env.DR_TAGGED_MAX_SIGNALS) || 2000,
+  // a word that is not an English word ("kbeauty", "PFAS") is looked up in
+  // the news titles; in more titles than this it is common in the client's
+  // news and the search by meaning handles it as before (26 Nov)
+  RARE_WORD_MAX_SIGNALS: Number(process.env.DR_RARE_WORD_MAX_SIGNALS) || 200,
   // Step 9 part 2 — the AI jobs. Their prompts (public.prompts, DI – 5 … 12):
   JOB_PROMPT_IDS: {
     extract_facts: 'dynamic_rag_job_extract_facts_v1',
@@ -134,6 +138,8 @@ module.exports = {
     nothing_found: 'I could not find news in your data that answers this question. The searches below found nothing, so I am not giving an answer that the news does not support.',
     // the searches found news, but none of it answers the question
     nothing_answers: 'The news in your data does not answer this question, so I am not giving an answer that the news does not support.',
+    // nothing found, and the dates asked are after the newest news in the data
+    nothing_in_dates: 'Your data has no news from {from} to {to}. The newest news in your data is from {newest}, so I can not answer for those dates.',
     list_intro: 'Here are the {n} news items from your data that match the question, with their sources.',
     list_intro_one: 'Here is the 1 news item from your data that matches the question, with its source.',
     // the AI points did not pass the checks, but news naming the company was found

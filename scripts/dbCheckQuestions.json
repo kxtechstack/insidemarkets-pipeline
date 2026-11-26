@@ -1,623 +1,685 @@
 {
- "about": "Questions whose answer is in the client data (Lumiere Beauty Group, test DB, 26 Nov 2026). Each 'expect' group: at least ONE of its news items must be among the answer's sources. 'say': words the answer text must hold. 'status': nothing_found when the data has no answer. Ids = module:signal id, taken from the data by hand. 'expectTitles': groups of words; at least one source title must hold all the words of each group (used where the data holds the same news several times).",
- "questions": [
-  {
-   "kind": "fact, competitor",
-   "q": "What did Estée Lauder do on Black Friday?",
-   "expect": [
-    [
-     "competitor:c90bf592-4609-4f34-9423-3ca26e017174"
-    ]
-   ]
-  },
-  {
-   "kind": "yes/no, competitor, place",
-   "q": "Did Lancôme change its prices in the UK?",
-   "expect": [
-    [
-     "competitor:87685eb9-b435-472b-aee1-49f336957e11"
-    ]
-   ]
-  },
-  {
-   "kind": "keywords only",
-   "q": "shiseido price cuts",
-   "expect": [
-    [
-     "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0",
-     "competitor:03416d2b-55b9-4f4f-affe-2bd0a6d35a5c"
-    ]
-   ]
-  },
-  {
-   "kind": "launches, date",
-   "q": "What new products did Estée Lauder launch in November 2026?",
-   "expect": [
-    [
-     "competitor:f07fc423-706b-430d-882a-4917f4bb8ff7",
-     "competitor:45eab3a0-1380-485a-a324-318ef78db688"
-    ]
-   ]
-  },
-  {
-   "kind": "competitor + place in the text",
-   "q": "Tell me about the Estée Lauder palm oil programme in Indonesia",
-   "expect": [
-    [
-     "competitor:3fb74024-3e99-45a9-a713-a81fbf50b91c"
-    ]
-   ]
-  },
-  {
-   "kind": "fact, competitor",
-   "q": "Shiseido data leak",
-   "expect": [
-    [
-     "competitor:1e67678d-722c-4e9d-8135-f9c5e2d1b57b"
-    ]
-   ]
-  },
-  {
-   "kind": "people",
-   "q": "Who did Lancôme appoint at Bobbi Brown?",
-   "expect": [
-    [
-     "competitor:a507510b-54eb-429d-843a-6cbb8eca53f1",
-     "competitor:a8db8e33-7679-48e0-b725-1fa0842a0f8d"
-    ]
-   ],
-   "say": [
-    "Baudry"
-   ]
-  },
-  {
-   "kind": "number",
-   "q": "How much was the Estée Lauder daigou lawsuit settlement?",
-   "expect": [
-    [
-     "competitor:a57055b2-4692-40f6-b622-a11b4d5d9fa0",
-     "policy:4876de1c-c372-4878-bc6f-f6f4f18d534f"
-    ]
-   ],
-   "say": [
-    "210"
-   ]
-  },
-  {
-   "kind": "people",
-   "q": "Who is Shiseido's new global ambassador?",
-   "expect": [
-    [
-     "competitor:096a04a1-82bb-473e-a4c1-81d25abba93b"
-    ]
-   ],
-   "say": [
-    "Lisa"
-   ]
-  },
-  {
-   "kind": "competitor + place",
-   "q": "YSL Beauty news in Indonesia",
-   "expect": [
-    [
-     "competitor:6e5eb1ad-fac6-4711-bc8c-130c2e069bd3"
-    ]
-   ]
-  },
-  {
-   "kind": "people",
-   "q": "What happened with YSL Beauty's creative director?",
-   "expect": [
-    [
-     "competitor:3d5c4077-bd99-4f09-aec0-b3505f80991c"
-    ]
-   ],
-   "say": [
-    "Vaccarello"
-   ]
-  },
-  {
-   "kind": "keywords only (needs the alias YSL on YSL Beauty)",
-   "q": "ysl ostrich feathers",
-   "expect": [
-    [
-     "competitor:f906d98e-3584-498f-995c-5229d18b2c69",
-     "competitor:db27d269-7201-4629-bd73-93bacad50076"
-    ]
-   ]
-  },
-  {
-   "kind": "yes/no, place",
-   "q": "Did YSL Beauty launch in Pakistan?",
-   "expect": [
-    [
-     "competitor:784468ef-1111-4b5b-842c-4b9c2c9203d8"
-    ]
-   ]
-  },
-  {
-   "kind": "lawsuit",
-   "q": "Why is Shiseido suing Aldi?",
-   "expect": [
-    [
-     "competitor:210d0034-08a3-4b43-9d63-4482adfd9aa0"
-    ]
-   ]
-  },
-  {
-   "kind": "topic + competitor",
-   "q": "What is Lancôme doing on sustainable packaging and refills?",
-   "expect": [
-    [
-     "competitor:ace8f613-daa1-4693-9393-0c5bc20c379c"
-    ]
-   ]
-  },
-  {
-   "kind": "topic + competitor",
-   "q": "What is Lancôme doing for women's mental health?",
-   "expect": [
-    [
-     "competitor:c8fece1e-8de5-4b79-8c48-20c4a575e1d9"
-    ]
-   ]
-  },
-  {
-   "kind": "comparison",
-   "q": "Compare Estée Lauder and Shiseido price changes in the UK",
-   "expect": [
-    [
-     "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0"
-    ],
-    [
-     "competitor:8cfc2f63-910f-470d-915c-749a78e3704c",
-     "competitor:efc7f21f-a842-4b87-ac1c-92c45d073eaf"
-    ]
-   ]
-  },
-  {
-   "kind": "all competitors",
-   "q": "Which awards did our competitors win recently?",
-   "expect": [
-    [
-     "competitor:c76a6974-af79-43e2-9aa5-90071f8ca79b",
-     "competitor:cb232c8b-55b4-4d7d-91ea-bec80cf8dee0"
-    ]
-   ]
-  },
-  {
-   "kind": "no accents, no capitals",
-   "q": "estee lauder singles day strategy",
-   "expect": [
-    [
-     "competitor:fdb1c702-a81b-44c8-a988-77f76b5f5880"
-    ]
-   ]
-  },
-  {
-   "kind": "competitor + city",
-   "q": "Shiseido promotion in Hong Kong",
-   "expect": [
-    [
-     "competitor:03416d2b-55b9-4f4f-affe-2bd0a6d35a5c"
-    ]
-   ]
-  },
-  {
-   "kind": "risks, competitor",
-   "q": "What risks is YSL Beauty facing?",
-   "expect": [
-    [
-     "competitor:f906d98e-3584-498f-995c-5229d18b2c69",
-     "competitor:db27d269-7201-4629-bd73-93bacad50076",
-     "competitor:3d5c4077-bd99-4f09-aec0-b3505f80991c"
-    ]
-   ]
-  },
-  {
-   "kind": "list, impact, date",
-   "q": "High impact competitor news this month",
-   "expect": [
-    [
-     "competitor:87685eb9-b435-472b-aee1-49f336957e11",
-     "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0",
-     "competitor:f07fc423-706b-430d-882a-4917f4bb8ff7",
-     "competitor:efc7f21f-a842-4b87-ac1c-92c45d073eaf",
-     "competitor:45eab3a0-1380-485a-a324-318ef78db688"
-    ]
-   ]
-  },
-  {
-   "kind": "unknown company",
-   "q": "What is SkinBerry?",
-   "expect": [
-    [
-     "outlook:08f63630-f73a-4491-851a-a8593066c165"
-    ]
-   ]
-  },
-  {
-   "kind": "trend, region",
-   "q": "Are Thai beauty brands growing in Southeast Asia?",
-   "expect": [
-    [
-     "outlook:70bb9d55-e3ab-4032-806c-f0327abdf031"
-    ]
-   ]
-  },
-  {
-   "kind": "unknown company",
-   "q": "Any news on Lululab",
-   "expect": [
-    [
-     "outlook:65e2b8b0-b24f-423f-8718-740f9225f8dd"
-    ]
-   ]
-  },
-  {
-   "kind": "what is",
-   "q": "What are cosmetotextiles?",
-   "expect": [
-    [
-     "outlook:1acaedf8-4fd9-460d-8fd7-595e6d938080"
-    ]
-   ]
-  },
-  {
-   "kind": "unknown company",
-   "q": "Tell me about Skinmade personalised cream",
-   "expect": [
-    [
-     "outlook:bcf31523-481d-4b95-bafb-bd9b6a75ce2e"
-    ]
-   ]
-  },
-  {
-   "kind": "broad topic",
-   "q": "Which new anti-aging ingredients are coming?",
-   "expect": [
-    [
-     "outlook:e60a5539-fb33-4f7a-8db0-cff1893116e1",
-     "outlook:94e077ff-c26e-49bb-99fb-274f1a6e2dcf",
-     "outlook:f0fb858f-85d9-4164-a286-5d0fee6ab5d4",
-     "outlook:71d8d19b-6396-4f66-87c8-8a424e74f4b8",
-     "outlook:67f5a697-5420-4521-ae44-cf53982678ff"
-    ]
-   ]
-  },
-  {
-   "kind": "topic",
-   "q": "exosome skincare regulation",
-   "expect": [
-    [
-     "outlook:3b0e5aea-d7de-43d5-bc24-ccf397789796",
-     "outlook:501cccce-3afe-492a-8a69-5e08a82e5361",
-     "outlook:df05c123-ac9b-4d33-941b-3d80474bf44b"
-    ]
-   ]
-  },
-  {
-   "kind": "company not a competitor",
-   "q": "What did L'Oréal do with NVIDIA?",
-   "expect": [
-    [
-     "outlook:3195386d-201e-4d18-80ed-553bda33abfa"
-    ]
-   ]
-  },
-  {
-   "kind": "group of people",
-   "q": "How is Gen Z changing the beauty category?",
-   "expectTitles": [
-    [
-     "gen z"
-    ]
-   ]
-  },
-  {
-   "kind": "company + topic",
-   "q": "LG AI hair loss discovery",
-   "expect": [
-    [
-     "outlook:7f6a869b-4795-4bc5-b0a8-ca91814e3d7a"
-    ]
-   ]
-  },
-  {
-   "kind": "brand with a dot",
-   "q": "Dr.Althea 345 relief line",
-   "expect": [
-    [
-     "outlook:8c2d8b22-c3dc-4d02-830b-970fd8f72625"
-    ]
-   ]
-  },
-  {
-   "kind": "ingredient",
-   "q": "PDRN hair shampoo",
-   "expect": [
-    [
-     "outlook:931d4d12-62c9-4699-8841-ff9166f3a46b",
-     "outlook:67f5a697-5420-4521-ae44-cf53982678ff"
-    ]
-   ]
-  },
-  {
-   "kind": "topic + place",
-   "q": "probiotic cosmetics in India",
-   "expect": [
-    [
-     "outlook:96f604d6-7609-41b1-ac9b-be5d91ecb6e3"
-    ]
-   ]
-  },
-  {
-   "kind": "company not a competitor, topic",
-   "q": "L'Oréal refill campaign",
-   "expect": [
-    [
-     "outlook:4387f6f5-15ec-4f29-b84e-e060b529bc01"
-    ]
-   ]
-  },
-  {
-   "kind": "funding",
-   "q": "How much did Hyeglo Beauty raise?",
-   "expect": [
-    [
-     "market:3cd75efb-ee7b-4518-b7fd-b74d9c7dcebe"
-    ]
-   ],
-   "say": [
-    "7 crore"
-   ]
-  },
-  {
-   "kind": "acquisition",
-   "q": "Who acquired Seraderm?",
-   "expect": [
-    [
-     "market:5ffaaba3-1ff0-4b49-9813-3ad131687963"
-    ]
-   ],
-   "say": [
-    "UCK"
-   ]
-  },
-  {
-   "kind": "unknown company + place",
-   "q": "Rohto skin analyzer in Indonesia",
-   "expect": [
-    [
-     "market:521a1f3b-ff74-4050-8c81-19f43fd1649c"
-    ]
-   ]
-  },
-  {
-   "kind": "number",
-   "q": "How many stores does Nykaa have?",
-   "expect": [
-    [
-     "market:e1f44266-f327-4f6f-b282-a9a05a3c2713"
-    ]
-   ],
-   "say": [
-    "338"
-   ]
-  },
-  {
-   "kind": "company + city",
-   "q": "DSM-Firmenich fragrance hub in New York",
-   "expect": [
-    [
-     "market:597d8aed-e1f5-4910-b064-2d8dc7efa8d3"
-    ]
-   ]
-  },
-  {
-   "kind": "acquisition",
-   "q": "Who bought Roja London?",
-   "expect": [
-    [
-     "market:bd9d8ff8-e44b-48d5-b754-24405316733c"
-    ]
-   ],
-   "say": [
-    "Extravaganza"
-   ]
-  },
-  {
-   "kind": "funding",
-   "q": "Unilever Ventures investment in Arey",
-   "expect": [
-    [
-     "market:3da4fd83-3202-4e8a-9777-373acf2fd7f8"
-    ]
-   ]
-  },
-  {
-   "kind": "indirect",
-   "q": "Are shops locking up cosmetics because of theft?",
-   "expect": [
-    [
-     "market:83c7fb49-ce4e-478f-9893-c8a68ae4b2ca"
-    ]
-   ]
-  },
-  {
-   "kind": "competitor + topic",
-   "q": "Estée Lauder AI partnership with Profound",
-   "expect": [
-    [
-     "market:295d214f-f4c2-43ec-ae1d-4109cbaffb35"
-    ]
-   ]
-  },
-  {
-   "kind": "unknown company",
-   "q": "What is the Seint makeup controversy?",
-   "expect": [
-    [
-     "market:3f4a1018-1efc-494f-8af3-12b94641632b"
-    ]
-   ]
-  },
-  {
-   "kind": "law number",
-   "q": "What is Greek law 5317/2026?",
-   "expect": [
-    [
-     "policy:d1f40198-1e39-490d-8636-00951c3cc21a"
-    ]
-   ]
-  },
-  {
-   "kind": "product + place",
-   "q": "Can Medicube capsule cream be sold in Singapore again?",
-   "expect": [
-    [
-     "policy:640887f8-e4d6-4b64-a71f-6199450dee7a",
-     "policy:ba8b188f-0a2b-4bd3-a438-f61186fd8918"
-    ]
-   ]
-  },
-  {
-   "kind": "deadline",
-   "q": "When is the halal certification deadline for cosmetics in Indonesia?",
-   "say": [
-    "October"
-   ],
-   "expectTitles": [
-    [
-     "halal"
-    ]
-   ]
-  },
-  {
-   "kind": "rules + place",
-   "q": "sunscreen rules in Australia",
-   "expect": [
-    [
-     "policy:dc15d7e1-ccc3-4ada-94c6-0803a4731609",
-     "policy:c214a54d-6588-4deb-a61e-a6df3e6f1e88"
-    ]
-   ]
-  },
-  {
-   "kind": "rules + region",
-   "q": "EU PFAS restriction on cosmetics",
-   "expect": [
-    [
-     "policy:754ff5d2-a00f-4413-ba36-73d28c03d51a"
-    ]
-   ]
-  },
-  {
-   "kind": "short form + typo",
-   "q": "latst regs in malaysia",
-   "expect": [
-    [
-     "policy:20ffbd59-48a4-4ad7-9d09-6c60726c6097",
-     "policy:e48cdb44-7ba7-4b1d-a4da-f7556ef59f32"
-    ]
-   ]
-  },
-  {
-   "kind": "rules + place",
-   "q": "What does Oman require for allergens in cosmetics?",
-   "expect": [
-    [
-     "policy:e0de592d-3244-41ec-92cf-aea58a63d32b"
-    ]
-   ]
-  },
-  {
-   "kind": "rules + place + year",
-   "q": "UK cosmetics regulation changes in 2026",
-   "expect": [
-    [
-     "policy:7d008cac-b02b-48fc-b3d3-95deb0492bca",
-     "policy:8e6008f8-b222-4cda-8610-b529fc7efeab"
-    ]
-   ]
-  },
-  {
-   "kind": "place, enforcement",
-   "q": "Did Ghana seize cosmetic products?",
-   "expect": [
-    [
-     "policy:911fdd12-6956-49bf-8cbb-85d875b372aa"
-    ]
-   ]
-  },
-  {
-   "kind": "rules + region",
-   "q": "EU fragrance allergen labelling rules",
-   "expectTitles": [
-    [
-     "fragrance",
-     "allergen"
-    ]
-   ]
-  },
-  {
-   "kind": "name of an operation",
-   "q": "what is operation soundarya",
-   "expect": [
-    [
-     "policy:b06dd83e-d2e2-44b5-8d47-ea68d500ad37"
-    ]
-   ]
-  },
-  {
-   "kind": "indirect",
-   "q": "Should we worry about mercury in face creams?",
-   "expect": [
-    [
-     "policy:b06dd83e-d2e2-44b5-8d47-ea68d500ad37",
-     "policy:e48cdb44-7ba7-4b1d-a4da-f7556ef59f32"
-    ]
-   ]
-  },
-  {
-   "kind": "comparison of places",
-   "q": "Compare cosmetics rules in Indonesia and Malaysia",
-   "expectTitles": [
-    [
-     "indonesia"
-    ],
-    [
-     "malaysia"
-    ]
-   ]
-  },
-  {
-   "kind": "list, module, place",
-   "q": "latest policy news in the UK",
-   "expect": [
-    [
-     "policy:8bbf279c-b939-4197-aa30-ed90c28c8dde",
-     "policy:8e6008f8-b222-4cda-8610-b529fc7efeab",
-     "policy:7d008cac-b02b-48fc-b3d3-95deb0492bca"
-    ]
-   ]
-  },
-  {
-   "kind": "unknown company",
-   "q": "When will Skims Beauty launch?",
-   "expect": [
-    [
-     "policy:5327dde2-5dd3-4d1f-8803-120a3a448f44"
-    ]
-   ],
-   "say": [
-    "2027"
-   ]
-  },
-  {
-   "kind": "NOT in the data (honest no)",
-   "q": "What is the update about Zentrova Beauty?",
-   "status": "nothing_found"
-  }
- ]
+  "about": "Questions whose answer is in the client data (Lumiere Beauty Group, test DB, 26 Nov 2026). Each 'expect' group: at least ONE of its news items must be among the answer's sources. 'say': words the answer text must hold. 'status': nothing_found when the data has no answer. Ids = module:signal id, taken from the data by hand. 'expectTitles': groups of words; at least one source title must hold all the words of each group (used where the data holds the same news several times).",
+  "questions": [
+    {
+      "kind": "fact, competitor",
+      "q": "What did Estée Lauder do on Black Friday?",
+      "expect": [
+        [
+          "competitor:c90bf592-4609-4f34-9423-3ca26e017174"
+        ]
+      ]
+    },
+    {
+      "kind": "yes/no, competitor, place",
+      "q": "Did Lancôme change its prices in the UK?",
+      "expect": [
+        [
+          "competitor:87685eb9-b435-472b-aee1-49f336957e11"
+        ]
+      ]
+    },
+    {
+      "kind": "keywords only",
+      "q": "shiseido price cuts",
+      "expect": [
+        [
+          "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0",
+          "competitor:03416d2b-55b9-4f4f-affe-2bd0a6d35a5c"
+        ]
+      ]
+    },
+    {
+      "kind": "launches, date",
+      "q": "What new products did Estée Lauder launch in November 2026?",
+      "expect": [
+        [
+          "competitor:f07fc423-706b-430d-882a-4917f4bb8ff7",
+          "competitor:45eab3a0-1380-485a-a324-318ef78db688"
+        ]
+      ]
+    },
+    {
+      "kind": "competitor + place in the text",
+      "q": "Tell me about the Estée Lauder palm oil programme in Indonesia",
+      "expect": [
+        [
+          "competitor:3fb74024-3e99-45a9-a713-a81fbf50b91c"
+        ]
+      ]
+    },
+    {
+      "kind": "fact, competitor",
+      "q": "Shiseido data leak",
+      "expect": [
+        [
+          "competitor:1e67678d-722c-4e9d-8135-f9c5e2d1b57b"
+        ]
+      ]
+    },
+    {
+      "kind": "people",
+      "q": "Who did Lancôme appoint at Bobbi Brown?",
+      "expect": [
+        [
+          "competitor:a507510b-54eb-429d-843a-6cbb8eca53f1",
+          "competitor:a8db8e33-7679-48e0-b725-1fa0842a0f8d"
+        ]
+      ],
+      "say": [
+        "Baudry"
+      ]
+    },
+    {
+      "kind": "number",
+      "q": "How much was the Estée Lauder daigou lawsuit settlement?",
+      "expect": [
+        [
+          "competitor:a57055b2-4692-40f6-b622-a11b4d5d9fa0",
+          "policy:4876de1c-c372-4878-bc6f-f6f4f18d534f"
+        ]
+      ],
+      "say": [
+        "210"
+      ]
+    },
+    {
+      "kind": "people",
+      "q": "Who is Shiseido's new global ambassador?",
+      "expect": [
+        [
+          "competitor:096a04a1-82bb-473e-a4c1-81d25abba93b"
+        ]
+      ],
+      "say": [
+        "Lisa"
+      ]
+    },
+    {
+      "kind": "competitor + place",
+      "q": "YSL Beauty news in Indonesia",
+      "expect": [
+        [
+          "competitor:6e5eb1ad-fac6-4711-bc8c-130c2e069bd3"
+        ]
+      ]
+    },
+    {
+      "kind": "people",
+      "q": "What happened with YSL Beauty's creative director?",
+      "expect": [
+        [
+          "competitor:3d5c4077-bd99-4f09-aec0-b3505f80991c"
+        ]
+      ],
+      "say": [
+        "Vaccarello"
+      ]
+    },
+    {
+      "kind": "keywords only (needs the alias YSL on YSL Beauty)",
+      "q": "ysl ostrich feathers",
+      "expect": [
+        [
+          "competitor:f906d98e-3584-498f-995c-5229d18b2c69",
+          "competitor:db27d269-7201-4629-bd73-93bacad50076"
+        ]
+      ]
+    },
+    {
+      "kind": "yes/no, place",
+      "q": "Did YSL Beauty launch in Pakistan?",
+      "expect": [
+        [
+          "competitor:784468ef-1111-4b5b-842c-4b9c2c9203d8"
+        ]
+      ]
+    },
+    {
+      "kind": "lawsuit",
+      "q": "Why is Shiseido suing Aldi?",
+      "expect": [
+        [
+          "competitor:210d0034-08a3-4b43-9d63-4482adfd9aa0"
+        ]
+      ]
+    },
+    {
+      "kind": "topic + competitor",
+      "q": "What is Lancôme doing on sustainable packaging and refills?",
+      "expect": [
+        [
+          "competitor:ace8f613-daa1-4693-9393-0c5bc20c379c"
+        ]
+      ]
+    },
+    {
+      "kind": "topic + competitor",
+      "q": "What is Lancôme doing for women's mental health?",
+      "expect": [
+        [
+          "competitor:c8fece1e-8de5-4b79-8c48-20c4a575e1d9"
+        ]
+      ]
+    },
+    {
+      "kind": "comparison",
+      "q": "Compare Estée Lauder and Shiseido price changes in the UK",
+      "expect": [
+        [
+          "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0"
+        ],
+        [
+          "competitor:8cfc2f63-910f-470d-915c-749a78e3704c",
+          "competitor:efc7f21f-a842-4b87-ac1c-92c45d073eaf"
+        ]
+      ]
+    },
+    {
+      "kind": "all competitors",
+      "q": "Which awards did our competitors win recently?",
+      "expect": [
+        [
+          "competitor:c76a6974-af79-43e2-9aa5-90071f8ca79b",
+          "competitor:cb232c8b-55b4-4d7d-91ea-bec80cf8dee0"
+        ]
+      ]
+    },
+    {
+      "kind": "no accents, no capitals",
+      "q": "estee lauder singles day strategy",
+      "expect": [
+        [
+          "competitor:fdb1c702-a81b-44c8-a988-77f76b5f5880"
+        ]
+      ]
+    },
+    {
+      "kind": "competitor + city",
+      "q": "Shiseido promotion in Hong Kong",
+      "expect": [
+        [
+          "competitor:03416d2b-55b9-4f4f-affe-2bd0a6d35a5c"
+        ]
+      ]
+    },
+    {
+      "kind": "risks, competitor",
+      "q": "What risks is YSL Beauty facing?",
+      "expect": [
+        [
+          "competitor:f906d98e-3584-498f-995c-5229d18b2c69",
+          "competitor:db27d269-7201-4629-bd73-93bacad50076",
+          "competitor:3d5c4077-bd99-4f09-aec0-b3505f80991c"
+        ]
+      ]
+    },
+    {
+      "kind": "list, impact, date",
+      "q": "High impact competitor news this month",
+      "expect": [
+        [
+          "competitor:87685eb9-b435-472b-aee1-49f336957e11",
+          "competitor:7e3b1c7c-92f2-4bfe-ac41-bfd162c03bd0",
+          "competitor:f07fc423-706b-430d-882a-4917f4bb8ff7",
+          "competitor:efc7f21f-a842-4b87-ac1c-92c45d073eaf",
+          "competitor:45eab3a0-1380-485a-a324-318ef78db688"
+        ]
+      ]
+    },
+    {
+      "kind": "unknown company",
+      "q": "What is SkinBerry?",
+      "expect": [
+        [
+          "outlook:08f63630-f73a-4491-851a-a8593066c165"
+        ]
+      ]
+    },
+    {
+      "kind": "trend, region",
+      "q": "Are Thai beauty brands growing in Southeast Asia?",
+      "expect": [
+        [
+          "outlook:70bb9d55-e3ab-4032-806c-f0327abdf031"
+        ]
+      ]
+    },
+    {
+      "kind": "unknown company",
+      "q": "Any news on Lululab",
+      "expect": [
+        [
+          "outlook:65e2b8b0-b24f-423f-8718-740f9225f8dd"
+        ]
+      ]
+    },
+    {
+      "kind": "what is",
+      "q": "What are cosmetotextiles?",
+      "expect": [
+        [
+          "outlook:1acaedf8-4fd9-460d-8fd7-595e6d938080"
+        ]
+      ]
+    },
+    {
+      "kind": "unknown company",
+      "q": "Tell me about Skinmade personalised cream",
+      "expect": [
+        [
+          "outlook:bcf31523-481d-4b95-bafb-bd9b6a75ce2e"
+        ]
+      ]
+    },
+    {
+      "kind": "broad topic",
+      "q": "Which new anti-aging ingredients are coming?",
+      "expectTitles": [
+        [
+          "ingredient"
+        ]
+      ]
+    },
+    {
+      "kind": "topic",
+      "q": "exosome skincare regulation",
+      "expect": [
+        [
+          "outlook:3b0e5aea-d7de-43d5-bc24-ccf397789796",
+          "outlook:501cccce-3afe-492a-8a69-5e08a82e5361",
+          "outlook:df05c123-ac9b-4d33-941b-3d80474bf44b"
+        ]
+      ]
+    },
+    {
+      "kind": "company not a competitor",
+      "q": "What did L'Oréal do with NVIDIA?",
+      "expect": [
+        [
+          "outlook:3195386d-201e-4d18-80ed-553bda33abfa"
+        ]
+      ]
+    },
+    {
+      "kind": "group of people",
+      "q": "How is Gen Z changing the beauty category?",
+      "expectTitles": [
+        [
+          "gen z"
+        ]
+      ]
+    },
+    {
+      "kind": "company + topic",
+      "q": "LG AI hair loss discovery",
+      "expect": [
+        [
+          "outlook:7f6a869b-4795-4bc5-b0a8-ca91814e3d7a"
+        ]
+      ]
+    },
+    {
+      "kind": "brand with a dot",
+      "q": "Dr.Althea 345 relief line",
+      "expect": [
+        [
+          "outlook:8c2d8b22-c3dc-4d02-830b-970fd8f72625"
+        ]
+      ]
+    },
+    {
+      "kind": "ingredient",
+      "q": "PDRN hair shampoo",
+      "expect": [
+        [
+          "outlook:931d4d12-62c9-4699-8841-ff9166f3a46b",
+          "outlook:67f5a697-5420-4521-ae44-cf53982678ff"
+        ]
+      ]
+    },
+    {
+      "kind": "topic + place",
+      "q": "probiotic cosmetics in India",
+      "expect": [
+        [
+          "outlook:96f604d6-7609-41b1-ac9b-be5d91ecb6e3"
+        ]
+      ]
+    },
+    {
+      "kind": "company not a competitor, topic",
+      "q": "L'Oréal refill campaign",
+      "expect": [
+        [
+          "outlook:4387f6f5-15ec-4f29-b84e-e060b529bc01"
+        ]
+      ]
+    },
+    {
+      "kind": "funding",
+      "q": "How much did Hyeglo Beauty raise?",
+      "expect": [
+        [
+          "market:3cd75efb-ee7b-4518-b7fd-b74d9c7dcebe"
+        ]
+      ],
+      "say": [
+        "7 crore"
+      ]
+    },
+    {
+      "kind": "acquisition",
+      "q": "Who acquired Seraderm?",
+      "expect": [
+        [
+          "market:5ffaaba3-1ff0-4b49-9813-3ad131687963"
+        ]
+      ],
+      "say": [
+        "UCK"
+      ]
+    },
+    {
+      "kind": "unknown company + place",
+      "q": "Rohto skin analyzer in Indonesia",
+      "expect": [
+        [
+          "market:521a1f3b-ff74-4050-8c81-19f43fd1649c"
+        ]
+      ]
+    },
+    {
+      "kind": "number",
+      "q": "How many stores does Nykaa have?",
+      "expect": [
+        [
+          "market:e1f44266-f327-4f6f-b282-a9a05a3c2713"
+        ]
+      ],
+      "say": [
+        "338"
+      ]
+    },
+    {
+      "kind": "company + city",
+      "q": "DSM-Firmenich fragrance hub in New York",
+      "expect": [
+        [
+          "market:597d8aed-e1f5-4910-b064-2d8dc7efa8d3"
+        ]
+      ]
+    },
+    {
+      "kind": "acquisition",
+      "q": "Who bought Roja London?",
+      "expect": [
+        [
+          "market:bd9d8ff8-e44b-48d5-b754-24405316733c"
+        ]
+      ],
+      "say": [
+        "Extravaganza"
+      ]
+    },
+    {
+      "kind": "funding",
+      "q": "Unilever Ventures investment in Arey",
+      "expect": [
+        [
+          "market:3da4fd83-3202-4e8a-9777-373acf2fd7f8"
+        ]
+      ]
+    },
+    {
+      "kind": "indirect",
+      "q": "Are shops locking up cosmetics because of theft?",
+      "expect": [
+        [
+          "market:83c7fb49-ce4e-478f-9893-c8a68ae4b2ca"
+        ]
+      ]
+    },
+    {
+      "kind": "competitor + topic",
+      "q": "Estée Lauder AI partnership with Profound",
+      "expect": [
+        [
+          "market:295d214f-f4c2-43ec-ae1d-4109cbaffb35"
+        ]
+      ]
+    },
+    {
+      "kind": "unknown company",
+      "q": "What is the Seint makeup controversy?",
+      "expect": [
+        [
+          "market:3f4a1018-1efc-494f-8af3-12b94641632b"
+        ]
+      ]
+    },
+    {
+      "kind": "law number",
+      "q": "What is Greek law 5317/2026?",
+      "expect": [
+        [
+          "policy:d1f40198-1e39-490d-8636-00951c3cc21a"
+        ]
+      ]
+    },
+    {
+      "kind": "product + place",
+      "q": "Can Medicube capsule cream be sold in Singapore again?",
+      "expect": [
+        [
+          "policy:640887f8-e4d6-4b64-a71f-6199450dee7a",
+          "policy:ba8b188f-0a2b-4bd3-a438-f61186fd8918"
+        ]
+      ]
+    },
+    {
+      "kind": "deadline",
+      "q": "When is the halal certification deadline for cosmetics in Indonesia?",
+      "say": [
+        "October"
+      ],
+      "expectTitles": [
+        [
+          "halal"
+        ]
+      ]
+    },
+    {
+      "kind": "rules + place",
+      "q": "sunscreen rules in Australia",
+      "expect": [
+        [
+          "policy:dc15d7e1-ccc3-4ada-94c6-0803a4731609",
+          "policy:c214a54d-6588-4deb-a61e-a6df3e6f1e88"
+        ]
+      ]
+    },
+    {
+      "kind": "rules + region",
+      "q": "EU PFAS restriction on cosmetics",
+      "expect": [
+        [
+          "policy:754ff5d2-a00f-4413-ba36-73d28c03d51a"
+        ]
+      ]
+    },
+    {
+      "kind": "short form + typo",
+      "q": "latst regs in malaysia",
+      "expect": [
+        [
+          "policy:20ffbd59-48a4-4ad7-9d09-6c60726c6097",
+          "policy:e48cdb44-7ba7-4b1d-a4da-f7556ef59f32"
+        ]
+      ]
+    },
+    {
+      "kind": "rules + place",
+      "q": "What does Oman require for allergens in cosmetics?",
+      "expect": [
+        [
+          "policy:e0de592d-3244-41ec-92cf-aea58a63d32b"
+        ]
+      ]
+    },
+    {
+      "kind": "rules + place + year",
+      "q": "UK cosmetics regulation changes in 2026",
+      "expect": [
+        [
+          "policy:7d008cac-b02b-48fc-b3d3-95deb0492bca",
+          "policy:8e6008f8-b222-4cda-8610-b529fc7efeab"
+        ]
+      ]
+    },
+    {
+      "kind": "place, enforcement",
+      "q": "Did Ghana seize cosmetic products?",
+      "expect": [
+        [
+          "policy:911fdd12-6956-49bf-8cbb-85d875b372aa"
+        ]
+      ]
+    },
+    {
+      "kind": "rules + region",
+      "q": "EU fragrance allergen labelling rules",
+      "expectTitles": [
+        [
+          "fragrance",
+          "allergen"
+        ]
+      ]
+    },
+    {
+      "kind": "name of an operation",
+      "q": "what is operation soundarya",
+      "expect": [
+        [
+          "policy:b06dd83e-d2e2-44b5-8d47-ea68d500ad37"
+        ]
+      ]
+    },
+    {
+      "kind": "indirect",
+      "q": "Should we worry about mercury in face creams?",
+      "expect": [
+        [
+          "policy:b06dd83e-d2e2-44b5-8d47-ea68d500ad37",
+          "policy:e48cdb44-7ba7-4b1d-a4da-f7556ef59f32"
+        ]
+      ]
+    },
+    {
+      "kind": "comparison of places",
+      "q": "Compare cosmetics rules in Indonesia and Malaysia",
+      "expectTitles": [
+        [
+          "indonesia"
+        ],
+        [
+          "malaysia"
+        ]
+      ]
+    },
+    {
+      "kind": "list, module, place",
+      "q": "latest policy news in the UK",
+      "expect": [
+        [
+          "policy:8bbf279c-b939-4197-aa30-ed90c28c8dde",
+          "policy:8e6008f8-b222-4cda-8610-b529fc7efeab",
+          "policy:7d008cac-b02b-48fc-b3d3-95deb0492bca"
+        ]
+      ]
+    },
+    {
+      "kind": "unknown company",
+      "q": "When will Skims Beauty launch?",
+      "expect": [
+        [
+          "policy:5327dde2-5dd3-4d1f-8803-120a3a448f44"
+        ]
+      ],
+      "say": [
+        "2027"
+      ]
+    },
+    {
+      "kind": "NOT in the data (honest no)",
+      "q": "What is the update about Zentrova Beauty?",
+      "status": "nothing_found"
+    },
+    {
+      "kind": "word written together (kbeauty)",
+      "q": "updates about kbeauty",
+      "expectTitles": [
+        [
+          "k-beauty"
+        ]
+      ]
+    },
+    {
+      "kind": "word written together + topic",
+      "q": "updates about Kbeauty market",
+      "expectTitles": [
+        [
+          "k-beauty"
+        ]
+      ]
+    },
+    {
+      "kind": "word with its hyphen (must not change)",
+      "q": "updates about k-beauty",
+      "expectTitles": [
+        [
+          "k-beauty"
+        ]
+      ]
+    },
+    {
+      "kind": "name split by a space",
+      "q": "news about kanu fresh",
+      "expect": [
+        [
+          "outlook:5281c78c-0823-4ed1-882a-8c0965550f6a",
+          "outlook:006f66e4-509d-4889-b1c9-9bf871f29327"
+        ]
+      ]
+    },
+    {
+      "kind": "name without apostrophe and accent",
+      "q": "loreal refill campaign",
+      "expectTitles": [
+        [
+          "oréal",
+          "refill"
+        ]
+      ]
+    },
+    {
+      "kind": "name written together",
+      "q": "esteelauder black friday",
+      "expect": [
+        [
+          "competitor:c90bf592-4609-4f34-9423-3ca26e017174"
+        ]
+      ]
+    },
+    {
+      "kind": "typo in a name",
+      "q": "what is kanjfresh",
+      "expect": [
+        [
+          "outlook:5281c78c-0823-4ed1-882a-8c0965550f6a",
+          "outlook:006f66e4-509d-4889-b1c9-9bf871f29327"
+        ]
+      ]
+    }
+  ]
 }

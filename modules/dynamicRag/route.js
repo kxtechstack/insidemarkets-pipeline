@@ -161,7 +161,7 @@ async function handleChat(req, res) {
 
     // ── Step 3: accept / reject / ask back (AI) ────────────────────
     currentStep = 'validateQuery';
-    const validation = await traceStep('Step 3 – validateQuery', cleaned, () => validateQuery(cleaned));
+    const validation = await traceStep('Step 3 – validateQuery', cleaned, () => validateQuery(cleaned, { clientId: request.client_id }));
     stepDone('validateQuery', validation);
     console.log(
       `[DynamicRAG] validateQuery ok | status=${validation.status} label=${validation.ai_label} ` +

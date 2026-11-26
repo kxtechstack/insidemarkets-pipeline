@@ -77,15 +77,28 @@ function sourceBook(run) {
   const all = run.sources || {};
   const list = [];
   const byId = new Map();
+  // 26 Nov (dbcheck #28, #33): the same news saved twice (same link, two
+  // titles) was listed as two sources. The same link = one source number.
+  const byUrl = new Map();
+  const urlKey = (u) => String(u || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/[/#?]+$/, '');
   const num = (id) => {
     if (!all[id]) return null;                      // never a source that is not a signal of this run
+    const key = urlKey(all[id].url);
+    // (the other copy is kept on the source as same_link: never hidden)
+    if (!byId.has(id) && key && byUrl.has(key)) {
+      const n = byUrl.get(key);
+      byId.set(id, n);
+      const s = list[n - 1];
+      if (s.source_id !== id && !s.same_link.includes(id)) s.same_link.push(id);
+    }
     if (!byId.has(id)) {
       const it = all[id];
+      if (key) byUrl.set(key, list.length + 1);
       byId.set(id, list.length + 1);
       list.push({
         n: list.length + 1, source_id: id, module: it.module, module_name: MODULE_NAMES[it.module] || it.module,
         signal_id: it.signal_id, title: it.title, date: it.date, url: it.url || null,
-        countries: it.countries || [], companies: it.companies || [],
+        countries: it.countries || [], companies: it.companies || [], same_link: [],
       });
     }
     return byId.get(id);
@@ -161,6 +174,12 @@ function buildSections(run, workflow, book) {
   // 25 Nov (Step 10 report): "Forward outlook signals about sustainability"
   // showed the same news three times (three searches = three lists, "60 news
   // items" for 30). All the lists are one list, every signal once.
+  // the same news twice in a list (same link = same source number) is listed once
+  for (const x of sections) {
+    if (x.kind !== 'list') continue;
+    const seen1 = new Set();
+    x.items = x.items.filter((it) => { const k = it.sources.join(); if (seen1.has(k)) return false; seen1.add(k); return true; });
+  }
   const lists = sections.filter((x) => x.kind === 'list');
   if (lists.length > 1) {
     const seen = new Set();
@@ -174,18 +193,25 @@ function buildSections(run, workflow, book) {
 // 26 Nov (DI tab): the searches found news NAMING the company asked, but no
 // point the AI wrote passed the checks, and the user read "nothing found".
 // Then that news is shown as a list (code only, no AI): news a search kept
-// to a company the data names (never a search by the words only).
+// to a company the data names (never a search by the words only), and news
+// whose TITLE holds a rare word of the search (dbcheck "What are
+// cosmetotextiles?": found at the top, the AI wrote facts with no source).
 function namedLists(run, workflow, book) {
   const items = [];
   const seen = new Set();
   for (const t of (workflow && workflow.tasks) || []) {
-    if (!SEARCHES.includes(t.capability) || !((t.inputs && t.inputs.companies) || []).length) continue;
+    if (!SEARCHES.includes(t.capability)) continue;
     const r = run.results && run.results[t.task_id];
-    if (!r || r.status !== 'done' || !r.output || /searched by the words only/.test(r.output.note || '')) continue;
+    if (!r || r.status !== 'done' || !r.output) continue;
+    const byCompany = ((t.inputs && t.inputs.companies) || []).length > 0 && !/searched by the words only/.test(r.output.note || '');
+    const titled = new Set(r.output.titled || []);
+    if (!byCompany && !titled.size) continue;
     for (const it of r.output.items || []) {
+      if (!byCompany && !titled.has(it.source_id)) continue;
       const sources = book.nums([it.source_id]);
-      if (!sources.length || seen.has(it.source_id)) continue;
+      if (!sources.length || seen.has(it.source_id) || seen.has(sources.join())) continue;
       seen.add(it.source_id);
+      seen.add(sources.join());
       items.push({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, sources });
     }
   }
@@ -251,6 +277,20 @@ function pointsForAi(sections) {
 // part (at most 3). 25 Nov (Step 10 report): it used to copy the point with
 // its labels ("The news suggests: Ban on …: … (trend, 3 sources, …)") and a
 // comparison row as "Saudi Arabia: … | United Arab Emirates: …".
+// "2026-11-23" -> "23 Nov 2026"
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dayText = (d) => { const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : String(d || ''); };
+// 26 Nov: every search found nothing and its dates are after the newest
+// news in the data -> say so (the dates, not a broken chat)
+function datesGap(run, workflow) {
+  const gaps = ((workflow && workflow.tasks) || []).filter((t) => SEARCHES.includes(t.capability)).map((t) => {
+    const r = run.results && run.results[t.task_id];
+    return r && r.status === 'done' && r.output && !r.output.items.length && r.output.newest_in_data
+      ? { from: t.inputs.date_from, to: t.inputs.date_to || new Date().toISOString().slice(0, 10), newest: r.output.newest_in_data } : null;
+  });
+  if (!gaps.length || gaps.some((g) => !g)) return null;
+  return { from: gaps.map((g) => g.from).sort()[0], to: gaps.map((g) => g.to).sort().pop(), newest: gaps.map((g) => g.newest).sort().pop() };
+}
 function codeSummary(sections, nothing, foundNews = false, named = false) {
   // 26 Nov (DI tab): "what is operation sindhoora" said "The searches below
   // found nothing" but the searches had found news, none of which answered
@@ -351,7 +391,13 @@ function checkSummary(text, book, points, question) {
   // GCC. The regulations …") was not split, so its first half was never
   // checked. A word of 2+ capitals ends a sentence too; one capital after a
   // dot ("H.P.N.", "U.S.") still does not.
-  const sentences = t.split(/(?<=(?:[a-z0-9%)\]]|[a-z]{2}\.|(?:^|[\s(])[A-Z]{2,})[.!?])\s+(?=["'A-Z])/).filter((x) => x.trim());
+  // 26 Nov (dbcheck #32): "Dr. Groot" was cut into two sentences. A dot the
+  // NEWS itself writes inside a name ("Dr. Groot" in its sources) never ends
+  // a sentence (the news decides, no list of short words).
+  const newsText = [...new Set(points.flatMap((p) => p.sources))].map((k) => { const it = book.item(k); return it ? `${it.title} ${it.text || ''}` : ''; }).join(' ').toLowerCase().replace(/\s+/g, ' ');
+  const KEEP = '\u2024';   // a one-dot leader: never a sentence end, put back below
+  t = t.replace(/(\S+)\.\s+(\S+)/g, (m, a, b) => (newsText.includes(`${a}. ${b}`.toLowerCase()) ? `${a}${KEEP} ${b}` : m));
+  const sentences = t.split(/(?<=(?:[a-z0-9%)\]]|[a-z]{2}\.|(?:^|[\s(])[A-Z]{2,})[.!?])\s+(?=["'A-Z])/).filter((x) => x.trim()).map((x) => x.split(KEEP).join('.'));
   const kept = [];
   for (const raw of sentences) {
     let sentence = raw.trim();
@@ -432,6 +478,8 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   let aiCalls = 0;
   const foundNews = Object.keys((run && run.sources) || {}).length > 0;
   let summary = codeSummary(sections, nothing, foundNews, named.length > 0);
+  const gap = nothing ? datesGap(run, workflow) : null;
+  if (gap) summary = ANSWER_TEXT.nothing_in_dates.replace('{from}', dayText(gap.from)).replace('{to}', dayText(gap.to)).replace('{newest}', dayText(gap.newest));
   let summaryBy = 'code';
 
   // the AI writes only the short answer, when there is something to say

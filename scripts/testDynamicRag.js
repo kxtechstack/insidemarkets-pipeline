@@ -760,6 +760,29 @@ async function testStep3() {
     const r = decide({ label: 'clarification', reason: 'r', question: 'Which market do you mean?' }, cleanedWith({ preprocessed_query: 'tell me abt the mkt' }));
     return r.status === 'clarification' || r;
   });
+  // ---- 26 Nov: a rare word of the question found in the news titles ----
+  const { decideWithData } = require('../modules/dynamicRag/validateQuery');
+  const ask = { label: 'clarification', reason: 'no topic', question: 'What should I look at?' };
+  await check('clarification, code found no company, but a rare word of the question is in the news titles ("Dr.Althea 345 relief line") -> accept (decided by code, reason kept)', async () => {
+    const r = await decideWithData(ask, cleanedWith({ preprocessed_query: 'Dr.Althea 345 relief line' }), async () => ['dralthea']);
+    return (r.status === 'accept' && r.changed_by_code === true && /no topic/.test(r.reason) && /dralthea/.test(r.reason)) || r;
+  });
+  await check('Must not change: rare word NOT in the titles, the title read fails, or no data lookup -> still asked back; reject and accept never changed by the lookup', async () => {
+    const c = cleanedWith({ preprocessed_query: 'tell me abt the mkt' });
+    const a = await decideWithData(ask, c, async () => []);
+    const b = await decideWithData(ask, c, async () => { throw new Error('db down'); });
+    const d = await decideWithData(ask, c, null);
+    let looked = 0;
+    const e = await decideWithData({ label: 'reject', reason: 'r', question: '' }, c, async () => { looked += 1; return ['x']; });
+    return (a.status === 'clarification' && b.status === 'clarification' && d.status === 'clarification' && e.status === 'reject' && looked === 0) || [a, b, d, e];
+  });
+  await check('The words looked up: only words NOT in the English word list ("Dr.Althea" -> "dralthea", "cosmetotextiles"); a vague question of English words looks up nothing', async () => {
+    const { rareWordsOf } = require('../modules/dynamicRag/runWorkflow');
+    const a = rareWordsOf('Dr.Althea 345 relief line', {}, null);
+    const b = rareWordsOf('What are cosmetotextiles?', {}, null);
+    const c = rareWordsOf('Tell me something interesting about the market', {}, null);
+    return (a.includes('dralthea') && b.includes('cosmetotextiles') && c.length === 0) || [a, b, c];
+  });
   await check('reject is never turned into accept, even with a company named ("a poem about Lancôme")', async () => {
     const r = decide({ label: 'reject', reason: 'r', question: '' }, cleanedWith({ companies_named: [{ name: 'Lancôme', kind: 'competitor' }] }));
     return r.status === 'reject' || r;
@@ -4920,6 +4943,25 @@ function fakeStep9Store(opts = {}) {
     rows.policy_signals.push({ id: 'pg2', client_id: C1, article_id: 'pga2', signal_title: 'Ghana calls for a cosmetology council', summary: 'Ghana.', country: 'Ghana', source_published_date: '2025-02-21T08:00:00Z', impact_level: 'Low' });
     pieces.push(piece('policy', 'pga2', 0.6));
   }
+  if (opts.kbeautyWritten) {
+    // the data writes "K-Beauty" and "L'Oréal"; the user types "kbeauty" / "loreal"
+    rows.policy_signals.push({ id: 'pkb', client_id: C1, article_id: 'pkba', signal_title: 'K-Beauty brands design products for overseas markets', summary: 'Korean beauty.', country: 'Global', source_published_date: '2025-02-13T08:00:00Z', impact_level: 'Low' });
+    rows.policy_signals.push({ id: 'plo', client_id: C1, article_id: 'ploa', signal_title: 'L\u2019Oréal launches a global refillable beauty campaign', summary: 'Refills.', country: 'Global', source_published_date: '2025-02-14T08:00:00Z', impact_level: 'Low' });
+    rows.policy_signals.push({ id: 'pmb', client_id: C1, article_id: 'pmba', signal_title: 'Milk Beauty bar opens in Seoul', summary: 'A bar.', country: 'Global', source_published_date: '2025-02-15T08:00:00Z', impact_level: 'Low' });
+  }
+  if (opts.kbeautyMany) {
+    // 30 K-Beauty titles with weak pieces, and 30 other news with closer pieces
+    for (let k = 0; k < 30; k += 1) {
+      rows.policy_signals.push({ id: `kb${k}`, client_id: C1, article_id: `kba${k}`, signal_title: `K-Beauty brand news ${k}`, summary: 'K-Beauty.', country: 'Global', source_published_date: '2025-01-04T08:00:00Z', impact_level: 'Low' });
+      pieces.push(piece('policy', `kba${k}`, 0.3));
+      rows.policy_signals.push({ id: `ot${k}`, client_id: C1, article_id: `ota${k}`, signal_title: `Telecom market update ${k}`, summary: 'Other.', country: 'Global', source_published_date: '2025-01-04T08:00:00Z', impact_level: 'Low' });
+      pieces.push(piece('policy', `ota${k}`, 0.9));
+    }
+  }
+  if (opts.manyRare) {
+    // "PFAS" in 250 titles: common in this client's news
+    for (let k = 0; k < 250; k += 1) rows.policy_signals.push({ id: `pf${k}`, client_id: C1, article_id: `pfa${k}`, signal_title: `PFAS rule number ${k}`, summary: 'PFAS.', country: 'Global', source_published_date: '2025-01-03T08:00:00Z', impact_level: 'Low' });
+  }
   if (opts.kbeauty) {
     rows.policy_signals.push({ id: 'pb1', client_id: C1, article_id: 'pba1', signal_title: 'K-Beauty brands enter the Gulf', summary: 'Korean brands.', country: 'Global', source_published_date: '2025-02-12T08:00:00Z', impact_level: 'Low' });
     pieces.push(piece('policy', 'pba1', 0.3));
@@ -4939,11 +4981,13 @@ function fakeStep9Store(opts = {}) {
     embed: async () => [0.1, 0.2],
     pieceReads: () => calls,
     taggedReads: () => taggedReads,
-    async readTagged(table, { keyCol: kc, column, patterns, from, to, limit }) {
+    async readTagged(table, { keyCol: kc, column, patterns, regex, from, to, limit }) {
       taggedReads += 1;
       if (opts.noTags) return [];
+      if (regex && opts.regexFails) throw new Error('operator does not exist: imatch');
       const like = (pt) => new RegExp(String(pt).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/_/g, '.'), 'i');
-      return rows[table].filter((r) => r.client_id === C1 && r[column] && patterns.some((pt) => like(pt).test(String(r[column]))))
+      const hit = (v) => (regex ? new RegExp(regex, 'i').test(String(v)) : patterns.some((pt) => like(pt).test(String(v))));
+      return rows[table].filter((r) => r.client_id === C1 && r[column] && hit(r[column]))
         .filter((r) => (!from || String(r[dateCol[table]]).slice(0, 10) >= from) && (!to || String(r[dateCol[table]]).slice(0, 10) <= to))
         .slice(0, limit).map((r) => r[kc]);
     },
@@ -5148,6 +5192,26 @@ async function testStep9Ai() {
     const f = o.findings.map((x) => x.text);
     return (f.includes('UAE bans parabens in cosmetics') && f.includes('Brand results for Q1 2025 beat forecasts') && !f.includes('Market Dynamics') &&
       f.includes('Saudi Arabia sets halal rules for cosmetics') && o.removed.reasons['a short fact the news does not say in a sentence'] === 1 && o.removed.reasons['a short fact written as the news sentence holding it'] === 2) || { f, r: o.removed.reasons };
+  });
+  await check('Facts from news about something else: the question names a company (Lancôme) -> a fact whose news does not name it is removed (counted); must not change: no company or rare word asked, no fact naming it, or a summary under headings -> all kept', async () => {
+    const two = (t) => J({ facts: [
+      { about: 'x', text: 'Lancôme opens a flagship store in Dubai', sources: [code(t, 'Lancôme opens')] },
+      { about: 'x', text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens')] },
+    ] });
+    const tasks = [search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1'])];
+    replies = { [P('extract_facts')]: [two, two, two] };
+    const a = (await go(tasks, { u: { ...understood, companies: [{ name: 'Lancôme', kind: 'competitor' }], question_typed: 'What is Lancôme doing?' } })).results.T2.output;
+    const b = (await go(tasks, { u: { ...understood, companies: [], question_typed: 'What is new in cosmetics rules?' } })).results.T2.output;
+    const c = (await go(tasks, { u: { ...understood, companies: [{ name: 'Dior', kind: 'competitor' }], question_typed: 'What is Dior doing?' } })).results.T2.output;
+    replies = { [P('summarise')]: (t) => J({ points: [
+      { heading: 'Strengths', text: 'Lancôme opens a flagship store in Dubai', sources: [code(t, 'Lancôme opens')] },
+      { heading: 'Threats', text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens')] },
+    ] }) };
+    const d = (await go([search('T1'), job('T2', 'summarise', { input: ['T1.output'], headings: ['SWOT: Strengths', 'SWOT: Threats'] }, ['T1'])],
+      { u: { ...understood, companies: [{ name: 'Lancôme', kind: 'competitor' }], question_typed: 'SWOT of Lancôme' } })).results.T2.output;
+    const n = (o) => o.findings.length;
+    return (n(a) === 1 && /Lancôme/.test(a.findings[0].text) && Object.keys(a.removed.reasons).some((k) => /not about what the question names \(Lancôme\)/.test(k)) &&
+      n(b) === 2 && n(c) === 2 && n(d) === 2) || { a: a.findings.map((x) => x.text), r: a.removed.reasons, b: n(b), c: n(c), d: n(d) };
   });
   await check('A point that cites MANY news items (all 20 it was given) keeps only the ones whose title is really about it; a point none of them is about is removed; a point with 6 or fewer sources is NOT checked (must not change)', async () => {
     const all = (t) => [...new Set(t.match(/\bS\d+\b/g) || [])];
@@ -5445,6 +5509,13 @@ async function testStep10() {
     return (a.status === 'nothing_found' && answerCalls === 0 && /could not find news/.test(a.answer_text) && /No news found for "cosmetics rules"/.test(a.answer_text) &&
       a.sources.length === 0 && a.confidence.level === 'not_enough' && saved.length === 1 && saved[0].role === 'assistant' && saved[0].payload.status === 'nothing_found') || a;
   });
+  await check('Nothing found because the dates asked are after the newest news -> "Your data has no news from 23 Nov 2026 to 26 Nov 2026. The newest news in your data is from 1 May 2025 …" (no AI call); nothing found without dates keeps the old text (must not change)', async () => {
+    replies = {};
+    const { a, answerCalls } = await answerFor([search('T1', { date_from: '2026-11-23', date_to: '2026-11-26' }), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    const { a: b } = await answerFor([search('T1', { companies: ['Dior'] }), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
+    return (a.status === 'nothing_found' && answerCalls === 0 && /^Your data has no news from 23 Nov 2026 to 26 Nov 2026\. The newest news in your data is from 1 May 2025/.test(a.answer_text) &&
+      /^I could not find news/.test(b.answer_text)) || { a: a.answer_text, b: b.answer_text };
+  });
   await check('The searches found news but nothing answers (every AI point removed) -> "The news in your data does not answer this question", not "the searches found nothing"', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
     const { a, answerCalls } = await answerFor([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
@@ -5455,6 +5526,33 @@ async function testStep10() {
     const { a, answerCalls } = await answerFor([search('T1', { query: 'store', companies: ['Lancôme'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
     return (a.status === 'answered' && answerCalls === 0 && /^I could not write a checked summary, so here is the 1 news item from your data that names it/.test(a.summary) &&
       a.sources.length === 1 && a.confidence.level === 'some' && /Lancôme opens a flagship store/.test(a.answer_text) && /left out: what the AI wrote did not pass the checks/.test(a.answer_text)) || { s: a.summary, t: a.answer_text };
+  });
+  await check('The AI points all fail but the search found news whose TITLE holds a rare word of the question ("lancome store", no company filter) -> that news is shown as a list (code only, "some evidence"); other news of the same search is left out', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
+    const { a, run } = await answerFor([search('T1', { query: 'lancome store' }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    const out = run.results.T1.output;
+    return (a.status === 'answered' && a.confidence.level === 'some' && (out.titled || []).length > 0 && a.sources.length === out.titled.length &&
+      a.sources.every((x) => /lancôme/i.test(x.title))) || { s: a.status, titled: out.titled, src: a.sources.map((x) => x.title) };
+  });
+  await check('The same news saved twice (same link, two titles) is ONE source number and listed once; different links stay two (must not change)', async () => {
+    const { sourceBook } = answerer;
+    const book = sourceBook({ sources: {
+      'outlook:a': { module: 'outlook', title: 'Dr.Althea Expands 345 Relief Line', url: 'https://www.prnewswire.com/x.html' },
+      'outlook:b': { module: 'outlook', title: 'Dr.Althea Expands 345 Relief Line with New Products', url: 'https://prnewswire.com/x.html/' },
+      'outlook:c': { module: 'outlook', title: 'Another news', url: 'https://other/y' },
+      'outlook:d': { module: 'outlook', title: 'News with no link', url: null },
+      'outlook:e': { module: 'outlook', title: 'Other news with no link', url: null },
+    } });
+    const n = book.nums(['outlook:a', 'outlook:b', 'outlook:c', 'outlook:d', 'outlook:e']);
+    return (J(n) === J([1, 2, 3, 4]) && book.list.length === 4 && J(book.list[0].same_link) === J(['outlook:b']) && book.list[1].same_link.length === 0) || { n, list: book.list.map((x) => [x.title, x.same_link]) };
+  });
+  await check('A dot the news itself writes inside a name ("Dr. Groot") does not end a sentence; other sentences are still split and checked (must not change)', async () => {
+    const { sourceBook, checkSummary } = answerer;
+    const book = sourceBook({ sources: { 'outlook:g': { module: 'outlook', title: 'LG AI identifies Rhamsydil for Dr. Groot scalp-care products', text: 'LG AI Research found Rhamsydil for Dr. Groot.', url: 'u1' } } });
+    const points = [{ text: 'LG AI identifies Rhamsydil for Dr. Groot scalp-care products', sources: book.nums(['outlook:g']) }];
+    const a = checkSummary('LG AI identified Rhamsydil for Dr. Groot scalp-care products.', book, points, 'LG AI hair loss discovery');
+    const b = checkSummary('LG AI identified Rhamsydil for Dr. Groot scalp-care products [1]. This is a big change for everyone.', book, points, 'LG AI hair loss discovery');
+    return (a.ok && /Dr\. Groot scalp-care products \[1\]\.$/.test(a.text) && !/Dr \[1\]/.test(a.text) && b.ok && !/big change/.test(b.text) && b.problems.some((x) => /no point supports it/.test(x))) || { a, b };
   });
   await check('Must not change: AI points all fail and the search was NOT kept to a company -> still "The news in your data does not answer this question" (no list of news that may be about something else)', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
@@ -5732,6 +5830,17 @@ async function testStep9() {
     const c = await runSearch('structured_search', { modules: ['policy', 'market', 'competitor'], companies: ['Lancôme'] }, understoodFor(), { both: true });
     return (a.output.items[0].signal_id === 'pj1' && b.output.items[0].signal_id === 'pj1' && c.output.items[0].signal_id === 'm1') || { a: ids(a), b: ids(b), c: ids(c) };
   });
+  await check('Companies asked TOGETHER ("What did Lancôme do with Estée Lauder?"): only the news naming both is listed (counted); must not change: "news on Lancôme and Estée Lauder" (either) keeps the other news after it; no news naming both -> as before', async () => {
+    const mods = { modules: ['policy', 'market', 'competitor'], companies: ['Lancôme', 'Estée Lauder'] };
+    const a = await runSearch('structured_search', mods, understoodFor({ question_typed: 'What did Lancôme do with Estée Lauder?' }), { both: true });
+    const b = await runSearch('retrieve_data', { ...mods, query: 'refill pact' }, understoodFor({ question_typed: 'What did Lancôme do with Estée Lauder?' }), { both: true });
+    const c = await runSearch('structured_search', mods, understoodFor({ question_typed: 'news on Lancôme and Estée Lauder' }), { both: true });
+    const d = await runSearch('structured_search', mods, understoodFor({ question_typed: 'What did Lancôme do with Estée Lauder?' }));
+    const { namesTogether } = require('../modules/dynamicRag/runWorkflow');
+    return (ids(a) === 'pj1' && ids(b) === 'pj1' && /asked together/.test(a.output.note) && c.output.items.length > 1 && c.output.items[0].signal_id === 'pj1' && d.output.items.length > 1 &&
+      namesTogether('partnership between Lancôme and Dior', ['Lancôme', 'Dior']) && !namesTogether('Lancôme and Dior news with prices', ['Lancôme', 'Dior'])) ||
+      { a: ids(a), b: ids(b), c: ids(c), d: ids(d) };
+  });
   await check('Few news tagged with the place asked (20 or fewer): ALL are read, also one with no piece in the search index ("Did Ghana seize cosmetic products?" missed the FDA seizure news)', async () => {
     const r = await runSearch('retrieve_data', { query: 'cosmetic seizures', countries: ['Ghana'] }, understoodFor(), { ghana: true });
     return (ids(r).split(',').includes('pg1') && ids(r).split(',').includes('pg2') && r.output.timing.tagged_read_all === true) || { got: ids(r), timing: r.output.timing };
@@ -5741,6 +5850,55 @@ async function testStep9() {
     const c = runner.cutAtWord(t, 600);
     const d = runner.cutAtWord(`${'x'.repeat(590)} count to 338 stores`, 600);
     return (!/\b3…$/.test(c) && !/3…$/.test(d) && runner.cutAtWord('short', 600) === 'short') || { c: c.slice(-20), d: d.slice(-20) };
+  });
+  await check('A name written together, with a hyphen, an apostrophe or accents is the same name ("kbeauty" = "K-Beauty", "loreal" = "L\'Oréal", "kanu fresh" = "KanuFresh"); only whole words ("kbeauty" is not in "Milk Beauty")', async () => {
+    const it = (title) => ({ title, text: '', companies: [], countries: [] });
+    const keep = (title, name) => runner.applyFilters([it(title)], { companies: [name], query: 'x' }, understoodFor(), [], true).items.length === 1;
+    const ok = keep('K-Beauty Industry Shifts', 'KBeauty') && keep('L\'Oréal Launches Refills', 'loreal') && keep('Lucas Meyer Cosmetics launches KanuFresh', 'kanu fresh') &&
+      keep('Dr.Althea Expands 345 Relief Line', 'dralthea') && !keep('Milk Beauty bar opens', 'kbeauty') && !keep('Kanu river news', 'kanufresh') &&
+      runner.sameCompany('kbeauty', 'K-Beauty') && runner.sameCompany('Estee Lauder', 'Estée Lauder') && !runner.sameCompany('Lancôme', 'Estée Lauder');
+    return ok || 'a name was matched wrongly';
+  });
+  await check('Name written another way, OLDER than 1000 newer news: exact read "updates about kbeauty" finds "K-Beauty", "loreal" finds "L\u2019Oréal" (the database is read with spaces, hyphens, apostrophes and accents ignored); "Milk Beauty" is not taken', async () => {
+    const a = await runSearch('structured_search', { modules: ['policy'], companies: ['kbeauty'] }, understoodFor(), { filler: 1100, kbeautyWritten: true });
+    const b = await runSearch('structured_search', { modules: ['policy'], companies: ['loreal'] }, understoodFor(), { filler: 1100, kbeautyWritten: true });
+    return (ids(a) === 'pkb' && ids(b) === 'plo') || { a: ids(a), b: ids(b), note: a.output.note };
+  });
+  await check('Name written another way: search by meaning "updates about kbeauty" with 700 closer news -> the K-Beauty news, never the closer news by the words only', async () => {
+    const r = await runSearch('retrieve_data', { query: 'kbeauty updates', modules: ['policy'], companies: ['KBeauty'] }, understoodFor(), { deep: 700, kbeautyWritten: true });
+    return (ids(r) === 'pkb' && !/searched by the words only/.test(r.output.note || '')) || { got: ids(r), note: r.output.note };
+  });
+  await check('The database refuses the regex read -> the search still works with the names as written (never broken); must not change: a name typed as the data writes it', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'], companies: ['Catalio'] }, understoodFor(), { filler: 1100, catalio: true, regexFails: true });
+    return (ids(r) === 'pc1') || { got: ids(r), note: r.output.note };
+  });
+  await check('Nothing found in dates AFTER the newest news ("in the last 3 days", newest news 1 May 2025) -> the search says the newest date a user can open; dates with news, or an empty search inside the data period -> nothing added (must not change)', async () => {
+    const a = await runSearch('retrieve_data', { query: 'rules', date_from: '2026-11-23', date_to: '2026-11-26' });
+    const b = await runSearch('structured_search', { date_from: '2026-11-23', date_to: '2026-11-26' });
+    const c = await runSearch('retrieve_data', { query: 'rules', date_from: '2025-03-01', date_to: '2025-03-31' });
+    const d = await runSearch('retrieve_data', { query: 'rules', date_from: '2025-03-01', date_to: '2025-03-05' });
+    return (a.output.items.length === 0 && a.output.newest_in_data === '2025-05-01' && b.output.newest_in_data === '2025-05-01' &&
+      c.output.items.length > 0 && c.output.newest_in_data === undefined && d.output.items.length === 0 && d.output.newest_in_data === undefined) ||
+      { a: a.output.newest_in_data, b: b.output.newest_in_data, c: [c.output.items.length, c.output.newest_in_data], d: [d.output.items.length, d.output.newest_in_data] };
+  });
+  await check('Rare word as a TOPIC ("updates about kbeauty", no company): looked up in the titles written any way ("K-Beauty") and searched first, also when 700 closer news come first; "kanu fresh" joined = "KanuFresh"', async () => {
+    const a = await runSearch('retrieve_data', { query: 'kbeauty updates', modules: ['policy'] }, understoodFor(), { deep: 700, kbeautyWritten: true });
+    const b = await runSearch('retrieve_data', { query: 'kanu fresh news', modules: ['policy'] }, understoodFor(), { deep: 700, kanu: true });
+    const first = (r) => r.output.items[0] && r.output.items[0].signal_id;
+    return (first(a) === 'pkb' && !ids(a).split(',').includes('pmb') && /looked up in the titles: kbeauty/.test(a.output.note) && first(b) === 'pk1') ||
+      { a: first(a), b: first(b), note: a.output.note };
+  });
+  await check('Rare word in MORE than 20 titles: the news whose title holds it comes before closer-scoring news of the wide search (never other news on top)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'kbeauty news', modules: ['policy'] }, understoodFor(), { kbeautyMany: true });
+    const top = r.output.items.slice(0, 20).map((i) => i.title);
+    return (top.length === 20 && top.every((t) => /k-beauty/i.test(t))) || top.filter((t) => !/k-beauty/i.test(t)).slice(0, 3);
+  });
+  await check('Rare words (must not change): only English words in the search -> no title read, the same search as before; a rare word in more than 200 titles is common in this client\'s news -> not used; the database refusing the read -> the search as before', async () => {
+    const a = await runSearch('retrieve_data', { query: 'sunscreen rules', modules: ['policy'] }, understoodFor(), { deep: 30 });
+    const b = await runSearch('retrieve_data', { query: 'pfas rules', modules: ['policy'] }, understoodFor(), { manyRare: true });
+    const c = await runSearch('retrieve_data', { query: 'kbeauty updates', modules: ['policy'] }, understoodFor(), { kbeautyWritten: true, regexFails: true });
+    return (a.output.timing.rare_words === undefined && a.output.timing.tagged_signals === undefined && b.output.timing.rare_words === undefined && b.output.timing.rare_words_common > 200 &&
+      c.status === 'done' && c.output.timing.rare_words === undefined) || { a: a.output.timing, b: b.output.timing, c: c.status };
   });
   await check('Exact read: policy, High impact, newest first', async () => {
     const r = await runSearch('structured_search', { modules: ['policy'], impact: ['High'], order: 'newest' });
@@ -5911,13 +6069,19 @@ async function testDbCheck() {
   const lines = [];
   const out = (t = '') => { lines.push(t); };
   const byKind = {};
+  // only some questions: "q63-69", "q63-" (from 63 on), "q12"
+  const pick = process.argv.slice(2).map((a) => a.toLowerCase()).map((a) => a.match(/^q(\d+)(?:-(\d*))?$/)).find(Boolean);
+  const lo = pick ? Number(pick[1]) : 1;
+  const hi = !pick ? Infinity : pick[2] === undefined ? Number(pick[1]) : pick[2] === '' ? Infinity : Number(pick[2]);
   let k = 0;
   for (const t of bank.questions) {
     k += 1;
+    if (k < lo || k > hi) continue;
     const r = await good(t.q);
     const j = r.json || {};
     const det = j.answer_details || {};
-    const got = new Set((det.sources || []).map((x) => x.source_id));
+    // a source also stands for the copies of the same news with the same link (same_link)
+    const got = new Set((det.sources || []).flatMap((x) => [x.source_id, ...(x.same_link || [])]));
     // the answer's own status (answered / nothing_found); else the chat's (reject, clarification …)
     const status = det.status || j.status || `http ${r.status}`;
     const problems = [];

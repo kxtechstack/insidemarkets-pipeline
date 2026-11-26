@@ -192,7 +192,27 @@ function userMessage(cleaned) {
   return lines.join('\n');
 }
 
-async function validateQuery(cleaned) {
+// 26 Nov (dbcheck: "Dr.Althea 345 relief line" -> "What should I look at?"):
+// the AI asked back, code found no company or place, but a rare word of the
+// question (not an English word: "Dr.Althea", "cosmetotextiles", "kbeauty")
+// is in the client's news titles -> it names something real: accept.
+// lookup(text) gives the words found (runWorkflow.wordsInTitles).
+async function decideWithData(ai, cleaned, lookup) {
+  const d = decide(ai, cleaned);
+  if (d.status !== 'clarification' || ai.label !== 'clarification' || typeof lookup !== 'function') return d;
+  let words = [];
+  try { words = await lookup(cleaned.preprocessed_query); } catch (e) { words = []; }
+  if (!words.length) return d;
+  return {
+    status: 'accept',
+    reason: `code: the AI asked back (${ai.reason || 'no reason'}), but the question names ${words.join(', ')}, found in the news titles`,
+    message: null,
+    ai_label: ai.label,
+    changed_by_code: true,
+  };
+}
+
+async function validateQuery(cleaned, options = {}) {
   // A message with no letters and no numbers at all ("...", "?!", "👍") has
   // nothing to label. No need to ask the AI: ask the user what they need.
   if (!/[\p{L}\p{N}]/u.test(cleaned.preprocessed_query)) {
@@ -227,7 +247,10 @@ async function validateQuery(cleaned) {
     }
 
     const ai = readAiReply(reply);
-    if (ai) return { ...decide(ai, cleaned), attempts: attempt };
+    if (ai) {
+      const lookup = options.clientId ? (text) => require('./runWorkflow').wordsInTitles(text, options.clientId) : null;
+      return { ...(await decideWithData(ai, cleaned, lookup)), attempts: attempt };
+    }
 
     lastProblem = `AI reply could not be used: ${String(reply).slice(0, 200)}`;
     console.log(`[DynamicRAG] validateQuery attempt ${attempt}: ${lastProblem}`);
@@ -239,4 +262,4 @@ async function validateQuery(cleaned) {
   throw new ChatError(503, 'AI_UNAVAILABLE', 'I could not process your question right now. Please try again in a moment.');
 }
 
-module.exports = { validateQuery, readAiReply, decide, userMessage, topicsFound };
+module.exports = { validateQuery, readAiReply, decide, decideWithData, userMessage, topicsFound };
