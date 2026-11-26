@@ -3929,6 +3929,20 @@ async function testStep7() {
     const filtered = s.filter((t) => (t.inputs.companies || []).length);
     return (filtered.length === 1 && /competitor/i.test(filtered[0].inputs.query) && ok(u, wf) === true) || s.map((t) => t.inputs);
   });
+  // 26 Nov (DB check)
+  await check('Company filter: "What risks is Estée Lauder facing?" -> searches that name nothing else of the question ("regulation policy changes", "competitor threats") stay on Estée Lauder; never other news as its risks', async () => {
+    const u = und({ primary_goal: 'risks', secondary_goals: [], industries: [], topics: [], companies: [ELc] });
+    const wf = build(u, ['regulation policy changes', 'competitor threats', 'market risks Estée Lauder'].map((x) => ({ for: ['IR1'], words: x })), 11, 'What risks is Estée Lauder facing?');
+    const s = wf.tasks.filter((t) => t.capability === 'retrieve_data');
+    return (s.length >= 1 && s.every((t) => (t.inputs.companies || []).join() === 'Estée Lauder') && ok(u, wf) === true) || s.map((t) => t.inputs);
+  });
+  await check('Company filter (must not change): "Risks for Estée Lauder in India" -> a search about the place ("India cosmetics regulation") is India news, not only Estée Lauder news', async () => {
+    const u = und({ primary_goal: 'risks', secondary_goals: [], industries: [], topics: [], places: ['India'], companies: [ELc] });
+    const wf = build(u, ['India cosmetics regulation', 'Estée Lauder risks'].map((x) => ({ for: ['IR1'], words: x })), 11, 'Risks for Estée Lauder in India');
+    const s = wf.tasks.filter((t) => t.capability === 'retrieve_data');
+    const india = s.find((t) => /india cosmetics regulation/i.test(t.inputs.query));
+    return (india && !(india.inputs.companies || []).length && ok(u, wf) === true) || s.map((t) => t.inputs);
+  });
   await check('Company filter: "SWOT of Estée Lauder" (about the company) -> every search stays on Estée Lauder (must not change)', async () => {
     const u = und({ primary_goal: 'framework', secondary_goals: [], industries: [], topics: [], companies: [ELc] });
     const wf = build(u, ['company strengths', 'market opportunities and threats'].map((x) => ({ for: ['IR1'], words: x })), 11, 'SWOT of Estée Lauder');
@@ -4899,6 +4913,13 @@ function fakeStep9Store(opts = {}) {
     rows.policy_signals.push({ id: 'pk1', client_id: C1, article_id: 'pka1', signal_title: 'Lucas Meyer Cosmetics launches KanuFresh', summary: 'A natural active for sweat control.', organization: 'Lucas Meyer Cosmetics by Clariant', country: 'Global', source_published_date: '2025-02-10T08:00:00Z', impact_level: 'Low' });
     pieces.push(piece('policy', 'pka1', 0.3));
   }
+  if (opts.both) rows.policy_signals.push({ id: 'pj1', client_id: C1, article_id: 'pja1', signal_title: 'Lancôme and Estée Lauder sign a joint refill pact', summary: 'Both brands.', country: 'Global', source_published_date: '2024-11-01T08:00:00Z', impact_level: 'Low' });
+  if (opts.ghana) {
+    // tagged Ghana, but NO piece in the search index (like the real FDA seizure news)
+    rows.policy_signals.push({ id: 'pg1', client_id: C1, article_id: 'pga1', signal_title: 'FDA seizes 4,504 unregistered cosmetic products', summary: 'The Food and Drugs Authority of Ghana seized products.', country: 'Ghana', source_published_date: '2025-02-20T08:00:00Z', impact_level: 'Low' });
+    rows.policy_signals.push({ id: 'pg2', client_id: C1, article_id: 'pga2', signal_title: 'Ghana calls for a cosmetology council', summary: 'Ghana.', country: 'Ghana', source_published_date: '2025-02-21T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pga2', 0.6));
+  }
   if (opts.kbeauty) {
     rows.policy_signals.push({ id: 'pb1', client_id: C1, article_id: 'pba1', signal_title: 'K-Beauty brands enter the Gulf', summary: 'Korean brands.', country: 'Global', source_published_date: '2025-02-12T08:00:00Z', impact_level: 'Low' });
     pieces.push(piece('policy', 'pba1', 0.3));
@@ -5115,6 +5136,19 @@ async function testStep9Ai() {
     const sm = out.results.T4.output.findings[0];
     return (op.kind === 'hypothesis' && op.sources.sort().join() === 'policy:p1,policy:p2' && op.why === 'the Gulf rules pattern' && sm.kind === 'hypothesis' && sm.sources.length === 2) || { op, sm };
   });
+  await check('A short fact ("UAE bans parabens", "Q1 2025") becomes the news\'s own sentence that holds its words; a label that is not news ("Market Dynamics") is removed; a long fact is unchanged (must not change)', async () => {
+    replies = { [P('extract_facts')]: (t) => J({ facts: [
+      { about: 'x', text: 'UAE bans parabens', sources: [code(t, 'UAE bans parabens')] },
+      { about: 'x', text: 'Q1 2025', sources: [code(t, 'Brand results for Q1 2025 beat')] },
+      { about: 'x', text: 'Market Dynamics', sources: [code(t, 'Lancôme opens')] },
+      { about: 'x', text: 'Saudi Arabia sets halal rules for cosmetics', sources: [code(t, 'Saudi Arabia sets halal')] },
+    ] }) };
+    const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1'])], { storeOpts: { laterNews: true } });
+    const o = out.results.T2.output;
+    const f = o.findings.map((x) => x.text);
+    return (f.includes('UAE bans parabens in cosmetics') && f.includes('Brand results for Q1 2025 beat forecasts') && !f.includes('Market Dynamics') &&
+      f.includes('Saudi Arabia sets halal rules for cosmetics') && o.removed.reasons['a short fact the news does not say in a sentence'] === 1 && o.removed.reasons['a short fact written as the news sentence holding it'] === 2) || { f, r: o.removed.reasons };
+  });
   await check('A point that cites MANY news items (all 20 it was given) keeps only the ones whose title is really about it; a point none of them is about is removed; a point with 6 or fewer sources is NOT checked (must not change)', async () => {
     const all = (t) => [...new Set(t.match(/\bS\d+\b/g) || [])];
     replies = { [P('discover_opportunities')]: (t) => J({ opportunities: [
@@ -5157,7 +5191,7 @@ async function testStep9Ai() {
   });
   await check('Evidence check: 3+ points with 2+ sources and nothing missing -> "sufficient"', async () => {
     replies = { [P('extract_facts')]: (t) => J({ facts: [
-      { about: 'a', text: 'Gulf rules tighten', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
+      { about: 'a', text: 'Gulf rules tighten for imported cosmetics', sources: [code(t, 'UAE bans parabens'), code(t, 'Kuwait labelling')] },
       { about: 'b', text: 'Halal and retail move', sources: [code(t, 'Saudi Arabia sets halal'), code(t, 'Lancôme opens')] },
       { about: 'b', text: 'Serum and refill news', sources: [code(t, 'Estée Lauder launches'), code(t, 'Refill packaging')] },
     ] }) };
@@ -5272,7 +5306,7 @@ async function testStep9Ai() {
     const f = out.results.T2.output.findings.map((x) => x.text);
     return (f.length === 3 && f.includes('The new regulations, GSO rules, include safety requirements') && f.some((x) => /4 new/.test(x)) && f.some((x) => /2 new/.test(x))) || f;
   });
-  await check('A fact that is only a value ("€5.7 million") is removed as too short, also when the AI says what it is about ("Amount of money invested in refills") — the AI\'s words must not make a claim the news does not make (taken back from v28)', async () => {
+  await check('A fact that is only a value ("€5.7 million") that no sentence of its news holds is removed, also when the AI says what it is about ("Amount of money invested in refills") — the AI\'s words must not make a claim the news does not make (taken back from v28); "4" alone is too short', async () => {
     replies = { [P('extract_facts')]: (t) => J({ facts: [
       { about: 'Amount of money invested in refills', text: '€2.6 million', sources: [code(t, 'UAE bans parabens')] },
       { about: 'x', text: '4', sources: [code(t, 'UAE bans parabens')] },
@@ -5280,7 +5314,7 @@ async function testStep9Ai() {
     const out = await go([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['amount of investment'] }, ['T1'])]);
     const f = out.results.T2.output.findings.map((x) => x.text);
     const r = out.results.T2.output.removed.reasons;
-    return (f.length === 0 && r['too short to mean anything'] === 2) || { f, r };
+    return (f.length === 0 && r['too short to mean anything'] === 1 && r['a short fact the news does not say in a sentence'] === 1) || { f, r };
   });
   await check('Place filter: news TAGGED with another country stays out even when its text names the place asked (Oman news naming the UAE); Global / no-country news naming it still gets in (must not change)', async () => {
     const mk = (id, countries, title) => ({ source_id: `policy:${id}`, module: 'policy', signal_id: id, title, text: '', date: '2025-03-10', countries, companies: [] });
@@ -5692,6 +5726,22 @@ async function testStep9() {
     const l = await runSearch('retrieve_data', { query: 'store', companies: ['Lancôme'] });
     return (w.output.items.length > 0 && /K-beauty found nowhere/.test(w.output.note) && ids(l) === 'm1') || { words: w.output.items.length, lancome: ids(l) };
   });
+  await check('Two companies asked together ("What did L\'Oréal do with NVIDIA?"): the news naming BOTH comes first, also when it is older than the other news (exact read and search by meaning); one company asked -> unchanged (must not change)', async () => {
+    const a = await runSearch('structured_search', { modules: ['policy', 'market', 'competitor'], companies: ['Lancôme', 'Estée Lauder'] }, understoodFor(), { both: true });
+    const b = await runSearch('retrieve_data', { query: 'refill pact', companies: ['Lancôme', 'Estée Lauder'] }, understoodFor(), { both: true });
+    const c = await runSearch('structured_search', { modules: ['policy', 'market', 'competitor'], companies: ['Lancôme'] }, understoodFor(), { both: true });
+    return (a.output.items[0].signal_id === 'pj1' && b.output.items[0].signal_id === 'pj1' && c.output.items[0].signal_id === 'm1') || { a: ids(a), b: ids(b), c: ids(c) };
+  });
+  await check('Few news tagged with the place asked (20 or fewer): ALL are read, also one with no piece in the search index ("Did Ghana seize cosmetic products?" missed the FDA seizure news)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetic seizures', countries: ['Ghana'] }, understoodFor(), { ghana: true });
+    return (ids(r).split(',').includes('pg1') && ids(r).split(',').includes('pg2') && r.output.timing.tagged_read_all === true) || { got: ids(r), timing: r.output.timing };
+  });
+  await check('Text shown to the AI is cut at a space, never inside a number ("count to 338" is never "to 3…")', async () => {
+    const t = `${'word '.repeat(118)}total store count to 338 stores`;
+    const c = runner.cutAtWord(t, 600);
+    const d = runner.cutAtWord(`${'x'.repeat(590)} count to 338 stores`, 600);
+    return (!/\b3…$/.test(c) && !/3…$/.test(d) && runner.cutAtWord('short', 600) === 'short') || { c: c.slice(-20), d: d.slice(-20) };
+  });
   await check('Exact read: policy, High impact, newest first', async () => {
     const r = await runSearch('structured_search', { modules: ['policy'], impact: ['High'], order: 'newest' });
     return ids(r) === 'p1' || ids(r);
@@ -5847,6 +5897,77 @@ const STEP9_REAL_QUESTIONS = [
   'How did Shiseido do in Q3 2026?',
   'Compare Lancôme and Estée Lauder on product launches',
 ];
+// ── DB CHECK (26 Nov): questions whose answer IS in the client data ───────
+// scripts/dbCheckQuestions.json: each question says which news must be among
+// the answer's sources (at least one of each group), the words the answer
+// must hold, or that the data has no answer (nothing_found). The full chat
+// runs on the server with the real AI. A failed question prints what each
+// search looked for and found, so the cause can be traced.
+async function testDbCheck() {
+  console.log('\nDB CHECK — questions whose answer is in the client data (full chat, real AI; takes about 20–30 minutes)');
+  const fs = require('fs');
+  const path = require('path');
+  const bank = JSON.parse(fs.readFileSync(path.join(__dirname, 'dbCheckQuestions.json'), 'utf8'));
+  const lines = [];
+  const out = (t = '') => { lines.push(t); };
+  const byKind = {};
+  let k = 0;
+  for (const t of bank.questions) {
+    k += 1;
+    const r = await good(t.q);
+    const j = r.json || {};
+    const det = j.answer_details || {};
+    const got = new Set((det.sources || []).map((x) => x.source_id));
+    // the answer's own status (answered / nothing_found); else the chat's (reject, clarification …)
+    const status = det.status || j.status || `http ${r.status}`;
+    const problems = [];
+    const want = t.status || 'answered';
+    if (status !== want) problems.push(`status ${status} (expected ${want})`);
+    (t.expect || []).forEach((group, g) => {
+      if (!group.some((id) => got.has(id))) problems.push(`group ${g + 1}: none of the expected news is in the answer (${group.length} expected)`);
+    });
+    // the same news is often saved more than once (several articles): a
+    // group of title words = any source whose title holds all those words
+    (t.expectTitles || []).forEach((words, g) => {
+      if (!(det.sources || []).some((x) => words.every((w) => String(x.title || '').toLowerCase().includes(String(w).toLowerCase())))) problems.push(`title group ${g + 1}: no source title with ${words.join(' + ')}`);
+    });
+    const text = String(j.answer || '');
+    for (const w of t.say || []) if (!text.toLowerCase().includes(String(w).toLowerCase())) problems.push(`the answer does not say "${w}"`);
+    const ok = problems.length === 0;
+    byKind[t.kind] = byKind[t.kind] || { pass: 0, fail: 0 };
+    byKind[t.kind][ok ? 'pass' : 'fail'] += 1;
+    await check(`DB ${k}. [${t.kind}] ${t.q}`, async () => ok || problems.join(' · '));
+    out(`\n${ok ? 'PASS' : 'FAIL'} ${k}. [${t.kind}] ${t.q}`);
+    if (!ok) out(`   problems: ${problems.join(' · ')}`);
+    out(`   status ${status} · evidence ${det.confidence ? det.confidence.level : '-'} · ${(det.sources || []).length} sources`);
+    // what each search looked for and found (debug, test tools only)
+    const run = j.debug && j.debug.runWorkflow;
+    const tasks = (j.debug && j.debug.buildWorkflow && j.debug.buildWorkflow.tasks) || [];
+    if (run && !ok) {
+      for (const [id, res] of Object.entries(run.results || {})) {
+        if (!['retrieve_data', 'structured_search'].includes(res.capability)) {
+          const why = res.output && res.output.removed ? Object.entries(res.output.removed.reasons || {}).map(([a, b]) => `${a} ${b}`).join(', ') : '';
+          out(`   ${id} ${res.capability} -> ${res.status}${res.output && res.output.findings ? `, ${res.output.findings.length} points` : ''}${why ? ` · removed: ${why}` : ''}`);
+          continue;
+        }
+        const i = (tasks.find((x) => x.task_id === id) || { inputs: {} }).inputs;
+        const f = [i.modules && i.modules.length < 4 ? `modules ${i.modules.join('/')}` : null, i.date_from || i.date_to ? `dates ${i.date_from || '…'}..${i.date_to || '…'}` : null,
+          i.countries ? `places ${i.countries.join('/')}` : null, i.companies ? `companies ${i.companies.join('/')}` : null].filter(Boolean).join(' · ');
+        out(`   ${id} ${res.capability} "${i.query || '(newest)'}" ${f ? `[${f}]` : ''} -> ${res.status}, ${res.output ? res.output.items.length : 0} news${res.output && res.output.note ? ` · note: ${res.output.note}` : ''}`);
+        for (const it of ((res.output && res.output.items) || []).slice(0, 4)) out(`      ${it.date || ''} ${it.module} ${it.title.slice(0, 90)}${(t.expect || []).flat().includes(it.source_id) ? '   <- expected' : ''}`);
+      }
+    }
+    out(String(text).split('\n').slice(0, 14).map((l) => `   | ${l}`).join('\n'));
+  }
+  out('\nBY KIND OF QUESTION:');
+  for (const [kind, c] of Object.entries(byKind)) out(`   ${c.fail ? 'FAIL' : 'ok  '} ${kind}: ${c.pass} passed, ${c.fail} failed`);
+  const dir = path.join(__dirname, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `dbcheck_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`);
+  fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+  console.log(`\nReport saved: ${file}`);
+}
+
 async function testStep9Real() {
   console.log('\nSTEP 9 + 10 on the REAL data — the searches, the AI jobs and the answers of real questions (read the report by hand)');
   const fs = require('fs');
@@ -6108,10 +6229,11 @@ async function main() {
   const wantAccess = args.includes('access');
   const wanted = args.map(Number).filter(Boolean);
   // ("real" alone runs only the real-data Step 9 check, not every step)
-  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry && !wantAccess && !args.includes('real');
+  const wantDbCheck = args.includes('dbcheck');
+  const runAll = wanted.length === 0 && !wantBig && !wantBig5 && !wantBig6 && !wantBig7 && !wantShow && !wantRegistry && !wantAccess && !args.includes('real') && !wantDbCheck;
   const run = (n) => runAll || wanted.includes(n);
   const want9Real = args.includes('real');
-  const needsServer = [1, 2, 3, 5, 6, 7].some(run) || wantShow || want9Real;
+  const needsServer = [1, 2, 3, 5, 6, 7].some(run) || wantShow || want9Real || wantDbCheck;
 
   if (needsServer) {
     try {
@@ -6134,6 +6256,7 @@ async function main() {
     if (run(9) && !want9Real) { await testStep9(); await testStep9Ai(); }
     if (run(10) && !want9Real) await testStep10();
     if (want9Real) await testStep9Real();
+    if (wantDbCheck) await testDbCheck();
     if (runAll || wantRegistry) await testRegistry();
     if (runAll || wantAccess) await testAccess();
     if (wantBig) await testBig();

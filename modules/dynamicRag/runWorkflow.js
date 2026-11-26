@@ -162,6 +162,14 @@ const plain = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').to
   .replace(/[^a-z0-9]+/g, ' ').trim();
 const dayOf = (d) => (d ? String(d).slice(0, 10) : null);
 const cut = (t, n) => { const s = String(t || '').replace(/\s+/g, ' ').trim(); return s.length > n ? `${s.slice(0, n - 1)}…` : s; };
+// cut at a space, never inside a word or a number ("338" never "3…")
+const cutAtWord = (t, n) => {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (s.length <= n) return s;
+  const head = s.slice(0, n - 1);
+  const sp = head.lastIndexOf(' ');
+  return `${sp > n * 0.6 ? head.slice(0, sp) : head}…`;
+};
 const hasWords = (text, phrase) => {
   const p = plain(phrase);
   return p.length >= 2 && ` ${plain(text)} `.includes(` ${p} `);
@@ -202,7 +210,7 @@ function toItem(module, row, extra = {}) {
     signal_id: row.id,
     article_id: row.article_id || null,
     title: cut(row.signal_title || row.title, 200),
-    text: cut(row.summary || row.chat_text || '', ITEM_TEXT_CHARS),
+    text: cutAtWord(row.summary || row.chat_text || '', ITEM_TEXT_CHARS),
     date: dayOf(row[t.dateCol] || row.created_at),
     url: row.source_article_url || row.source_url || row.url || extra.url || null,
     countries: module === 'outlook' ? [] : countries,
@@ -258,6 +266,19 @@ const readUntil = (inputs, understood) => { const l = reportedLater(inputs, unde
 
 // inData: the database names a company asked (its company field or title,
 // any date): then its filter is never dropped (26 Nov, see filterItems)
+// the signal's company, or its text names the company
+const namesCompany = (it, name) => it.companies.some((c) => sameCompany(name, c)) || hasWords(`${it.title} ${it.text}`, companyCore(name));
+// 26 Nov (DB check, "What did L'Oréal do with NVIDIA?"): two or more
+// companies asked together -> the news naming ALL of them comes first (it
+// was the 20 newest L'Oréal news, the NVIDIA one was older); the rest after.
+function allNamesFirst(items, companies) {
+  if (!companies || companies.length < 2) return items;
+  const all = items.filter((it) => companies.every((c) => namesCompany(it, c)));
+  if (!all.length) return items;
+  const set = new Set(all);
+  return [...all, ...items.filter((it) => !set.has(it))];
+}
+
 function applyFilters(items, inputs, understood, notes, inData = false) {
   const out = filterItems(items, inputs, understood, notes, inData);
   const to = inputs.date_to;
@@ -310,7 +331,7 @@ function filterItems(items, inputs, understood, notes, inData = false) {
   if (!companies.length) return { items: byDatePlaceLeftOut, reasons };
 
   // companies: the signal's company, or its text names the company
-  const matches = (it, name) => it.companies.some((c) => sameCompany(name, c)) || hasWords(`${it.title} ${it.text}`, companyCore(name));
+  const matches = namesCompany;
   const kept = byDatePlaceLeftOut.filter((it) => companies.some((n) => matches(it, n)) || drop('another company'));
   if (kept.length) return { items: kept, reasons };
 
@@ -592,7 +613,24 @@ async function retrieveData(inputs, ctx) {
   if (only) {
     timing.tagged_ms = Date.now() - t0;
     timing.tagged_signals = only.articleIds.length + only.pointIds.length;
-    await readPages(only);
+    if (timing.tagged_signals <= max) {
+      // 26 Nov (DB check, "Did Ghana seize cosmetic products?"): 8 news are
+      // tagged Ghana, the search by meaning among them gave 7 and missed
+      // "FDA seizes 4,504 unregistered cosmetic products" (Ghana). When the
+      // database says no more than 20 are tagged, they are ALL read (no
+      // closeness needed to choose among so few), then checked as always.
+      const byModule = new Map(modules.map((m) => [m, new Map(((only.byModule && only.byModule[m]) || []).map((k) => [k, { score: null, url: null }]))]));
+      for (const [m, keys] of byModule) for (const k of keys.keys()) seen.add(`${m}:${k}`);
+      t0 = Date.now();
+      const items = await rowsToItems(byModule, ctx.clientId, reasons);
+      timing.rows_ms += Date.now() - t0;
+      const f = applyFilters(items, inputs, ctx.understood, notes, inData);
+      addReasons(reasons, f.reasons);
+      kept = kept.concat(f.items);
+      timing.tagged_read_all = true;
+    } else {
+      await readPages(only);
+    }
     timing.tagged_pages = pages;
   }
   // 2) the wide search (Global news whose text names the place, Policy news
@@ -600,7 +638,11 @@ async function retrieveData(inputs, ctx) {
   // there are fewer than 20 signals
   await readPages(null);
   timing.pages = pages;
-  kept.sort((a, b) => (b.score || 0) - (a.score || 0));
+  // the tagged news read whole (no score) first: the database itself says
+  // they are about the place / company asked
+  const rank = (x) => (x.score == null ? 2 : x.score);
+  kept.sort((a, b) => rank(b) - rank(a));
+  kept = allNamesFirst(kept, inputs.companies);
   const out = finish(kept, inputs.label || inputs.query, reasons, notes, max);
   out.timing = timing;
   return out;
@@ -698,6 +740,11 @@ async function structuredSearch(inputs, ctx) {
     items.sort((a, b) => (IMPACT_RANK[String(b.impact || '').toLowerCase()] || 0) - (IMPACT_RANK[String(a.impact || '').toLowerCase()] || 0) || String(b.date).localeCompare(String(a.date)));
   } else {
     items = fairShare(perModule, max, reasons);
+  }
+  if ((inputs.companies || []).length > 1) {
+    const all = allNamesFirst(perModule.flat(), inputs.companies).filter((it) => inputs.companies.every((c) => namesCompany(it, c)));
+    const set = new Set(all.map((it) => it.source_id));
+    if (all.length) items = [...all.sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))), ...items.filter((it) => !set.has(it.source_id))];
   }
   const out = finish(items, inputs.label || 'newest signals', reasons, notes, max);
   out.timing = timing;
@@ -822,7 +869,7 @@ function itemLine(code, it) {
   return [`[${code}] ${it.date || 'no date'}`, MODULE_NAMES[it.module] || it.module, where,
     ...(it.companies && it.companies.length ? [it.companies.join(', ')] : []),
     ...(it.impact ? [`impact ${it.impact}`] : []),
-    `${cut(it.title, 200)}. ${cut(it.text, AI_ITEM_CHARS)}`].join(' | ');
+    `${cut(it.title, 200)}. ${cutAtWord(it.text, AI_ITEM_CHARS)}`].join(' | ');
 }
 // numbered items: code -> { sources (signal ids), kind }
 function numbered(items, findings, letter = 'S') {
@@ -1077,6 +1124,31 @@ const NO_EVIDENCE = 'no evidence to work on (the searches before it found nothin
 const NOTHING_PASSED = 'nothing the AI wrote passed the checks';
 
 // ── DI – 5. extract_facts ────────────────────────────────────────────────
+// 26 Nov (DB check): the AI often writes a fact as a bare value or name —
+// "$210 million", "Skims Beauty", "nearly ₹10 lakh" — or as a label that
+// is not news at all ("Market Dynamics", "not specified"). A bare value was
+// removed (25 Nov), so "How much was the Estée Lauder settlement?" lost its
+// answer. Now a short fact (2 or 3 words or numbers) is replaced by the NEWS'S OWN
+// sentence that holds all its words and numbers (never the AI's words, so
+// the 25 Nov "€5.7 million in refills" can not come back: the sentence says
+// "water infrastructure"). No such sentence in its sources -> removed.
+const SHORT_FACT_WORDS = 4;   // fewer than this (and at least 2) = a short fact
+const factTokens = (t) => plain(t).split(' ').filter((w) => w && (/\d/.test(w) || (w.length >= 3 && !GRAMMAR_WORDS.has(w) && !['the', 'and', 'for', 'not'].includes(w)))).map(stem);
+function newsSentence(text, sourceIds, ctx) {
+  const need = [...new Set(factTokens(text))];
+  if (!need.length) return null;
+  for (const id of sourceIds) {
+    const it = ctx.sources.get(id);
+    if (!it) continue;
+    const sentences = `${it.title}. ${it.text}`.replace(/…$/, '').split(/(?<=[.!?])\s+(?=[A-Z0-9"'])/);
+    for (const sn of sentences) {
+      const have = new Set(factTokens(sn));
+      if (need.every((w) => have.has(w))) return sn.trim().replace(/\.$/, '');
+    }
+  }
+  return null;
+}
+
 async function extractFacts(inputs, ctx) {
   const reasons = {};
   const notes = [];
@@ -1091,7 +1163,18 @@ async function extractFacts(inputs, ctx) {
     // "about". Tried in v28 and taken back: "Amount of money invested in
     // refills: €5.7 million" was made from a water-plant article — the number
     // was real, but the AI's "about" made a claim the news does not make.)
-    return makePoint(f, n, ctx, reasons, { text: f && f.text, kind: 'fact', extra: { about } });
+    let text = f && f.text;
+    const wordCount = (String(text || '').match(/\p{L}{2,}|\d+/gu) || []).length;
+    // (one word or none: removed as "too short" by makePoint, as before;
+    // no real source: makePoint says why, as before)
+    const ids = wordCount >= 2 && wordCount < SHORT_FACT_WORDS ? sourcesFrom(rawSources(f), n, {}, null).ids : [];
+    if (ids.length) {
+      const sentence = newsSentence(text, ids, ctx);
+      if (!sentence) { count(reasons, 'a short fact the news does not say in a sentence'); example(ctx, 'short fact, no news sentence', f); return null; }
+      count(reasons, 'a short fact written as the news sentence holding it');
+      text = sentence;
+    }
+    return makePoint(f, n, ctx, reasons, { text, kind: 'fact', extra: { about } });
   }).filter(Boolean);
   return finishAi({ findings }, reasons, notes, g);
 }
@@ -1583,7 +1666,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 }
 
 module.exports = {
-  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords,
+  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

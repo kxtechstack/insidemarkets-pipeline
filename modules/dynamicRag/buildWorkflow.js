@@ -1329,6 +1329,16 @@ function keepsSubject(words, subjects) {
 const COMPANY_GOALS = ['fact_lookup', 'company_profile', 'competitor_analysis', 'framework', 'list'];
 // Does the search name another subject of the question (a product, topic
 // or industry from Step 5)? All its main words must be there.
+// Does the search name a subject of the question (a product, topic or
+// industry; short words too: "Eid")? 26 Nov, used for the company filter.
+function namesQuestionSubject(words, understood) {
+  const w = ` ${plain(words)} `;
+  const subjects = [...(understood.products || []), ...(understood.topics || []), ...(understood.industries || [])];
+  return subjects.some((s) => {
+    const main = plain(s).split(' ').filter((x) => x.length >= 3);
+    return main.length > 0 && main.every((x) => w.includes(` ${x} `));
+  });
+}
 function namesOtherSubject(words, understood) {
   const w = ` ${plain(words)} `;
   const subjects = [...(understood.products || []), ...(understood.topics || []), ...(understood.industries || [])];
@@ -1441,7 +1451,15 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
       // something else": it keeps the companies ("estée lauder news")
       if (exactRead) {
         // keep the filter
-      } else if (othersName && (!companyGoal || (needNotAboutThem && otherSubject))) {
+      } else if (othersName && (companyGoal ? (needNotAboutThem && otherSubject)
+        // 26 Nov (DB check, "What risks is YSL Beauty facing?"): two searches
+        // ("regulation policy changes", "competitor threats") named nothing of
+        // the question, lost the company and brought India batch rules as YSL
+        // risks. For a goal that is not about the company, a search leaves the
+        // company only when it is really about something else the user asked:
+        // another subject, a place, or our own business ("How should WE react
+        // to Estée Lauder?" stays as before).
+        : (namesQuestionSubject(search.words, understood) || placesNamedIn(search.words, understood).length > 0 || Boolean(understood.about_own_business)))) {
         // a goal about the market, not the company (market entry, campaigns,
         // strategy, trends, risks): only a search that names the company is
         // its news ("India cosmetics regulation" is not Nykaa news)

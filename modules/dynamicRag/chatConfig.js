@@ -111,7 +111,10 @@ module.exports = {
     discover_opportunities: 'dynamic_rag_job_opportunities_v1',
     analyse_risks: 'dynamic_rag_job_risks_v1',
   },
-  AI_ITEM_CHARS: 300,          // letters of a signal's text shown to an AI job
+  // letters of a signal's text shown to an AI job (cut at a space). 26 Nov
+  // (DB check): 300 cut "store count to 338" to "to 3…" and the AI wrote
+  // "Nykaa has 3 offline stores"; the whole saved text is given now.
+  AI_ITEM_CHARS: 600,
   AI_MAX_FINDINGS_IN: 20,      // earlier findings given to one AI job
   CLUSTER_AI_MIN: 4,           // grouping asks the AI only when this many items are in no existing group
   ANSWER_AI_CALLS: 1,          // AI calls kept for the answer (Step 10)
