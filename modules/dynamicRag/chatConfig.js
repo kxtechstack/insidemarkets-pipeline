@@ -126,7 +126,11 @@ module.exports = {
   // the fixed words of the answer (written by code, not by the AI)
   ANSWER_TEXT: {
     nothing_found: 'I could not find news in your data that answers this question. The searches below found nothing, so I am not giving an answer that the news does not support.',
+    // the searches found news, but none of it answers the question
+    nothing_answers: 'The news in your data does not answer this question, so I am not giving an answer that the news does not support.',
     list_intro: 'Here are the {n} news items from your data that match the question, with their sources.',
+    // the AI points did not pass the checks, but news naming the company was found
+    named_list_intro: 'I could not write a checked summary, so here are the {n} news items from your data that name it, with their sources.',
     no_news_for_heading: 'No news found for this.',
     no_news_cell: 'no news found',
     evidence_title: 'How good the evidence is',

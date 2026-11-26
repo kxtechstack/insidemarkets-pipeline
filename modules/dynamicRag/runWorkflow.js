@@ -48,12 +48,13 @@ const COMPARE_BY_CODE_POINT = ANSWER_TEXT.compare_by_code_point;
 
 // ── Where each module keeps its signals ──────────────────────────────────
 // (placeCol / companyCol: the column a signal's country / company is saved in;
-// Policy has no company column, Forward Outlook no country column)
+// Policy has no company column, Forward Outlook no country column;
+// titleCol: the title, read for a name the user typed, 26 Nov)
 const TABLES = {
-  policy: { table: 'policy_signals', dateCol: 'source_published_date', key: 'article_id', placeCol: 'country' },
-  market: { table: 'market_dynamics_signals', dateCol: 'published_date', key: 'article_id', placeCol: 'country', companyCol: 'organization' },
-  outlook: { table: 'trend_signals', dateCol: 'source_published_date', key: 'article_id', companyCol: 'organization' },
-  competitor: { table: 'competitor_changes', dateCol: 'event_date', key: 'id', placeCol: 'country', companyCol: 'organization' },
+  policy: { table: 'policy_signals', dateCol: 'source_published_date', key: 'article_id', placeCol: 'country', titleCol: 'signal_title' },
+  market: { table: 'market_dynamics_signals', dateCol: 'published_date', key: 'article_id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title' },
+  outlook: { table: 'trend_signals', dateCol: 'source_published_date', key: 'article_id', companyCol: 'organization', titleCol: 'signal_title' },
+  competitor: { table: 'competitor_changes', dateCol: 'event_date', key: 'id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title' },
 };
 const moduleOfId = (id) => Object.keys(MODULE_IDS).find((k) => MODULE_IDS[k] === id) || null;
 
@@ -255,14 +256,16 @@ function reportedLater(inputs, understood) {
 // the last day a search reads (the period end, or later for reported-later news)
 const readUntil = (inputs, understood) => { const l = reportedLater(inputs, understood); return l ? l.until : inputs.date_to; };
 
-function applyFilters(items, inputs, understood, notes) {
-  const out = filterItems(items, inputs, understood, notes);
+// inData: the database names a company asked (its company field or title,
+// any date): then its filter is never dropped (26 Nov, see filterItems)
+function applyFilters(items, inputs, understood, notes, inData = false) {
+  const out = filterItems(items, inputs, understood, notes, inData);
   const to = inputs.date_to;
   const keptLater = to ? out.items.filter((it) => it.date > to).length : 0;
   if (keptLater) notes.push(`${keptLater} news written after the period but naming it ("${reportedLater(inputs, understood).phrases[0]}") kept`);
   return out;
 }
-function filterItems(items, inputs, understood, notes) {
+function filterItems(items, inputs, understood, notes, inData = false) {
   const reasons = {};
   const drop = (why) => { reasons[why] = (reasons[why] || 0) + 1; return false; };
   const from = inputs.date_from || null;
@@ -315,10 +318,28 @@ function filterItems(items, inputs, understood, notes) {
   // never names ("K-beauty", "Gen Z") is searched by its words: the filter
   // is dropped instead of finding nothing (recorded). A known competitor
   // stays a filter: "nothing found for Lancôme" is a true answer.
+  // 26 Nov (DI tab, root cause): this was decided on ONE page of 100 news.
+  // "what is the update about Catalio": Catalio is the 217th newest Market
+  // Dynamics item; the first page had none, so the filter was dropped and
+  // the 20 newest news of the whole data were shown. "Any news on Kanufresh":
+  // the same in the search by meaning (KanuFresh is in two Forward Outlook
+  // titles). Now the whole database is asked first (companyLookup): a name
+  // it holds keeps its filter on every page.
+  if (inData) return { items: kept, reasons };
+  // 26 Nov (DI tab): "what is the update about Catalio" was an EXACT read
+  // (no search words): dropping the filter there gave the 20 newest news of
+  // the whole data as if they were about Catalio. An exact read has no words
+  // to search by, so it keeps the filter: nothing found is the true answer.
   const known = knownCompanies(understood);
   const unknown = companies.filter((n) => !known.some((k) => sameCompany(k, n)));
+  if (unknown.length === companies.length && !inputs.query) {
+    const note = `companies: ${unknown.join(', ')} found nowhere in the data, so nothing was found`;
+    if (!notes.includes(note)) notes.push(note);
+    return { items: kept, reasons };
+  }
   if (unknown.length === companies.length) {
-    notes.push(`companies: ${unknown.join(', ')} found nowhere in the data as a company, so searched by the words only`);
+    const note = `companies: ${unknown.join(', ')} found nowhere in the data as a company, so searched by the words only`;
+    if (!notes.includes(note)) notes.push(note);
     delete reasons['another company'];
     return { items: byDatePlaceLeftOut, reasons };
   }
@@ -348,11 +369,24 @@ function knownCompanies(understood) {
 const likePattern = (name, loose) => String(name).trim()
   .replace(/[%_"]/g, '')
   .replace(loose ? /[aeiouycAEIOUYC]|[^\x00-\x7F]/g : /[^\x00-\x7F]/g, '_');
-function tagPatterns(inputs, understood) {
-  const companies = (inputs.companies || []).filter((n) => knownCompanies(understood).some((k) => sameCompany(k, n)));
-  if (companies.length) {
-    const names = companies.map((n) => companyCore(n)).filter((n) => plain(n).length >= 3);
-    return names.length ? { kind: 'company', patterns: [...new Set(names.map((n) => likePattern(n, true)))] } : null;
+// 26 Nov: every company name asked, also one the client list does not
+// know ("Catalio", "Kanufresh"): a known name loose (accents), another one
+// as typed with any one letter between its words ("k beauty" finds
+// "K-Beauty"), so a different word ("catalog") is not taken for it.
+function companyPatterns(inputs, understood) {
+  const known = knownCompanies(understood);
+  const pats = [];
+  for (const n of inputs.companies || []) {
+    const core = companyCore(n);
+    if (plain(core).length < 3) continue;
+    pats.push(known.some((k) => sameCompany(k, n)) ? likePattern(core, true) : likePattern(core, false).replace(/ /g, '_'));
+  }
+  return pats.length ? { kind: 'company', patterns: [...new Set(pats)] } : null;
+}
+function tagPatterns(inputs, understood, kind = null) {
+  if (kind !== 'place') {
+    const c = companyPatterns(inputs, understood);
+    if (c || kind === 'company') return c;
   }
   const places = (inputs.countries || []).map((p) => standardPlace(p) || p);
   // a "Global" side reads worldwide news: that is most of the news, no narrowing
@@ -367,24 +401,45 @@ function tagPatterns(inputs, understood) {
   }
   return { kind: 'place', patterns: [...names].map((n) => likePattern(n, false)) };
 }
-async function taggedSignals(inputs, ctx, modules) {
+async function readTags(tag, inputs, ctx, modules, { anyDate = false, limit = TAGGED_MAX_SIGNALS } = {}) {
   const s = getStore();
-  const tag = tagPatterns(inputs, ctx.understood);
   if (!tag || typeof s.readTagged !== 'function') return null;
-  const only = { articleIds: [], pointIds: [] };
+  const only = { kind: tag.kind, articleIds: [], pointIds: [], byModule: {} };
   await Promise.all(modules.map(async (m) => {
     const t = TABLES[m];
-    const column = tag.kind === 'company' ? t.companyCol : t.placeCol;
-    if (!column) return;
-    const keys = await s.readTagged(t.table, {
-      clientId: ctx.clientId, keyCol: t.key, column, patterns: tag.patterns, dateCol: t.dateCol,
-      from: inputs.date_from, to: readUntil(inputs, ctx.understood), limit: TAGGED_MAX_SIGNALS,
-    });
+    // a company: its company field AND its title (KanuFresh is in the title,
+    // the company field says "Lucas Meyer Cosmetics by Clariant")
+    const columns = tag.kind === 'company' ? [t.companyCol, t.titleCol] : [t.placeCol];
+    const keys = new Set();
+    for (const column of columns.filter(Boolean)) {
+      const got = await s.readTagged(t.table, {
+        clientId: ctx.clientId, keyCol: t.key, column, patterns: tag.patterns, dateCol: t.dateCol,
+        from: anyDate ? null : inputs.date_from, to: anyDate ? null : readUntil(inputs, ctx.understood), limit,
+      });
+      got.forEach((k) => keys.add(k));
+    }
+    only.byModule[m] = [...keys];
     (m === 'competitor' ? only.pointIds : only.articleIds).push(...keys);
   }));
   only.articleIds = [...new Set(only.articleIds)];
   only.pointIds = [...new Set(only.pointIds)];
   return only.articleIds.length || only.pointIds.length ? only : null;
+}
+// the signals to search among: tagged with the company asked, else (none
+// tagged, or no company) with the place asked
+async function taggedSignals(inputs, ctx, modules) {
+  const byCompany = await readTags(tagPatterns(inputs, ctx.understood, 'company'), inputs, ctx, modules);
+  if (byCompany) return byCompany;
+  return readTags(tagPatterns(inputs, ctx.understood, 'place'), inputs, ctx, modules);
+}
+// Does the database name a company asked, at any date (its company field or
+// title)? Asked only when the dates found none: "nothing in these dates"
+// must not turn into "the data never names it" (then its words are searched).
+async function companyInData(inputs, ctx, modules, tagged) {
+  const tag = tagPatterns(inputs, ctx.understood, 'company');
+  if (!tag) return false;
+  if (tagged && tagged.kind === 'company') return true;
+  return Boolean(await readTags(tag, inputs, ctx, modules, { anyDate: true, limit: 1 }));
 }
 
 // ── The two search jobs ──────────────────────────────────────────────────
@@ -482,6 +537,7 @@ async function retrieveData(inputs, ctx) {
   });
   const seen = new Set();          // signals already looked at (over all pages)
   let kept = [];
+  let inData = false;              // the database names a company asked (set below)
   timing.search_ms = 0;
   timing.rows_ms = 0;
   let pages = 0;
@@ -522,7 +578,7 @@ async function retrieveData(inputs, ctx) {
       t0 = Date.now();
       const items = await rowsToItems(byModule, ctx.clientId, reasons);
       timing.rows_ms += Date.now() - t0;
-      const f = applyFilters(items, inputs, ctx.understood, notes);
+      const f = applyFilters(items, inputs, ctx.understood, notes, inData);
       addReasons(reasons, f.reasons);
       kept = kept.concat(f.items);
       // stop: enough signals, the index has no more, or the rest is too far
@@ -532,6 +588,7 @@ async function retrieveData(inputs, ctx) {
   // 1) among the signals tagged with the company / place asked
   t0 = Date.now();
   const only = codeFilters ? await taggedSignals(inputs, ctx, modules) : null;
+  inData = (inputs.companies || []).length ? await companyInData(inputs, ctx, modules, only) : false;
   if (only) {
     timing.tagged_ms = Date.now() - t0;
     timing.tagged_signals = only.articleIds.length + only.pointIds.length;
@@ -581,7 +638,7 @@ async function structuredSearch(inputs, ctx) {
   const max = Math.min(Number(inputs.max_items) || RUN_LIMITS.search_max_signals, RUN_LIMITS.search_max_signals);
   const impact = (inputs.impact || []).map((x) => String(x).toLowerCase());
   const page = max * SEARCH_WIDEN;
-  const keep = (items) => {
+  const keep = (items, inData = false) => {
     let out = items;
     if (impact.length) {
       const before = out.length;
@@ -593,26 +650,46 @@ async function structuredSearch(inputs, ctx) {
       out = out.filter((it) => hasWords(`${it.title} ${it.text}`, inputs.sub_category));
       if (before > out.length) reasons['not about the sub-category'] = (reasons['not about the sub-category'] || 0) + before - out.length;
     }
-    const f = applyFilters(out, inputs, ctx.understood, notes);
+    const f = applyFilters(out, inputs, ctx.understood, notes, inData);
     addReasons(reasons, f.reasons);
     return f.items;
   };
-  // the modules are read at the same time (each page after page)
+  // 26 Nov: a company asked -> first the news the database says names it
+  // (its company field or title, inside the dates), however old: Catalio was
+  // the 217th newest Market Dynamics item, KanuFresh the 813th Forward
+  // Outlook one. The newest pages are still read after it (news naming the
+  // company only in its text).
   const started = Date.now();
-  const perModule = await Promise.all(modulesOf(inputs).map(async (module) => {
+  const modules = modulesOf(inputs);
+  const named = (inputs.companies || []).length ? await readTags(tagPatterns(inputs, ctx.understood, 'company'), inputs, ctx, modules) : null;
+  const inData = (inputs.companies || []).length ? await companyInData(inputs, ctx, modules, named) : false;
+  if (named) timing.named_signals = named.articleIds.length + named.pointIds.length;
+  // the modules are read at the same time (each page after page)
+  const perModule = await Promise.all(modules.map(async (module) => {
     const t = TABLES[module];
     let got = [];
+    const done = new Set();
+    const keys = (named && named.byModule[module]) || [];
+    if (keys.length) {
+      const rows = (await s.readRows(t.table, t.key, keys, ctx.clientId))
+        .sort((a, b) => String(b[t.dateCol] || '').localeCompare(String(a[t.dateCol] || '')));
+      rows.forEach((r) => done.add(r.id));
+      got = keep(await itemsFromRows(module, rows, null, ctx.clientId, reasons), inData);
+    }
     for (let offset = 0; offset < EXACT_READ_MAX_ROWS; offset += page) {
+      if (inputs.order !== 'impact' && got.length >= max) break;
       const rows = await s.readRecent(t.table, {
         clientId: ctx.clientId, dateCol: t.dateCol, from: inputs.date_from, to: readUntil(inputs, ctx.understood), limit: page, offset,
       });
-      got = got.concat(keep(await itemsFromRows(module, rows, null, ctx.clientId, reasons)));
+      got = got.concat(keep(await itemsFromRows(module, rows.filter((r) => !done.has(r.id)), null, ctx.clientId, reasons), inData));
       timing.pages += 1;
       // newest first: once this module has enough, older pages are not
       // needed; by impact, the whole period is read (up to the cap)
       if (rows.length < page || (inputs.order !== 'impact' && got.length >= max)) break;
       if (offset + page >= EXACT_READ_MAX_ROWS) notes.push(`${module}: only the newest ${EXACT_READ_MAX_ROWS} signals were read`);
     }
+    // the named news (read first) and the pages in one newest-first order
+    if (inputs.order !== 'impact') got.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
     return got;
   }));
   timing.rows_ms = Date.now() - started;

@@ -171,6 +171,27 @@ function buildSections(run, workflow, book) {
   return sections;
 }
 
+// 26 Nov (DI tab): the searches found news NAMING the company asked, but no
+// point the AI wrote passed the checks, and the user read "nothing found".
+// Then that news is shown as a list (code only, no AI): news a search kept
+// to a company the data names (never a search by the words only).
+function namedLists(run, workflow, book) {
+  const items = [];
+  const seen = new Set();
+  for (const t of (workflow && workflow.tasks) || []) {
+    if (!SEARCHES.includes(t.capability) || !((t.inputs && t.inputs.companies) || []).length) continue;
+    const r = run.results && run.results[t.task_id];
+    if (!r || r.status !== 'done' || !r.output || /searched by the words only/.test(r.output.note || '')) continue;
+    for (const it of r.output.items || []) {
+      const sources = book.nums([it.source_id]);
+      if (!sources.length || seen.has(it.source_id)) continue;
+      seen.add(it.source_id);
+      items.push({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, sources });
+    }
+  }
+  return items.length ? [{ title: SECTION_TITLES.retrieve_data || 'News found', kind: 'list', from: 'named', items }] : [];
+}
+
 // ── 3. Evidence label and what was not found / not done ──────────────────
 function evidenceOf(run, workflow) {
   const id = Object.keys(run.results || {}).find((k) => run.results[k].capability === 'validate_evidence');
@@ -230,12 +251,15 @@ function pointsForAi(sections) {
 // part (at most 3). 25 Nov (Step 10 report): it used to copy the point with
 // its labels ("The news suggests: Ban on …: … (trend, 3 sources, …)") and a
 // comparison row as "Saudi Arabia: … | United Arab Emirates: …".
-function codeSummary(sections, nothing) {
-  if (nothing) return ANSWER_TEXT.nothing_found;
+function codeSummary(sections, nothing, foundNews = false, named = false) {
+  // 26 Nov (DI tab): "what is operation sindhoora" said "The searches below
+  // found nothing" but the searches had found news, none of which answered
+  // (the facts step kept nothing). Each case now says what really happened.
+  if (nothing) return foundNews ? ANSWER_TEXT.nothing_answers : ANSWER_TEXT.nothing_found;
   const lists = sections.filter((s) => s.kind === 'list');
   if (lists.length === sections.length) {
     const n = lists.reduce((a, s) => a + s.items.length, 0);
-    return ANSWER_TEXT.list_intro.replace('{n}', String(n));
+    return (named ? ANSWER_TEXT.named_list_intro : ANSWER_TEXT.list_intro).replace('{n}', String(n));
   }
   const lead = { fact: '', interpretation: 'The news suggests that ', hypothesis: 'One idea to test: ' };
   const sentence = (text, ns) => `${String(text).trim().replace(/[.;:,]+$/, '')} ${cites(ns)}.`;
@@ -401,9 +425,13 @@ function renderAnswer(summary, sections, confidence, limits, sources) {
 // ── The step ─────────────────────────────────────────────────────────────
 async function generateAnswer(run, workflow, understood, request, options = {}) {
   const book = sourceBook(run);
-  const sections = buildSections(run, workflow, book);
+  let sections = buildSections(run, workflow, book);
+  const hasContent = (x) => (x.points || x.rows || x.items || []).length > 0;
+  const named = !sections.some(hasContent) ? namedLists(run, workflow, book) : [];
+  if (named.length) sections = named;
   const evidence = evidenceOf(run, workflow);
-  const confidence = confidenceOf(evidence, sections);
+  // the named news is real but no point was checked: "some evidence"
+  const confidence = named.length ? { level: 'some', label: ANSWER_TEXT.confidence.some } : confidenceOf(evidence, sections);
   const limits = limitsOf(run, evidence);
   const points = pointsForAi(sections);
   const nothing = confidence.level === 'not_enough' || !points.length;
@@ -411,11 +439,12 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   // code alone; a list found by meaning for a topic ("what did our
   // competitors launch") gets the short AI answer on top (25 Nov: the plain
   // list mixed launches with lawsuits and the user had to read all 20)
-  const onlyLists = sections.length > 0 && sections.every((s) => s.kind === 'list' && s.from !== 'retrieve_data');
+  const onlyLists = named.length > 0 || (sections.length > 0 && sections.every((s) => s.kind === 'list' && s.from !== 'retrieve_data'));
   const question = (understood && (understood.question_typed || understood.question_text)) || (request && request.original_query) || '';
   const check = { passed: null, problems: [] };
   let aiCalls = 0;
-  let summary = codeSummary(sections, nothing);
+  const foundNews = Object.keys((run && run.sources) || {}).length > 0;
+  let summary = codeSummary(sections, nothing, foundNews, named.length > 0);
   let summaryBy = 'code';
 
   // the AI writes only the short answer, when there is something to say

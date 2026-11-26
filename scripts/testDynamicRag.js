@@ -4891,6 +4891,18 @@ function fakeStep9Store(opts = {}) {
     add('p9', 'Brand had a strong first quarter of 2025', '2025-05-02', 0.77);
     add('p10', 'Brand results for Q1 2025 looked back on', '2025-07-15', 0.76);
   }
+  // 26 Nov: a name the client list does not know, only in an OLD title
+  // (Catalio: Market Dynamics 217th newest; KanuFresh: Forward Outlook 813th,
+  // its company field says "Lucas Meyer Cosmetics by Clariant")
+  if (opts.catalio) rows.policy_signals.push({ id: 'pc1', client_id: C1, article_id: 'pca1', signal_title: 'Catalio Capital Accelerates AI Healthcare Fundraising', summary: 'Funding news.', country: 'Global', source_published_date: '2025-02-15T08:00:00Z', impact_level: 'Low' });
+  if (opts.kanu) {
+    rows.policy_signals.push({ id: 'pk1', client_id: C1, article_id: 'pka1', signal_title: 'Lucas Meyer Cosmetics launches KanuFresh', summary: 'A natural active for sweat control.', organization: 'Lucas Meyer Cosmetics by Clariant', country: 'Global', source_published_date: '2025-02-10T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pka1', 0.3));
+  }
+  if (opts.kbeauty) {
+    rows.policy_signals.push({ id: 'pb1', client_id: C1, article_id: 'pba1', signal_title: 'K-Beauty brands enter the Gulf', summary: 'Korean brands.', country: 'Global', source_published_date: '2025-02-12T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pba1', 0.3));
+  }
   // a second Lancôme signal on the same Market Dynamics card
   if (opts.cardMates) {
     rows.market_dynamics_signals.push({ id: 'm3', client_id: C1, article_id: 'b3', signal_title: 'Lancôme adds a beauty bar in Abu Dhabi', summary: 'Second store.', organization: 'Lancôme', country: 'United Arab Emirates', published_date: '2025-03-25T08:00:00Z', insight_id: 'card1' });
@@ -5385,6 +5397,22 @@ async function testStep10() {
     return (a.status === 'nothing_found' && answerCalls === 0 && /could not find news/.test(a.answer_text) && /No news found for "cosmetics rules"/.test(a.answer_text) &&
       a.sources.length === 0 && a.confidence.level === 'not_enough' && saved.length === 1 && saved[0].role === 'assistant' && saved[0].payload.status === 'nothing_found') || a;
   });
+  await check('The searches found news but nothing answers (every AI point removed) -> "The news in your data does not answer this question", not "the searches found nothing"', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
+    const { a, answerCalls } = await answerFor([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return (a.status === 'nothing_found' && answerCalls === 0 && /^The news in your data does not answer this question/.test(a.answer_text) && !/searches below found nothing/.test(a.answer_text)) || a.answer_text;
+  });
+  await check('The AI points all fail the checks but the search found news NAMING the company asked -> that news is shown as a list (code only, "some evidence"), never "nothing found"', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
+    const { a, answerCalls } = await answerFor([search('T1', { query: 'store', companies: ['Lancôme'] }), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return (a.status === 'answered' && answerCalls === 0 && /^I could not write a checked summary, so here are the 1 news items/.test(a.summary) &&
+      a.sources.length === 1 && a.confidence.level === 'some' && /Lancôme opens a flagship store/.test(a.answer_text) && /left out: what the AI wrote did not pass the checks/.test(a.answer_text)) || { s: a.summary, t: a.answer_text };
+  });
+  await check('Must not change: AI points all fail and the search was NOT kept to a company -> still "The news in your data does not answer this question" (no list of news that may be about something else)', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: [J({ facts: [{ about: 'x', text: 'Lancome launched 4 new products', sources: [] }] })] };
+    const { a } = await answerFor([search('T1'), job('T2', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['x'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    return (a.status === 'nothing_found' && /^The news in your data does not answer this question/.test(a.answer_text)) || a.answer_text;
+  });
   await check('A plain list of the newest news (exact read) -> NO AI call; code writes the list; sources numbered in order, each once', async () => {
     replies = {};
     const { a, answerCalls } = await answerFor([{ task_id: 'T1', capability: 'structured_search', inputs: { modules: ['policy'] }, depends_on: [] }, job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
@@ -5615,6 +5643,35 @@ async function testStep9() {
   await check('Search filters: a "company" the client list does not know and the data never names ("K-beauty") -> searched by the words, not an empty filter (recorded)', async () => {
     const r = await runSearch('retrieve_data', { query: 'k-beauty cosmetics news', companies: ['K-beauty'] });
     return (r.output.items.length > 0 && /K-beauty found nowhere/.test(r.output.note)) || r.output;
+  });
+  await check('Exact read (no search words) for a company the data never names ("what is the update about Catalio") -> NOTHING found, never the newest news of the whole data; a search by words still drops the filter (must not change)', async () => {
+    const r = await runSearch('structured_search', { companies: ['Catalio'] });
+    const w = await runSearch('retrieve_data', { query: 'k-beauty cosmetics news', companies: ['K-beauty'] });
+    return (r.output.items.length === 0 && /Catalio found nowhere in the data, so nothing was found/.test(r.output.note) && w.output.items.length > 0) || { exact: r.output, words: w.output.items.length };
+  });
+  // 26 Nov (DI tab): a name the client list does not know is looked up in the
+  // WHOLE database (company field + title) before the search
+  await check('Name in the data: exact read "what is the update about Catalio" when the Catalio news is OLDER than 1000 newer news -> found (the database is asked first, not the newest pages only)', async () => {
+    const r = await runSearch('structured_search', { modules: ['policy'], companies: ['Catalio'] }, understoodFor(), { filler: 1100, catalio: true });
+    return (ids(r) === 'pc1' && r.output.timing.named_signals === 1) || { got: ids(r), note: r.output.note, timing: r.output.timing };
+  });
+  await check('Name in the data: search by meaning "Any news on Kanufresh" -> found by its TITLE although its company field says "Lucas Meyer Cosmetics by Clariant" and 700 closer news come first; never the closer news instead', async () => {
+    const r = await runSearch('retrieve_data', { query: 'kanufresh news', modules: ['policy'], companies: ['Kanufresh'] }, understoodFor(), { deep: 700, kanu: true });
+    return (ids(r) === 'pk1' && !/searched by the words only/.test(r.output.note || '')) || { got: ids(r), note: r.output.note };
+  });
+  await check('Name in the data: written another way ("KANUFRESH" / "k beauty" for "K-Beauty") -> found the same way', async () => {
+    const a = await runSearch('retrieve_data', { query: 'news', modules: ['policy'], companies: ['KANUFRESH'] }, understoodFor(), { deep: 700, kanu: true });
+    const b = await runSearch('structured_search', { modules: ['policy'], companies: ['k beauty'] }, understoodFor(), { filler: 1100, kbeauty: true });
+    return (ids(a) === 'pk1' && ids(b) === 'pb1') || { a: ids(a), b: ids(b) };
+  });
+  await check('Name in the data but not in the dates asked -> nothing found in those dates (true), NEVER other news searched by the words', async () => {
+    const r = await runSearch('retrieve_data', { query: 'kanufresh news', modules: ['policy'], companies: ['Kanufresh'], date_from: '2025-06-01', date_to: '2025-06-30' }, understoodFor(), { kanu: true, filler: 50 });
+    return (r.output.items.length === 0 && !/searched by the words only/.test(r.output.note || '')) || { got: ids(r), note: r.output.note };
+  });
+  await check('Name in the data (must not change): a name the database does not hold ("K-beauty" with no such title) is still searched by its words; a known competitor (Lancôme) still finds its own news only', async () => {
+    const w = await runSearch('retrieve_data', { query: 'k-beauty cosmetics news', companies: ['K-beauty'] });
+    const l = await runSearch('retrieve_data', { query: 'store', companies: ['Lancôme'] });
+    return (w.output.items.length > 0 && /K-beauty found nowhere/.test(w.output.note) && ids(l) === 'm1') || { words: w.output.items.length, lancome: ids(l) };
   });
   await check('Exact read: policy, High impact, newest first', async () => {
     const r = await runSearch('structured_search', { modules: ['policy'], impact: ['High'], order: 'newest' });
