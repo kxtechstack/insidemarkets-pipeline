@@ -5049,6 +5049,11 @@ function fakeStep9Store(opts = {}) {
     rows.policy_signals.push({ id: 'pb1', client_id: C1, article_id: 'pba1', signal_title: 'K-Beauty brands enter the Gulf', summary: 'Korean brands.', country: 'Global', source_published_date: '2025-02-12T08:00:00Z', impact_level: 'Low' });
     pieces.push(piece('policy', 'pba1', 0.3));
   }
+  // v86: two news name an operation only in their SUMMARY
+  if (opts.summaryWord) {
+    rows.policy_signals.push({ id: 'so1', client_id: C1, article_id: 'soa1', signal_title: 'Enforcement seizes face creams for mercury', summary: 'Operation Soundarya by the Kerala drug control department.', country: 'India', source_published_date: '2026-08-12T08:00:00Z', impact_level: 'Medium' });
+    rows.policy_signals.push({ id: 'so2', client_id: C1, article_id: 'soa2', signal_title: 'Kerala authorities seize counterfeit cosmetics', summary: 'Under Operation Soundarya, officers seized fakes.', country: 'India', source_published_date: '2026-08-12T08:00:00Z', impact_level: 'Medium' });
+  }
   // a second Lancôme signal on the same Market Dynamics card
   if (opts.cardMates) {
     rows.market_dynamics_signals.push({ id: 'm3', client_id: C1, article_id: 'b3', signal_title: 'Lancôme adds a beauty bar in Abu Dhabi', summary: 'Second store.', organization: 'Lancôme', country: 'United Arab Emirates', published_date: '2025-03-25T08:00:00Z', insight_id: 'card1' });
@@ -6060,6 +6065,30 @@ async function testStep10() {
       longList > 5 && !/\*\*.*\*\* \(\d{4}-\d\d-\d\d\):/.test(many.a.body)) ||
       { keyNs, otherNs, s: a.summary, short: [shortList, one.a.body.slice(0, 300)], long: [longList, many.a.body.slice(0, 200)] };
   });
+  await check('v84: a question that ASKS for a list in its own words ("List ...") shows every news found as a Key Signal, newest first, numbered [1]… with no "other news"; the same question without a list word keeps only the cited news (must not change); a sentence that says it is not about the topic is taken out', async () => {
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}. India cut duty on whisky, but this is not a cosmetics tariff update ${nums(t, 'Kuwait labelling')}.` }) };
+    const tasks = [search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])];
+    const { a } = await answerFor(tasks, { aiOpts: { aiCalls: 1 }, u: { ...understood, question_text: 'List the recent store news' } });
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a: b } = await answerFor(tasks, { aiOpts: { aiCalls: 1 }, u: { ...understood, question_text: 'recent store news' } });
+    const dates = a.sources.map((x) => String(x.date || ''));
+    return (a.summary_by === 'ai' && a.other_sources.length === 0 && a.sources.length > 3 && a.sources.every((x, k) => x.n === k + 1) && dates.every((d, k) => k === 0 || d <= dates[k - 1]) &&
+      !/not a cosmetics tariff update/.test(a.summary) && a.check.problems.some((p) => /says it is not about the topic/.test(p)) && b.other_sources.length > 0) ||
+      { a: [a.summary, a.sources.map((x) => [x.n, x.date]), a.other_sources.length], b: b.other_sources.length };
+  });
+  await check('v85: a sentence citing a FACT number as a source ("[1][5][8]", one news) keeps the sentence with its right source; v87: only fact numbers -> kept when it is about those facts; a sentence with only wrong numbers is still taken out (must not change); words asking for the kind of answer ("definition purpose key facts") are left out of the search by meaning', async () => {
+    const book = answerer.sourceBook({ sources: { 'x:1': { title: 'Kerala seizes face creams with mercury', text: 'Operation Soundarya seized face creams.', date: '2026-08-12', module: 'policy' } } });
+    const pts = Array.from({ length: 8 }, (x, k) => ({ code: `P${k + 1}`, kind: 'fact', text: k === 0 ? 'Operation Soundarya seized face creams in Kerala' : `Fact number ${k + 1} about the Kerala seizure`, sources: book.nums(['x:1']) }));
+    const r = answerer.checkSummary('Operation Soundarya seized face creams in Kerala [1][5][8].', book, pts, 'what is operation soundarya');
+    const r2 = answerer.checkSummary('Operation Soundarya seized face creams in Kerala [9][12].', book, pts, 'what is operation soundarya');
+    const q = runner.searchTextOf('operation soundarya definition purpose key facts');
+    // v87: ONLY fact numbers ("[5][8]") -> kept when the sentence is about those facts; a sentence about something else is taken out
+    pts[4] = { ...pts[4], text: 'Operation Soundarya seized face creams and lipsticks in Kerala' };
+    const r3 = answerer.checkSummary('Operation Soundarya seized face creams and lipsticks in Kerala [5][8].', book, pts, 'what is operation soundarya');
+    const r4 = answerer.checkSummary('The weather was sunny all week long [5].', book, pts, 'what is operation soundarya');
+    return (r.ok && /\[1\]\.$/.test(r.text) && !/\[5\]|\[8\]/.test(r.text) && q === 'operation soundarya' && !/\[9\]|\[12\]/.test(r2.text || '') &&
+      r3.ok && /lipsticks in Kerala \[1\]\.$/.test(r3.text) && !/sunny/.test(r4.text || '')) || { r, r2, r3, r4, q };
+  });
   await check('v78 fix 2: a sentence of the short answer that copies a line of what was not found ("No news found for ...") is taken out; the line stays in the list under the answer', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}. No news found for "zz nothing here at all" ${nums(t, 'UAE bans parabens')}.` }) };
     const tasks = [search('T1'), search('T2', { query: 'zz nothing here at all', modules: ['policy'], countries: ['Atlantis'] }),
@@ -6172,6 +6201,12 @@ async function testV51() {
     return (x1 && x1.open_id === 'e2' && others.length > 0 && others.every((i) => !i.open_id) && y1 && y1.open_id === 'e1' &&
       z1 && !z1.open_id && /articles of 1 Competitive Radar cards could not be read/.test(r3.output.note || '') && w1 && !w1.open_id) ||
       { x1: x1 && x1.open_id, y1: y1 && y1.open_id, z1: z1 && z1.open_id, note: r3.output.note };
+  });
+  await check('v86: a rare word of the question found only in the news SUMMARY ("Operation Soundarya") is looked up there too: both news are found (no piece of either is close to the question)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'operation soundarya' }, understoodFor(), { summaryWord: true });
+    const raw = ids(r);
+    const got = Array.isArray(raw) ? raw : String(raw).split(',');
+    return (got.includes('so1') && got.includes('so2') && /looked up in the titles and summaries: soundarya/.test(r.output.note || '')) || { got, note: r.output && r.output.note };
   });
   await check('v68 Q: words about the FORM of the answer (news, headlines, sources, links, articles, reports, updates) are left out of the text searched by meaning ("power grid news headlines source links" -> "power grid"); a search of only such words ("news updates") stays as written', async () => {
     const a = runner.searchTextOf('power grid news headlines source links');
@@ -6570,7 +6605,7 @@ async function testStep9() {
     const a = await runSearch('retrieve_data', { query: 'kbeauty updates', modules: ['policy'] }, understoodFor(), { deep: 700, kbeautyWritten: true });
     const b = await runSearch('retrieve_data', { query: 'kanu fresh news', modules: ['policy'] }, understoodFor(), { deep: 700, kanu: true });
     const first = (r) => r.output.items[0] && r.output.items[0].signal_id;
-    return (first(a) === 'pkb' && !ids(a).split(',').includes('pmb') && /looked up in the titles: kbeauty/.test(a.output.note) && first(b) === 'pk1') ||
+    return (first(a) === 'pkb' && !ids(a).split(',').includes('pmb') && /looked up in the titles and summaries: kbeauty/.test(a.output.note) && first(b) === 'pk1') ||
       { a: first(a), b: first(b), note: a.output.note };
   });
   await check('Rare word in MORE than 20 titles: the news whose title holds it comes before closer-scoring news of the wide search (never other news on top)', async () => {
@@ -6818,6 +6853,13 @@ async function testDbCheck() {
           if (it.open_title) out(`           -> opens article: ${String(it.open_title).slice(0, 90)}`);
         }
       }
+    }
+    // 27 Nov (v83): who wrote the short answer, and why sentences of the AI were taken out
+    const ga = j.debug && j.debug.generateAnswer;
+    if (ga && (!ok || showAll)) {
+      out(`   short answer by ${ga.summary_by || '?'}${ga.check && ga.check.passed === false ? ' (the AI answer did not pass the check)' : ''}`);
+      for (const p of ((ga.check && ga.check.problems) || []).slice(0, 6)) out(`      check: ${String(p).slice(0, 220)}`);
+      if (ga.check && ga.check.ai_text) out(`      the AI wrote: ${String(ga.check.ai_text).slice(0, 400)}`);
     }
     out(String(text).split('\n').slice(0, 14).map((l) => `   | ${l}`).join('\n'));
   }

@@ -651,13 +651,20 @@ async function rareWordSignals(rare, inputs, ctx, modules, fuzzy = false) {
   if (!regex || typeof s.readTagged !== 'function') return null;
   const only = { kind: 'word', articleIds: [], pointIds: [], byModule: {} };
   try {
+    // v86 (Sneha, "what is operation soundarya"): two news name the
+    // operation, both only in their SUMMARY ("Kerala authorities seize
+    // ₹9.64 lakh of counterfeit cosmetics"); the titles were read, found
+    // nothing, and the search by meaning ranked one 9th and missed the
+    // other. The summary is read too (the same whole-word pattern).
     await Promise.all(modules.map(async (m) => {
       const t = TABLES[m];
       if (!t.titleCol) return;
-      const keys = await s.readTagged(t.table, {
-        clientId: ctx.clientId, keyCol: t.key, column: t.titleCol, regex, dateCol: t.dateCol,
+      const read = (column) => s.readTagged(t.table, {
+        clientId: ctx.clientId, keyCol: t.key, column, regex, dateCol: t.dateCol,
         from: inputs.date_from, to: readUntil(inputs, ctx.understood), limit: RARE_WORD_MAX_SIGNALS + 1,
       });
+      const parts = await Promise.all([t.titleCol, ...((t.textCols || []).slice(0, 1))].map(read));
+      const keys = parts.flat();
       only.byModule[m] = [...new Set(keys)];
       (m === 'competitor' ? only.pointIds : only.articleIds).push(...only.byModule[m]);
     }));
@@ -973,7 +980,10 @@ function newestShare(kept, max, notes, rankOf = null, asked = []) {
 // meaning (a small grammar set, like the tab names). A search of only such
 // words ("news updates") is searched as written. Titles, rare words and
 // filters still use the search as written.
-const ANSWER_FORM_WORDS = /\b(news|headlines?|sources?|links?|articles?|reports?|updates?)\b/gi;
+// v85 (dbcheck #57: "operation soundarya definition purpose key facts" put
+// the expected news 9th, after "AI autonomy" and "drone maker" news): the
+// words asking for the shape of the answer are left out too.
+const ANSWER_FORM_WORDS = /\b(news|headlines?|sources?|links?|articles?|reports?|updates?|definitions?|purposes?|key facts?|details?|overview|summary|summaries)\b/gi;
 function searchTextOf(query) {
   const q = String(query || '');
   const t = q.replace(ANSWER_FORM_WORDS, ' ').replace(/\s+/g, ' ').trim();
@@ -1076,7 +1086,7 @@ async function retrieveDataOnce(inputs, ctx) {
     } else if (r) {
       only = r;
       timing.rare_words = rare.filter((w) => !w.includes(' '));
-      notes.push(`words not in the English word list looked up in the titles: ${timing.rare_words.join(', ')} (${r.articleIds.length + r.pointIds.length} news)`);
+      notes.push(`words not in the English word list looked up in the titles and summaries: ${timing.rare_words.join(', ')} (${r.articleIds.length + r.pointIds.length} news)`);
     }
   }
   if (only) {

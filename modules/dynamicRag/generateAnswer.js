@@ -531,6 +531,12 @@ const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || 
 
 const LIMIT_START_WORDS = 5;
 const SAME_POINT_SHARE = 0.7;
+// v84 (Sneha, "list the tariff updates"): the user's OWN words ask for a
+// list (not the goal the AI guessed): every news found is a Key Signal
+const LIST_ASKED = /^\s*(?:please\s+|can you\s+|could you\s+)?(?:list|show(?:\s+me)?\s+(?:all|a list|the list)|give(?:\s+me)?\s+(?:all|a list|the list))\b/i;
+// v84 (Sneha, tariffs: "... but this is not a cosmetics tariff update [4]"):
+// a sentence that says it is not about the topic is not part of the answer
+const NOT_ON_TOPIC = /\b(?:this|that|which|it)\s+(?:is|was)\s+not\s+(?:(?:a|an)\s+[\w\s-]{0,40}?\b(?:update|news|item|topic)\b|(?:related|relevant)\s+to\b|about\s+(?:the|this)\s+(?:question|topic)\b)/i;
 const SUMMARY_MAX_CHARS = 1200;
 const CODE_LIST_TEXT_MAX = 5;   // a list answered by code: up to this many news show their own summary
 const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
@@ -590,9 +596,36 @@ function checkSummary(text, book, points, question, ownName = null, limits = [])
       problems.push(`taken out (copies a line of what was not found): ${cut(sentence, 120)}`);
       continue;
     }
-    const own = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
+    if (NOT_ON_TOPIC.test(sentence)) { problems.push(`taken out (says it is not about the topic): ${cut(sentence, 120)}`); continue; }
+    let own = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
     const unknown = own.filter((n) => !book.item(n));
-    if (unknown.length) { problems.push(`taken out (source numbers that do not exist: ${[...new Set(unknown)].join(', ')}): ${cut(sentence, 120)}`); continue; }
+    if (unknown.length) {
+      // v85 (Sneha, dbcheck #57 "what is operation soundarya"): the AI wrote
+      // the NUMBER OF A FACT it was shown as a source number ("... soaps,
+      // and oils [1][5][8]": facts 5 and 8, one news [1]), and the whole
+      // sentence was taken out. A number that is not a source but is a
+      // fact's number stands for that fact's sources; any other wrong number
+      // is left out. The sentence is taken out only when no right source is
+      // left (as before).
+      const valid = own.filter((n) => book.item(n));
+      // v87 (dbcheck #57 again: "... safety standards [2][3]", only fact
+      // numbers, no right one): with no right source, a fact's number still
+      // stands for its sources when the sentence is about that fact (its
+      // words, as for a sentence without numbers)
+      const named = [...new Set(own.filter((n) => !book.item(n)).map((n) => points[n - 1]).filter(Boolean))];
+      const about = valid.length ? named : pointsFor(sentence, named);
+      const fixed = sentence.replace(/\[(\d+)\]/g, (m, k) => {
+        const n = Number(k);
+        if (book.item(n)) return m;
+        const p = points[n - 1];
+        return p && about.includes(p) ? cites(p.sources) : '';
+      });
+      const left = [...fixed.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
+      if (!left.length) { problems.push(`taken out (source numbers that do not exist: ${[...new Set(unknown)].join(', ')}): ${cut(sentence, 120)}`); continue; }
+      problems.push(`source numbers that do not exist: ${[...new Set(unknown)].join(', ')} (a fact's number read as its sources, others left out): ${cut(sentence, 120)}`);
+      sentence = tidyCites(fixed);
+      own = left;
+    }
     let ns = own;
     if (!ns.length) {
       const found = pointsFor(sentence, points);
@@ -792,8 +825,11 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
     if (s.kind === 'list' && !listOnScreen) continue;
     for (const x of [...(s.points || []), ...(s.items || []), ...(s.differences || []), ...(s.rows || []).flatMap((r) => r.cells)]) (x.sources || []).forEach((n) => screenNums.add(n));
   }
-  const keySources = listOnScreen ? sources : sources.filter((x) => screenNums.has(x.n));
-  const otherSources = listOnScreen ? [] : sources.filter((x) => !screenNums.has(x.n));
+  const listAsked = LIST_ASKED.test(String(question || ''));
+  const keySources = listOnScreen || listAsked ? [...sources] : sources.filter((x) => screenNums.has(x.n));
+  const otherSources = listOnScreen || listAsked ? [] : sources.filter((x) => !screenNums.has(x.n));
+  // a list asked for by the user: newest first
+  if (listAsked && !listOnScreen) keySources.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || a.n - b.n);
   // v76 (Sneha): an answer by code ("latest policy news in the UK") showed
   // its 19 news twice, as "News found" and as the Key Signals rows. The
   // Key Signals rows hold every one of them (clickable), so the screen
@@ -818,6 +854,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   sources.sort((a, b) => a.n - b.n);
   keySources.sort((a, b) => a.n - b.n);
   otherSources.sort((a, b) => a.n - b.n);
+  if (listAsked) check.list_asked = true;
   // v81 (Sneha, "any news on kanufresh?", 2): an answer by code said "Here
   // is the 1 news item ..." and nothing else (its list is the Key Signals
   // rows, titles only). A list of up to CODE_LIST_TEXT_MAX news shows each
