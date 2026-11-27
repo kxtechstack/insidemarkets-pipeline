@@ -928,9 +928,44 @@ function placesNamed(text) {
   return out;
 }
 
+// v81 (Sneha, "list recent news about lakme" -> "Which ... do you mean by
+// "lake"?"): a brand of the client's news that is not one of its
+// competitors was "fixed" into an English word one letter away. Before a
+// spelling fix stands, the typed word is looked up in the client's own
+// news (titles and summaries, whole words): found there, the user's
+// spelling is kept (noted). A failed look-up keeps the fix (as before).
+const DATA_WORD_TABLES = ['policy_signals', 'market_dynamics_signals', 'trend_signals', 'competitor_changes'];
+let wordLookup = null;
+/** Tests give a fake look-up here: (words, clientId) -> the words found. */
+function useWordLookup(fn) { wordLookup = fn; }
+async function wordsInClientData(words, clientId) {
+  if (wordLookup) return wordLookup(words, clientId);
+  const whole = (text, w) => ` ${plainLower(text).replace(/[^a-z0-9]+/g, ' ')} `.includes(` ${w} `);
+  const found = new Set();
+  await Promise.all(words.flatMap((w) => DATA_WORD_TABLES.map(async (table) => {
+    const { data, error } = await supabase.from(table).select('signal_title, summary').eq('client_id', clientId)
+      .or(`signal_title.ilike.%${w}%,summary.ilike.%${w}%`).limit(5);
+    if (error) throw new Error(`${table}: ${error.message}`);
+    if ((data || []).some((r) => whole(`${r.signal_title || ''} ${r.summary || ''}`, w))) found.add(w);
+  })));
+  return [...found];
+}
+
 async function preprocessQuery(request) {
   const [wordList, client] = await Promise.all([loadTerms(), loadClient(request.client_id)]);
-  const result = preprocessText(request.original_query, wordList.terms, client.names);
+  let result = preprocessText(request.original_query, wordList.terms, client.names);
+  const typed = [...new Set((result.spelling_fixed || []).map((c) => String(c).split(' -> ')[0].toLowerCase()).filter((w) => /^[a-z]{4,}$/.test(w)))];
+  if (typed.length && request.client_id) {
+    try {
+      const inData = await wordsInClientData(typed, request.client_id);
+      if (inData.length) {
+        result = { ...preprocessText(request.original_query, wordList.terms, [...client.names, ...inData]), kept_as_typed: inData };
+      }
+    } catch (err) {
+      console.log(`[DynamicRAG] preprocessQuery WARNING: typed words could not be looked up in the data, spelling fixes kept: ${err.message}`);
+      result = { ...result, kept_as_typed_failed: err.message };
+    }
+  }
 
   // A question made only of invisible characters is empty once cleaned.
   if (!result.preprocessed_query) {
@@ -984,6 +1019,7 @@ function looksEnglish(text, leaveOut = []) {
 }
 
 module.exports = {
+  useWordLookup,
   looksEnglish,
   isEnglishWord,
   preprocessQuery,

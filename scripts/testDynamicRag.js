@@ -5998,15 +5998,16 @@ async function testStep10() {
     return (u1 === 'Mandatory halal certification covers imported cosmetics.' && u2 === 'New guidelines create a gap.' && u3 === 'Vitamin D3 and dyes K3 and K10 are restricted.' && u4 === 'A1 rules apply.' &&
       f.why === 'The UAE bans parabens.' && !/\b[SFP]\d+\b/.test(a.answer_text.split('**Key Signals')[0])) || { u1, u2, u3, u4, why: f.why, s: a.summary };
   });
-  await check('v79 A: "{name}" is filled everywhere in a line of what was not done ("not about Lumière Beauty Group itself, so Lumière Beauty Group is not compared"); E: a table left with one side is not shown next to other parts, shown when it is the only part (must not change)', async () => {
-    replies = { dynamic_rag_job_summarise_v1: (t) => J({ points: [{ text: 'Estée Lauder launches a serum in Saudi Arabia', sources: [code(t, 'Estée Lauder launches')] }] }), dynamic_rag_answer_v1: J({ answer: 'x' }) };
+  await check('v79 A: "{name}" is filled everywhere in a line of what was not done ("not about Lumière Beauty Group itself, so Lumière Beauty Group is not compared"); E: a table left with one side is not shown next to other parts (and its news take no numbers: Key Signals start at [1]), shown when it is the only part (must not change)', async () => {
+    replies = { dynamic_rag_job_summarise_v1: (t) => J({ points: [{ text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens')] }] }), dynamic_rag_answer_v1: J({ answer: 'x' }) };
     const cmp = (more) => [search('T1', { companies: ['Estée Lauder'] }), search('T2', { query: 'cosmetics rules' }),
       job('T3', 'compare', { sides: [{ label: 'Estée Lauder', ref: 'T1.output' }, { label: 'Lumière Beauty Group', ref: 'T2.output' }], dimensions: ['launches'] }, ['T1', 'T2']),
       ...more, job('T4', 'validate_evidence', { findings: ['T3.output', ...more.map((m) => `${m.task_id}.output`)] }, ['T3', ...more.map((m) => m.task_id)])];
-    const { a } = await answerFor(cmp([job('T5', 'summarise', { input: ['T1.output'] }, ['T1'])]));
+    const { a } = await answerFor(cmp([job('T5', 'summarise', { input: ['T2.output'] }, ['T2'])]));
     const { a: b } = await answerFor(cmp([]));
     const line = a.limits.find((l) => /is not compared/.test(l)) || '';
     return (!/\{name\}/.test(line) && /so Lumière Beauty Group is not compared/.test(line) && !a.sections.some((x) => x.kind === 'table') && a.sections.some((x) => x.kind === 'points') &&
+      a.sources.length > 0 && a.sources[0].n === 1 &&
       b.sections.some((x) => x.kind === 'table')) || { line, a: a.sections.map((x) => x.kind), b: b.sections.map((x) => x.kind) };
   });
   await check('v79 B: two points that say nearly the same (70% of the shorter one\'s words, same numbers) are ONE point with the sources of both; points with other numbers stay two (must not change)', async () => {
@@ -6028,6 +6029,36 @@ async function testStep10() {
     const long = [one, one, one].join(' ');
     const r = answerer.checkSummary(long, book, pts, 'q');
     return (r.text && !/…/.test(r.text) && /\[1\]\.$/.test(r.text) && r.text.length <= 1200) || { t: r.text && r.text.slice(-80), n: r.text && r.text.length };
+  });
+  await check('v81 (4): a typed word "fixed" into an English word ("lakme" -> "lake") keeps the user\'s spelling when the word is in the client\'s news (noted); a real typo ("opportunites") is still fixed; a failed look-up keeps the fix (noted)', async () => {
+    const pre = require('../modules/dynamicRag/preprocessQuery');
+    const seen = [];
+    pre.useWordLookup(async (words) => { seen.push(...words); return words.filter((w) => w === 'lakme'); });
+    const a1 = await pre.preprocessQuery({ original_query: 'list recent news about lakme', client_id: 'client-1' });
+    const a2 = await pre.preprocessQuery({ original_query: 'any opportunites in india', client_id: 'client-1' });
+    pre.useWordLookup(async () => { throw new Error('db down'); });
+    const a3 = await pre.preprocessQuery({ original_query: 'list recent news about lakme', client_id: 'client-1' });
+    pre.useWordLookup(null);
+    return (/\blakme\b/.test(a1.preprocessed_query) && (a1.kept_as_typed || []).includes('lakme') && seen.includes('lakme') &&
+      /opportunities/.test(a2.preprocessed_query) && !a2.kept_as_typed && /\blake\b/.test(a3.preprocessed_query) && /db down/.test(a3.kept_as_typed_failed || '')) ||
+      { a1: [a1.preprocessed_query, a1.spelling_fixed, a1.kept_as_typed], a2: a2.preprocessed_query, a3: [a3.preprocessed_query, a3.kept_as_typed_failed] };
+  });
+  await check('v81 (3): the Key Signals are numbered [1]…[k] with no gap and the other news after them, every [n] of the answer follows; (2) a list answered by code with up to 5 news shows each news\' own summary on the screen, a longer one does not', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const keyNs = a.sources.map((x) => x.n);
+    const otherNs = a.other_sources.map((x) => x.n);
+    const okNums = keyNs.join() === keyNs.map((x, k) => k + 1).join() && otherNs.join() === otherNs.map((x, k) => keyNs.length + k + 1).join();
+    const bodyNs = [...a.body.matchAll(/#source-(\d+)/g)].map((m) => Number(m[1]));
+    replies = { dynamic_rag_answer_v1: 'x' };
+    const one = await answerFor([search('T1', { query: 'parabens', modules: ['policy'], countries: ['United Arab Emirates'] }), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const many = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const shortList = one.a.sections.filter((x) => x.kind === 'list').flatMap((x) => x.items).length;
+    const longList = many.a.sections.filter((x) => x.kind === 'list').flatMap((x) => x.items).length;
+    return (okNums && a.other_sources.length > 0 && bodyNs.every((n) => keyNs.includes(n)) && /Lancôme|Lancome/.test(a.summary) && a.summary.includes('[1]') &&
+      one.a.summary_by !== 'ai' && shortList <= 5 && shortList > 0 && /\*\*UAE bans parabens in cosmetics\*\* \(2025-03-10\): New rule in the UAE\./.test(one.a.body) &&
+      longList > 5 && !/\*\*.*\*\* \(\d{4}-\d\d-\d\d\):/.test(many.a.body)) ||
+      { keyNs, otherNs, s: a.summary, short: [shortList, one.a.body.slice(0, 300)], long: [longList, many.a.body.slice(0, 200)] };
   });
   await check('v78 fix 2: a sentence of the short answer that copies a line of what was not found ("No news found for ...") is taken out; the line stays in the list under the answer', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}. No news found for "zz nothing here at all" ${nums(t, 'UAE bans parabens')}.` }) };

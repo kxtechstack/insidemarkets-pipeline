@@ -144,7 +144,16 @@ const listText = (it) => (it.text ? workflowTools.cutAtWord(String(it.text), LIS
 
 function buildSections(run, workflow, book) {
   const sections = [];
-  for (const id of resultRefs(run, workflow)) {
+  const refs = resultRefs(run, workflow);
+  // v79 E (27 Nov, sustainability): a comparison left with one side is not
+  // shown when other parts are; it is skipped BEFORE its news get numbers
+  // (built and dropped later, the Key Signals began at [4])
+  const outOf = (id) => (run.results[id] && run.results[id].output) || {};
+  const oneSide = (id) => Array.isArray(outOf(id).rows) && (outOf(id).sides || []).length < 2;
+  const hasAny = (id) => ['findings', 'patterns', 'groups', 'items'].some((k) => (outOf(id)[k] || []).length > 0) || (Array.isArray(outOf(id).rows) && !oneSide(id) && outOf(id).rows.length > 0);
+  const skipTable = new Set(refs.some(hasAny) ? refs.filter(oneSide) : []);
+  for (const id of refs) {
+    if (skipTable.has(id)) continue;
     const r = run.results[id];
     const o = r.output;
     const title = SECTION_TITLES[r.capability] || 'Findings';
@@ -523,6 +532,7 @@ const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || 
 const LIMIT_START_WORDS = 5;
 const SAME_POINT_SHARE = 0.7;
 const SUMMARY_MAX_CHARS = 1200;
+const CODE_LIST_TEXT_MAX = 5;   // a list answered by code: up to this many news show their own summary
 const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
 // 27 Nov (YSL "price changes in the UK", fix 1): the answer began "The news
 // ALSO points to ...": a word that adds to something said before, a few
@@ -790,13 +800,42 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   // never shows a list section; the saved answer text keeps it.
   const screenSections = sections.filter((x) => x.kind !== 'list');
 
+  // v81 (Sneha, "list recent news about loreal", 3): the Key Signals read
+  // [1]…[8], [13], [18]: numbers were given to all news found, the screen
+  // shows the ones used. The news are numbered again: the Key Signals
+  // [1]…[k] with no gap, the other news after them; every [n] follows.
+  const order = [...keySources, ...otherSources];
+  const newN = new Map(order.map((x, k) => [x.n, k + 1]));
+  const re = (n) => newN.get(n) || n;
+  const reText = (t) => String(t).replace(/\[(\d+)\]/g, (m, n) => (newN.has(Number(n)) ? `[${re(Number(n))}]` : m));
+  const reNums = (ns) => (ns || []).map(re).sort((a, b) => a - b);
+  summary = reText(summary);
+  for (const sec of sections) {
+    for (const x of [...(sec.points || []), ...(sec.items || []), ...(sec.differences || [])]) x.sources = reNums(x.sources);
+    for (const row of sec.rows || []) for (const c of row.cells) c.sources = reNums(c.sources);
+  }
+  for (const x of order) x.n = re(x.n);
+  sources.sort((a, b) => a.n - b.n);
+  keySources.sort((a, b) => a.n - b.n);
+  otherSources.sort((a, b) => a.n - b.n);
+  // v81 (Sneha, "any news on kanufresh?", 2): an answer by code said "Here
+  // is the 1 news item ..." and nothing else (its list is the Key Signals
+  // rows, titles only). A list of up to CODE_LIST_TEXT_MAX news shows each
+  // news' own short summary, word for word from the news (no AI).
+  let screenSummary = summary;
+  if (summaryBy !== 'ai' && !nothing) {
+    const items = sections.filter((x) => x.kind === 'list').flatMap((x) => x.items);
+    if (items.length && items.length <= CODE_LIST_TEXT_MAX && items.some((it) => it.text)) {
+      screenSummary = [summary, ...items.map((it) => `**${it.title}** (${it.date || 'no date'})${it.text ? `: ${String(it.text).trim()}` : ''} ${cites(it.sources)}`)].join('\n\n');
+    }
+  }
   const status = nothing ? 'nothing_found' : 'answered';
   const answerText = nothing
     ? renderAnswer(summary, [], confidence, limits, [])
     : renderAnswer(summary, sections, confidence, limits, sources);
   // the answer for the screen: no Sources block, and every source number a
   // link the screen opens as that signal ("[2]" -> "[[2]](#source-2)")
-  const body = (nothing ? answerText : renderAnswer(summary, screenSections, confidence, limits, keySources, false))
+  const body = (nothing ? answerText : renderAnswer(screenSummary, screenSections, confidence, limits, keySources, false))
     .replace(/\[(\d+)\](?!\()/g, (m, n) => (keySources.some((x) => x.n === Number(n)) ? `[[${n}]](#source-${n})` : m));
   const out = {
     status, answer_text: answerText, body, summary, summary_by: summaryBy,
