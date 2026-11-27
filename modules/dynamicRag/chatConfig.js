@@ -155,6 +155,8 @@ module.exports = {
     compare_by_code_point: 'main news found',
     // the comparison row made by code: how many news items each side's search found
     compare_count_point: 'news items found in your data',
+    // one side of a comparison is the client itself and the data has no news about it
+    own_not_compared: 'Your data holds news about the market, not about {name} itself, so {name} is not compared; the other side is shown',
     confidence: {
       good: 'Good evidence: several news items support the main points.',
       some: 'Some evidence: the answer rests on a few news items, so read it with care.',

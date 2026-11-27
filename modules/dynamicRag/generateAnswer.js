@@ -120,6 +120,9 @@ function resultRefs(run, workflow) {
   return ai.length ? ai : done;
 }
 
+const LIST_TEXT_CHARS = 300;
+const listText = (it) => (it.text ? workflowTools.cutAtWord(String(it.text), LIST_TEXT_CHARS) : null);
+
 function buildSections(run, workflow, book) {
   const sections = [];
   for (const id of resultRefs(run, workflow)) {
@@ -127,7 +130,7 @@ function buildSections(run, workflow, book) {
     const o = r.output;
     const title = SECTION_TITLES[r.capability] || 'Findings';
     if (SEARCHES.includes(r.capability)) {
-      const items = (o.items || []).map((it) => ({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, sources: book.nums([it.source_id]) }))
+      const items = (o.items || []).map((it) => ({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, text: listText(it), sources: book.nums([it.source_id]) }))
         .filter((x) => x.sources.length);
       if (items.length) sections.push({ title, kind: 'list', from: r.capability, items });
       continue;
@@ -212,7 +215,7 @@ function namedLists(run, workflow, book) {
       if (!sources.length || seen.has(it.source_id) || seen.has(sources.join())) continue;
       seen.add(it.source_id);
       seen.add(sources.join());
-      items.push({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, sources });
+      items.push({ title: it.title, module_name: MODULE_NAMES[it.module] || it.module, date: it.date, impact: it.impact || null, text: listText(it), sources });
     }
   }
   return items.length ? [{ title: SECTION_TITLES.retrieve_data || 'News found', kind: 'list', from: 'named', items }] : [];
@@ -252,6 +255,7 @@ function limitsOf(run, evidence) {
   if (evidence && (evidence.conflicts || []).length) out.push(ANSWER_TEXT.conflicts);
   for (const r of Object.values(run.results || {})) {
     if (r.capability === 'compare' && r.status === 'done' && r.output && r.output.made_by === 'code') out.push(ANSWER_TEXT.compare_by_code);
+    if (r.capability === 'compare' && r.status === 'done' && r.output && r.output.own_not_compared) out.push(ANSWER_TEXT.own_not_compared.replace('{name}', r.output.own_not_compared));
   }
   return [...new Set(out)];
 }
@@ -269,7 +273,11 @@ function pointsForAi(sections) {
       }
       for (const d of s.differences) lines.push({ kind: kindOf(d.kind), text: `${s.title}, difference: ${d.text}`, sources: d.sources });
     }
-    if (s.kind === 'list') for (const it of s.items) lines.push({ kind: 'fact', text: `${it.title} (${it.module_name}, ${it.date || 'no date'})`, sources: it.sources });
+    // 26 Nov (question bank, "shiseido new director"): the short answer saw
+    // only the titles and wrote "the name of the new director is not
+    // specified"; the text said "Ryoko Nagata". Each listed news item now
+    // gives its text too (the start, LIST_TEXT_CHARS).
+    if (s.kind === 'list') for (const it of s.items) lines.push({ kind: 'fact', text: `${it.title} (${it.module_name}, ${it.date || 'no date'})${it.text ? `: ${it.text}` : ''}`, sources: it.sources });
   }
   return lines.slice(0, 30).map((l, k) => ({ ...l, code: `P${k + 1}` }));
 }
@@ -373,7 +381,26 @@ function numbersIn(sentence, ns, book, points, question) {
     return !new RegExp(`(?<![\\d.])${v.replace(/\./g, '\\.')}(?![\\d])`).test(hay);
   });
 }
-function checkSummary(text, book, points, question) {
+// 26 Nov (question bank, "sugar cosmtics india funding amount"): the AI
+// wrote "Lumière Beauty Group plans to raise Rs 100-105 crore" — the news
+// says "the company" (Sugar Cosmetics). A sentence naming the client's own
+// company is taken out when the question is not about us (no we / our /
+// us / my, no client name) and none of its sources names the client.
+const ABOUT_US = /\b(we|our|ours|ourselves|my)\b/i;
+function ownNameIn(text, ownName) {
+  if (!ownName) return false;
+  const flat = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const t = ` ${flat(text)} `;
+  const name = flat(ownName);
+  if (name && t.includes(` ${name} `)) return true;
+  // a word of the name that is not English ("Lumière") names it too
+  return workflowTools.rareWordsOf(ownName, {}, null).filter((w) => !w.includes(' ')).some((w) => t.includes(` ${w} `));
+}
+const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || '')) || /(^|[^A-Za-z])us([^A-Za-z]|$)/.test(String(question || '')) || ownNameIn(question, ownName);
+
+const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
+function checkSummary(text, book, points, question, ownName = null) {
+  const usAsked = questionAboutUs(question, ownName);
   const problems = [];
   let t = cut(text, 1200);
   if (!t) return { ok: false, problems: ['empty answer'] };
@@ -399,7 +426,9 @@ function checkSummary(text, book, points, question) {
   t = t.replace(/(\S+)\.\s+(\S+)/g, (m, a, b) => (newsText.includes(`${a}. ${b}`.toLowerCase()) ? `${a}${KEEP} ${b}` : m));
   const sentences = t.split(/(?<=(?:[a-z0-9%)\]]|[a-z]{2}\.|(?:^|[\s(])[A-Z]{2,})[.!?])\s+(?=["'A-Z])/).filter((x) => x.trim()).map((x) => x.split(KEEP).join('.'));
   const kept = [];
-  for (const raw of sentences) {
+  let firstOut = false;
+  for (const [index, raw] of sentences.entries()) {
+    if (index === 1 && !kept.length) firstOut = true;
     let sentence = raw.trim();
     const own = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
     const unknown = own.filter((n) => !book.item(n));
@@ -416,15 +445,34 @@ function checkSummary(text, book, points, question) {
     }
     const bad = numbersIn(sentence, ns, book, points, question);
     if (bad.length) { problems.push(`taken out (the number ${bad.join(', ')} is not in its sources): ${cut(sentence, 120)}`); continue; }
+    if (ownName && !usAsked && ownNameIn(sentence, ownName) && !ns.some((k) => { const it = book.item(k); return it && ownNameIn(`${it.title} ${it.text || ''}`, ownName); })) {
+      problems.push(`taken out (names ${ownName}, but the question is not about us and its news does not name it): ${cut(sentence, 120)}`);
+      continue;
+    }
     kept.push(sentence);
   }
   if (kept.length > 5) problems.push(`${kept.length} sentences: the first 5 kept`);
   const finalText = tidyCites(kept.slice(0, 5).join(' '));
-  return { ok: kept.length > 0, problems, text: finalText };
+  if (sentences.length === 1 && !kept.length) firstOut = true;
+  // 27 Nov (dbcheck #49 on Hy4, halal deadline): the FIRST sentence (the
+  // direct answer) was taken out, and the answer began "Other points say
+  // ...". When the sentence that is now first points back to the one taken
+  // out (it starts with a word like "Other", "It", "This", "However": a
+  // small grammar set, BACK_WORDS), the AI answer is not used: code's answer
+  // (the first point of each part) is, as when the whole check fails. A
+  // first sentence taken out with the rest standing on its own ("The GCC
+  // updated ...") still gives the AI answer without it.
+  const leansBack = firstOut && kept.length > 0 && BACK_WORDS.test(kept[0]);
+  if (leansBack) problems.push('the first sentence (the direct answer) was taken out and the next one leans on it, so the AI answer is not used');
+  return { ok: kept.length > 0 && !leansBack, problems, text: finalText };
 }
 
 // ── 6. The whole answer as text (markdown) ───────────────────────────────
-function renderAnswer(summary, sections, confidence, limits, sources) {
+// 26 Nov (DI tab): sources are shown as the signal itself (title — tab,
+// date), never as an outside web link; the screen opens the signal in its
+// tab. withSources = false gives the answer without the Sources block (the
+// screen draws its own clickable list from answer_details.sources).
+function renderAnswer(summary, sections, confidence, limits, sources, withSources = true) {
   const L = [summary, ''];
   const kindTag = (k) => (KIND_WORDS[k] ? ` _(${KIND_WORDS[k]})_` : '');
   for (const s of sections) {
@@ -448,14 +496,29 @@ function renderAnswer(summary, sections, confidence, limits, sources) {
   }
   L.push(`**${ANSWER_TEXT.evidence_title}:** ${confidence.label}`);
   if (limits.length) { L.push('', `**${ANSWER_TEXT.limits_title}:**`); for (const l of limits) L.push(`- ${l}`); }
-  if (sources.length) {
+  if (sources.length && withSources) {
     L.push('', `**${ANSWER_TEXT.sources_title}:**`);
-    for (const s of sources) L.push(`[${s.n}] ${s.title} — ${s.module_name}, ${s.date || 'no date'}${s.url ? ` — ${s.url}` : ''}`);
+    for (const s of sources) L.push(`[${s.n}] ${s.title} — ${s.module_name}, ${s.date || 'no date'}`);
   }
   return L.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ── The step ─────────────────────────────────────────────────────────────
+// 26 Nov (question bank): a search kept to the client's own company finds
+// nothing (the data is news about the market); the AI read that limit as a
+// fact ("Lumière has no news items, so it may be missing opportunities").
+// It stays in the list the user sees, but is not given to the AI.
+function aiLimits(limits, run, workflow, ownName) {
+  if (!ownName) return limits;
+  const ownQueries = ((workflow && workflow.tasks) || []).filter((t) => {
+    if (!SEARCHES.includes(t.capability)) return false;
+    const cs = (t.inputs && t.inputs.companies) || [];
+    const r = run.results && run.results[t.task_id];
+    return cs.length > 0 && cs.every((n) => workflowTools.sameCompany(ownName, n)) && r && r.output && !(r.output.items || []).length;
+  }).map((t) => t.inputs.query).filter(Boolean);
+  return limits.filter((l) => !ownQueries.some((q) => l.includes(`"${q}"`)) && !l.includes(`${ownName} (one side of the comparison)`));
+}
+
 async function generateAnswer(run, workflow, understood, request, options = {}) {
   const book = sourceBook(run);
   let sections = buildSections(run, workflow, book);
@@ -498,7 +561,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
         question, today: new Date().toISOString().slice(0, 10),
         points: points.map((p) => `[${p.code}] (${p.kind}) ${cut(p.text, 400)} ${cites(p.sources)}`).join('\n'),
         confidence: { good: 'good evidence', some: 'some evidence', not_enough: 'not enough evidence' }[confidence.level],
-        limits: limits.length ? limits.join('. ') : 'nothing',
+        limits: aiLimits(limits, run, workflow, c.company_name).join('. ') || 'nothing',
       };
       const messages = [{ role: 'user', content: workflowTools.fillVars(template, vars) }];
       for (let k = 0; k < callsLeft && k < 2; k++) {
@@ -513,7 +576,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
         const parsed = workflowTools.readReplyText(reply);
         const text = parsed && typeof parsed.answer === 'string' ? parsed.answer : null;
         if (!text) { check.problems.push(`reply not readable: ${cut(reply, 200)}`); continue; }   // asked again only if a call is left
-        const res = checkSummary(text, book, points, question);
+        const res = checkSummary(text, book, points, question, understood && understood.client && understood.client.company_name);
         check.problems.push(...res.problems);
         if (res.problems.length) check.ai_text = cut(text, 600);
         if (res.ok) { summary = res.text; summaryBy = 'ai'; check.passed = true; } else { check.passed = false; }
@@ -530,8 +593,12 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   const answerText = nothing
     ? renderAnswer(summary, [], confidence, limits, [])
     : renderAnswer(summary, sections, confidence, limits, sources);
+  // the answer for the screen: no Sources block, and every source number a
+  // link the screen opens as that signal ("[2]" -> "[[2]](#source-2)")
+  const body = (nothing ? answerText : renderAnswer(summary, sections, confidence, limits, sources, false))
+    .replace(/\[(\d+)\](?!\()/g, (m, n) => (sources.some((x) => x.n === Number(n)) ? `[[${n}]](#source-${n})` : m));
   const out = {
-    status, answer_text: answerText, summary, summary_by: summaryBy,
+    status, answer_text: answerText, body, summary, summary_by: summaryBy,
     sections: nothing ? [] : sections, confidence, limits, sources: nothing ? [] : sources,
     ai_calls: aiCalls, check,
   };

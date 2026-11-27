@@ -37,7 +37,7 @@
  */
 
 const { getCapability, RUN_LIMITS } = require('./capabilityRegistry');
-const { standardPlace, placeCovers, PLACES, REGION_MEMBERS } = require('../placeNames');
+const { standardPlace, placeCovers, placeFromAdjective, PLACES, REGION_MEMBERS } = require('../placeNames');
 const {
   MODULE_IDS, SEARCH_COLLECTION, MIN_SEARCH_SCORE, SEARCH_WIDEN, RUN_TIME_LIMIT_MS, ITEM_TEXT_CHARS,
   SEARCH_MAX_PIECES, EXACT_READ_MAX_ROWS, TAGGED_MAX_SIGNALS, RARE_WORD_MAX_SIGNALS,
@@ -51,10 +51,10 @@ const COMPARE_BY_CODE_POINT = ANSWER_TEXT.compare_by_code_point;
 // Policy has no company column, Forward Outlook no country column;
 // titleCol: the title, read for a name the user typed, 26 Nov)
 const TABLES = {
-  policy: { table: 'policy_signals', dateCol: 'source_published_date', key: 'article_id', placeCol: 'country', titleCol: 'signal_title' },
-  market: { table: 'market_dynamics_signals', dateCol: 'published_date', key: 'article_id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title' },
-  outlook: { table: 'trend_signals', dateCol: 'source_published_date', key: 'article_id', companyCol: 'organization', titleCol: 'signal_title' },
-  competitor: { table: 'competitor_changes', dateCol: 'event_date', key: 'id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title' },
+  policy: { table: 'policy_signals', dateCol: 'source_published_date', key: 'article_id', placeCol: 'country', titleCol: 'signal_title', textCols: ['summary', 'chat_text'] },
+  market: { table: 'market_dynamics_signals', dateCol: 'published_date', key: 'article_id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title', textCols: ['summary', 'chat_text'] },
+  outlook: { table: 'trend_signals', dateCol: 'source_published_date', key: 'article_id', companyCol: 'organization', titleCol: 'signal_title', textCols: ['summary', 'chat_text'] },
+  competitor: { table: 'competitor_changes', dateCol: 'event_date', key: 'id', placeCol: 'country', companyCol: 'organization', titleCol: 'signal_title', textCols: ['summary', 'chat_text'] },
 };
 const moduleOfId = (id) => Object.keys(MODULE_IDS).find((k) => MODULE_IDS[k] === id) || null;
 
@@ -176,7 +176,10 @@ const hasWords = (text, phrase) => {
   return p.length >= 2 && ` ${plain(text)} `.includes(` ${p} `);
 };
 // the core of a company name: "The Estée Lauder Companies" -> "estee lauder"
-const LEGAL = new Set(['the', 'companies', 'company', 'group', 'inc', 'ltd', 'llc', 'plc', 'corp', 'corporation', 'holdings', 'co']);
+// (26 Nov, question bank: "Etraveli Group AB" — the legal forms used in
+// other countries too: AB, AG, GmbH, NV, BV, SpA, Pvt, Pte, Limited)
+const LEGAL = new Set(['the', 'companies', 'company', 'group', 'inc', 'ltd', 'llc', 'plc', 'corp', 'corporation', 'holdings', 'co',
+  'ab', 'ag', 'gmbh', 'nv', 'bv', 'spa', 'sarl', 'llp', 'limited', 'pvt', 'pte', 'private']);
 const companyCore = (n) => plain(n).split(' ').filter((w) => !LEGAL.has(w)).join(' ');
 // 26 Nov (browser: "updates about kbeauty" -> nothing found, "Kbeauty market"
 // -> other news; the data writes "K-Beauty"): a name written together, with a
@@ -218,7 +221,15 @@ function textNamesPlace(text, place) {
       if (s.length >= 2 && s.length < 4 && new RegExp(`(?<![A-Za-z])${s.toUpperCase().replace(/\./g, '\\.')}(?![A-Za-z])`).test(String(text))) return true;
     }
   }
-  return false;
+  // 26 Nov (question bank, Booking Holdings): a Global news item says
+  // "European Commission", "European Union", never "Europe" -> the place's
+  // adjective counts too ("European" -> Europe, "Indian" -> India), with the
+  // same adjective rule Step 5 uses (placeNames.placeFromAdjective)
+  const wanted = new Set(all);
+  return (String(text).match(/\p{L}{4,}/gu) || []).some((w) => {
+    const p = placeFromAdjective(w);
+    return Boolean(p && wanted.has(p));   // the place asked or one of its countries (never a bigger region)
+  });
 }
 
 // ── One row -> one evidence item (the EvidenceSet shape of the job list) ─
@@ -389,9 +400,15 @@ function filterItems(items, inputs, understood, notes, inData = false) {
   if (!companies.length) return { items: byDatePlaceLeftOut, reasons };
 
   // companies: the signal's company, or its text names the company
-  const matches = namesCompany;
+  const fz = inputs.fuzzy_rx ? new RegExp(inputs.fuzzy_rx, 'i') : null;
+  const matches = (it, n) => namesCompany(it, n) || Boolean(fz && (fz.test(`${it.title} ${it.text}`) || it.companies.some((c) => fz.test(c))));
   const kept = byDatePlaceLeftOut.filter((it) => companies.some((n) => matches(it, n)) || drop('another company'));
   if (kept.length) return { items: kept, reasons };
+  if (inData === 'nowhere') {
+    const note = `companies: ${companies.join(', ')} found nowhere in the data (company, title or text), so nothing was found`;
+    if (!notes.includes(note)) notes.push(note);
+    return { items: kept, reasons };
+  }
 
   // Nothing matched. A company the client list does not know and the data
   // never names ("K-beauty", "Gen Z") is searched by its words: the filter
@@ -464,6 +481,37 @@ function squeezedRegex(names) {
     .map((x) => x.split('').map((ch) => RX_ACCENTS[ch] || ch).join(RX_GAP));
   return one.length ? `(^|[^a-z0-9à-öø-ÿ])(${one.join('|')})([^a-z0-9à-öø-ÿ]|$)` : null;
 }
+// 26 Nov (question bank): a name typed with one letter left out or one
+// letter changed found nothing ("notno" = Notino, "rhamsydl" = Rhamsydil,
+// "faivleytech" = FaiveleyTech). Asked only when the name as written is
+// nowhere: every way of writing it with one letter more or one letter
+// changed, whole words only. Not for names under FUZZY_MIN letters, and not
+// for a word one letter away from an English word ("cosmtics" is a typo of
+// "cosmetics", not a name).
+const FUZZY_MIN = 5;
+const FUZZY_MAX = 20;
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('');
+function nearEnglishWord(x) {
+  for (let i = 0; i <= x.length; i += 1) {
+    for (const ch of ALPHABET) {
+      if (isEnglishWord(x.slice(0, i) + ch + x.slice(i))) return true;
+      if (i < x.length && ch !== x[i] && isEnglishWord(x.slice(0, i) + ch + x.slice(i + 1))) return true;
+    }
+  }
+  return false;
+}
+function fuzzyRegex(names) {
+  const alts = new Set();
+  for (const n of names) {
+    const x = squeeze(companyCore(n));
+    if (x.length < FUZZY_MIN || x.length > FUZZY_MAX || !/^[a-z0-9]+$/.test(x) || nearEnglishWord(x)) continue;
+    for (let i = 0; i <= x.length; i += 1) {
+      alts.add(`${x.slice(0, i)}${RX_LETTER}${x.slice(i)}`);                 // one letter left out
+      if (i < x.length) alts.add(`${x.slice(0, i)}${RX_LETTER}${x.slice(i + 1)}`);   // one letter changed
+    }
+  }
+  return alts.size ? `(^|[^a-z0-9à-öø-ÿ])(${[...alts].join('|')})([^a-z0-9à-öø-ÿ]|$)` : null;
+}
 function companyPatterns(inputs, understood) {
   const known = knownCompanies(understood);
   const pats = [];
@@ -472,7 +520,7 @@ function companyPatterns(inputs, understood) {
     if (plain(core).length < 3) continue;
     pats.push(known.some((k) => sameCompany(k, n)) ? likePattern(core, true) : likePattern(core, false).replace(/ /g, '_'));
   }
-  return pats.length ? { kind: 'company', patterns: [...new Set(pats)], regex: squeezedRegex(inputs.companies || []) } : null;
+  return pats.length ? { kind: 'company', patterns: [...new Set(pats)], regex: squeezedRegex(inputs.companies || []), fuzzy: fuzzyRegex(inputs.companies || []) } : null;
 }
 function tagPatterns(inputs, understood, kind = null) {
   if (kind !== 'place') {
@@ -505,8 +553,7 @@ async function readTags(tag, inputs, ctx, modules, { anyDate = false, limit = TA
     for (const column of columns.filter(Boolean)) {
       const ask = { clientId: ctx.clientId, keyCol: t.key, column, patterns: tag.patterns, dateCol: t.dateCol,
         from: anyDate ? null : inputs.date_from, to: anyDate ? null : readUntil(inputs, ctx.understood), limit };
-      const got = await s.readTagged(t.table, ask);
-      got.forEach((k) => keys.add(k));
+      if ((tag.patterns || []).length) (await s.readTagged(t.table, ask)).forEach((k) => keys.add(k));
       if (tag.regex) {
         try {
           (await s.readTagged(t.table, { ...ask, regex: tag.regex })).forEach((k) => keys.add(k));
@@ -521,7 +568,14 @@ async function readTags(tag, inputs, ctx, modules, { anyDate = false, limit = TA
   }));
   only.articleIds = [...new Set(only.articleIds)];
   only.pointIds = [...new Set(only.pointIds)];
-  return only.articleIds.length || only.pointIds.length ? only : null;
+  if (only.articleIds.length || only.pointIds.length) return only;
+  // nothing as written: the company name with one letter left out / changed
+  if (tag.kind === 'company' && tag.fuzzy && !tag.isFuzzy) {
+    const again = await readTags({ kind: 'company', patterns: [], regex: tag.fuzzy, isFuzzy: true }, inputs, ctx, modules, { anyDate, limit });
+    if (again) again.fuzzy = tag.fuzzy;
+    return again;
+  }
+  return null;
 }
 // ── Rare words of a search, looked up in the news titles (26 Nov) ────────
 // "updates about kbeauty": Step 5 read "kbeauty" as a topic word, and the
@@ -536,6 +590,7 @@ async function readTags(tag, inputs, ctx, modules, { anyDate = false, limit = TA
 // RARE_WORD_MAX_SIGNALS is common in this client's news: not used. Only
 // English words in the search -> nothing changes.
 let englishWordSet = null;
+const englishWordRank = new Map();   // the list is most-used first: its line number
 function englishWords() {
   if (englishWordSet) return englishWordSet;
   englishWordSet = new Set();
@@ -544,7 +599,7 @@ function englishWords() {
     const file = require('path').join(__dirname, 'data', 'englishWords.txt');
     for (const line of fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').split('\n')) {
       const w = line.trim().split(' ')[0];
-      if (w && /^[a-z]+$/.test(w)) englishWordSet.add(w);
+      if (w && /^[a-z]+$/.test(w)) { englishWordSet.add(w); if (!englishWordRank.has(w)) englishWordRank.set(w, englishWordRank.size + 1); }
     }
   } catch (e) { /* no word list: no word is rare, the search is as before */ }
   return englishWordSet;
@@ -573,12 +628,20 @@ function rareWordsOf(query, inputs, understood) {
   for (const raw of String(query || '').split(/\s+/)) {
     const t = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
     if (/[\p{L}\p{N}][.\-'’][\p{L}\p{N}]|\p{Ll}\p{Lu}/u.test(t) && rare(squeeze(t))) out.add(squeeze(t));
+    // 27 Nov (dbcheck on Hy4, "What is Greek law 5317/2026?"): a code
+    // number names one thing as surely as a rare word: "5317/2026",
+    // "2026/909", "1223/2009", or 4+ digits that are not a year ("5317").
+    // Years and counts are not looked up.
+    if (/^\d{2,}\/\d{2,}$/.test(t)) out.add(t.replace('/', ''));
+    else if (/^\d{4,}$/.test(t) && !(t.length === 4 && Number(t) >= 1900 && Number(t) <= 2099)) out.add(t);
   }
   return [...out];
 }
-async function rareWordSignals(rare, inputs, ctx, modules) {
+async function rareWordSignals(rare, inputs, ctx, modules, fuzzy = false) {
   const s = getStore();
-  const regex = squeezedRegex(rare);
+  // 26 Nov (question bank, "lg hair loss compound rhamsydl"): nothing as
+  // written -> the single words once more with one letter left out / changed
+  const regex = fuzzy ? fuzzyRegex(rare.filter((w) => !w.includes(' '))) : squeezedRegex(rare);
   if (!regex || typeof s.readTagged !== 'function') return null;
   const only = { kind: 'word', articleIds: [], pointIds: [], byModule: {} };
   try {
@@ -598,8 +661,9 @@ async function rareWordSignals(rare, inputs, ctx, modules) {
   only.articleIds = [...new Set(only.articleIds)];
   only.pointIds = [...new Set(only.pointIds)];
   const n = only.articleIds.length + only.pointIds.length;
-  if (!n) return null;
+  if (!n) return fuzzy ? null : rareWordSignals(rare, inputs, ctx, modules, true);
   if (n > RARE_WORD_MAX_SIGNALS) return { common: n };
+  if (fuzzy) only.fuzzy = true;
   return only;
 }
 
@@ -608,15 +672,22 @@ async function rareWordSignals(rare, inputs, ctx, modules) {
 // something the data has is never "too vague". A failed read -> [].
 async function wordsInTitles(text, clientId) {
   const rare = rareWordsOf(text, {}, null);
-  const regex = rare.length ? squeezedRegex(rare) : null;
   const s = getStore();
-  if (!regex || !clientId || typeof s.readTagged !== 'function') return [];
-  try {
+  if (!rare.length || !clientId || typeof s.readTagged !== 'function') return [];
+  const single = rare.filter((w) => !w.includes(' '));
+  const inTitles = async (regex) => {
+    if (!regex) return false;
     const hits = await Promise.all(Object.keys(TABLES).map((m) => {
       const t = TABLES[m];
       return s.readTagged(t.table, { clientId, keyCol: t.key, column: t.titleCol, regex, dateCol: t.dateCol, limit: 1 });
     }));
-    return hits.some((h) => h.length) ? rare.filter((w) => !w.includes(' ')) : [];
+    return hits.some((h) => h.length);
+  };
+  try {
+    if (await inTitles(squeezedRegex(rare))) return single;
+    // 26 Nov (question bank, "notno ai decision-making"): a name typed with
+    // one letter left out / changed (Notino)
+    return (await inTitles(fuzzyRegex(single))) ? single : [];
   } catch (e) {
     return [];
   }
@@ -632,12 +703,72 @@ async function taggedSignals(inputs, ctx, modules) {
 // Does the database name a company asked, at any date (its company field or
 // title)? Asked only when the dates found none: "nothing in these dates"
 // must not turn into "the data never names it" (then its words are searched).
+// 26 Nov (question bank): also the news TEXT (a company named only there,
+// "Etraveli Group AB"), and when the database holds the name in no field
+// at all and the name has a word that is not English ("Fenbelqor
+// Botanics", "Trosulrix Labs"), the answer is "nothing found" ('nowhere'):
+// searching its other words ("botanics", "labs") brought unrelated news as
+// if it were about that name. A name of English words only ("Gen Z") is
+// still searched by its words. Found only with one letter left out or
+// changed: 'fuzzy' (the filter then accepts that spelling, fuzzyOf).
 async function companyInData(inputs, ctx, modules, tagged) {
   const tag = tagPatterns(inputs, ctx.understood, 'company');
   if (!tag) return false;
-  if (tagged && tagged.kind === 'company') return true;
-  return Boolean(await readTags(tag, inputs, ctx, modules, { anyDate: true, limit: 1 }));
+  if (tagged && tagged.kind === 'company') return tagged.fuzzy ? 'fuzzy' : true;
+  const found = await readTags(tag, inputs, ctx, modules, { anyDate: true, limit: 1 });
+  if (found) return found.fuzzy ? 'fuzzy' : true;
+  if (!tag.regex) return false;
+  const s = getStore();
+  let readOk = true;
+  for (const m of modules) {
+    const t = TABLES[m];
+    for (const column of t.textCols || []) {
+      try {
+        const got = await s.readTagged(t.table, { clientId: ctx.clientId, keyCol: t.key, column, regex: tag.regex, dateCol: t.dateCol, limit: 1 });
+        if (got.length) return true;
+        break;   // this table has this text column: no need for the other one
+      } catch (e) { readOk = false; }
+    }
+  }
+  const rare = (inputs.companies || []).some((n) => rareWordsOf(n, {}, ctx.understood).some((w) => !w.includes(' ')));
+  return readOk && rare ? 'nowhere' : false;
 }
+// 27 Nov (bank run on Hy4, "faivleytech sustainable packaging"): the AI
+// wrote the name as "FairleyTech" (one letter changed from what the user
+// typed), and that spelling is two letters away from the data's
+// "FaiveleyTech", so nothing was found. When a company asked is nowhere in
+// the data, the user's own word that is at most 2 letters away from it is
+// looked up the same way (company field, title, one letter left out or
+// changed); found -> that word is the company searched (noted). Only a
+// typed word that is not English and close to the name: another rare word
+// of the question is never taken for the company.
+const TYPED_NAME_MAX_LETTERS = 2;
+function lettersApart(a, b) {
+  if (Math.abs(a.length - b.length) > TYPED_NAME_MAX_LETTERS) return TYPED_NAME_MAX_LETTERS + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+async function typedNameFor(inputs, ctx, modules) {
+  const typed = (ctx.understood && ctx.understood.question_typed) || '';
+  if (!typed) return null;
+  const names = (inputs.companies || []).map((n) => squeeze(companyCore(n))).filter(Boolean);
+  const words = rareWordsOf(typed, { countries: inputs.countries }, ctx.understood).filter((w) => !w.includes(' '));
+  for (const w of words) {
+    const x = squeeze(w);
+    if (names.includes(x) || !names.some((n) => lettersApart(x, n) <= TYPED_NAME_MAX_LETTERS)) continue;
+    const tryInputs = { ...inputs, companies: [w] };
+    const found = await readTags(tagPatterns(tryInputs, ctx.understood, 'company'), tryInputs, ctx, modules, { anyDate: true, limit: 1 });
+    if (found) return w;
+  }
+  return null;
+}
+// the filter accepts a name found only with one letter left out / changed
+const fuzzyOf = (inputs, only, inData) => (inData === 'fuzzy' ? (only && only.fuzzy) || fuzzyRegex(inputs.companies || []) : null);
 
 // ── The two search jobs ──────────────────────────────────────────────────
 const modulesOf = (inputs) => (inputs.modules && inputs.modules.length ? inputs.modules : Object.keys(TABLES)).filter((m) => TABLES[m]);
@@ -712,7 +843,54 @@ function finish(items, label, reasons, notes, max) {
 // signals of the first 200 pieces).
 const addReasons = (into, from) => { for (const [k, v] of Object.entries(from)) into[k] = (into[k] || 0) + v; };
 
+// 27 Nov (bank run on Hy4, "Should we be concerned about a competitor's
+// safety issues with eyelash serums in the US?"): "a competitor" became the
+// client's competitor list, the search was kept to their news, and it
+// brought 4 Estee Lauder items (data breach, ads) with no word about
+// eyelashes or serums; the news about the eyelash serums (an unnamed
+// cosmetics company) was never read. When the companies of a search come
+// only from the word "competitors" (the user named none) and NONE of the
+// news found holds the RAREST word of the question's topics (past the
+// COMMON_WORD_RANK most used English words, or not English at all:
+// "eyelash"; "serum" alone is not enough, a serum launch is not about
+// eyelash serums), the search is done again without the company filter,
+// and only the news holding that word is kept (noted, the
+// competitor news left out is counted). Competitor news that holds the
+// topic word, or topics of common words only ("awards"): nothing changes.
+const COMMON_WORD_RANK = 5000;
+function uncommonTopicWords(inputs, understood) {
+  const u = understood || {};
+  const names = new Set([...(inputs.companies || []), ...(inputs.countries || []), u.client && u.client.company_name]
+    .filter(Boolean).flatMap((n) => plain(n).split(' ')));
+  const rankOf = (w) => {
+    englishWords();
+    if (englishWordRank.has(w)) return englishWordRank.get(w);
+    const base = WORD_ENDINGS.map((e) => (w.endsWith(e) ? w.slice(0, -e.length) : null)).filter((b) => b && englishWordRank.has(b));
+    return base.length ? Math.min(...base.map((b) => englishWordRank.get(b))) : Infinity;
+  };
+  const words = [...(u.topics || []), ...(u.products || [])].flatMap((t) => plain(t).split(' '));
+  const rare = [...new Set(words.filter((w) => w.length >= 4 && /^[a-z]+$/.test(w) && !names.has(w) && rankOf(w) > COMMON_WORD_RANK))];
+  return rare.sort((a, b) => rankOf(b) - rankOf(a)).slice(0, 1);   // the rarest one
+}
+const stemOf = (w) => (w.length > 5 && w.endsWith('es') ? w.slice(0, -2) : w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w);
+const holdsWord = (it, words) => { const t = ` ${plain(`${it.title} ${it.text || ''}`)}`; return words.some((w) => t.includes(` ${stemOf(w)}`)); };
 async function retrieveData(inputs, ctx) {
+  const out = await retrieveDataOnce(inputs, ctx);
+  const u = ctx.understood || {};
+  if (!u.all_competitors || (u.companies || []).length || !(inputs.companies || []).length || !out.items) return out;
+  const words = uncommonTopicWords(inputs, u);
+  if (!words.length || out.items.some((it) => holdsWord(it, words))) return out;
+  const wide = await retrieveDataOnce({ ...inputs, companies: [] }, ctx);
+  const onTopic = (wide.items || []).filter((it) => holdsWord(it, words));
+  if (!onTopic.length) return out;
+  const note = `none of the ${out.items.length} news of the competitors (${inputs.companies.join(', ')}) holds ${words.map((w) => `"${w}"`).join(', ')}, so they are left out and the news of other companies holding it is shown`;
+  const reasons = { ...((wide.removed && wide.removed.reasons) || {}) };
+  if (out.items.length) reasons['competitor news not about the topic'] = out.items.length;
+  if (wide.items.length > onTopic.length) reasons['other news not about the topic'] = wide.items.length - onTopic.length;
+  const count = Object.values(reasons).reduce((a, b) => a + b, 0);
+  return { ...wide, items: onTopic, removed: { count, reasons }, note: [note, wide.note].filter(Boolean).join('; ') };
+}
+async function retrieveDataOnce(inputs, ctx) {
   const s = getStore();
   const notes = [];
   const reasons = {};
@@ -787,6 +965,17 @@ async function retrieveData(inputs, ctx) {
   t0 = Date.now();
   let only = codeFilters ? await taggedSignals(inputs, ctx, modules) : null;
   inData = (inputs.companies || []).length ? await companyInData(inputs, ctx, modules, only) : false;
+  if (inData === 'nowhere') {
+    const w = await typedNameFor(inputs, ctx, modules);
+    if (w) {
+      notes.push(`companies: ${inputs.companies.join(', ')} found nowhere in the data; the word as typed, "${w}", is, so it is searched`);
+      inputs = { ...inputs, companies: [w] };
+      only = codeFilters ? await taggedSignals(inputs, ctx, modules) : null;
+      inData = await companyInData(inputs, ctx, modules, only);
+    }
+  }
+  const fz = fuzzyOf(inputs, only, inData);
+  if (fz) { inputs = { ...inputs, fuzzy_rx: fz }; notes.push(`companies: ${inputs.companies.join(', ')} found in the data with one letter more or changed`); }
   // no company / place tag: the rare words of the search, in the titles
   if (!only) {
     const rare = rareWordsOf(inputs.query, inputs, ctx.understood);
@@ -811,8 +1000,36 @@ async function retrieveData(inputs, ctx) {
       const byModule = new Map(modules.map((m) => [m, new Map(((only.byModule && only.byModule[m]) || []).map((k) => [k, { score: null, url: null }]))]));
       for (const [m, keys] of byModule) for (const k of keys.keys()) seen.add(`${m}:${k}`);
       t0 = Date.now();
-      const items = await rowsToItems(byModule, ctx.clientId, reasons);
+      let items = await rowsToItems(byModule, ctx.clientId, reasons);
       timing.rows_ms += Date.now() - t0;
+      // 26 Nov (question bank, "south africn cloud market growth"): the 14
+      // news tagged South Africa were read whole with no closeness, so they
+      // all came first and beauty news beat the cloud news. Now they get
+      // their closeness from the search index too (the search among them).
+      // A place holds news on every topic: one too far from the question is
+      // dropped like in any search. A company or a rare title word is
+      // narrow, so its news stays. News with nothing in the search index
+      // (Ghana "FDA seizes 4,504 …") stays, after the close ones (rank).
+      t0 = Date.now();
+      try {
+        const got = await ask(0, only);
+        const best = new Map();
+        for (const pc of got.pieces || []) {
+          const pl = pc.payload || {};
+          const m = moduleOfId(pl.module_id);
+          const k = `${m}:${m === 'competitor' ? (pl.change_id || pc.id) : pl.article_id}`;
+          if (pc.score != null && (!best.has(k) || pc.score > best.get(k))) best.set(k, pc.score);
+        }
+        items = items.map((it) => {
+          const k = `${it.module}:${it.module === 'competitor' ? it.signal_id : it.article_id}`;
+          return best.has(k) ? { ...it, score: Math.round(best.get(k) * 1000) / 1000 } : it;
+        }).filter((it) => {
+          if (only.kind !== 'place' || it.score == null || it.score >= MIN_SEARCH_SCORE) return true;
+          reasons['too far from the question'] = (reasons['too far from the question'] || 0) + 1;
+          return false;
+        });
+      } catch (e) { /* no closeness: the order as read */ }
+      timing.search_ms += Date.now() - t0;
       const f = applyFilters(items, inputs, ctx.understood, notes, inData);
       addReasons(reasons, f.reasons);
       kept = kept.concat(f.items);
@@ -831,9 +1048,9 @@ async function retrieveData(inputs, ctx) {
   // there are fewer than 20 signals
   await readPages(null);
   timing.pages = pages;
-  // the tagged news read whole (no score) first: the database itself says
-  // they are about the place / company asked
-  const rank = (x) => (wordTitled.has(x.source_id) ? 10 : 0) + (x.score == null ? 2 : x.score);
+  // closest first; news with nothing in the search index (no score) just
+  // after the close ones; news found by a rare word of its title first
+  const rank = (x) => (wordTitled.has(x.source_id) ? 10 : 0) + (x.score == null ? MIN_SEARCH_SCORE : x.score);
   kept.sort((a, b) => rank(b) - rank(a));
   kept = onlyTogether(allNamesFirst(kept, inputs.companies), inputs, ctx, reasons, notes);
   const out = await noteNewest(finish(kept, inputs.label || inputs.query, reasons, notes, max), inputs, ctx, modules);
@@ -866,6 +1083,86 @@ function fairShare(perModule, max, reasons) {
   const rest = lists.flatMap((l) => l.slice(share)).sort(newest);
   const fill = rest.slice(0, Math.max(0, max - chosen.length));
   return [...chosen, ...fill].sort(newest).concat(rest.slice(fill.length));
+}
+// 27 Nov (dbcheck on Hy4, "UK cosmetics regulation changes in 2026": the
+// 19 newest news were all from 3-4 November, so 11 months were shown as 2
+// days): a list over a LONG period (more than SPREAD_AFTER_DAYS) takes the
+// news in turns from each month, newest month first and newest first inside
+// a month (modules in turns too), so the whole period is covered. The
+// chosen ones are shown newest first; the rest after them ("more than 20").
+const SPREAD_AFTER_DAYS = 62;
+// 27 Nov (C2, "UK cosmetics regulation changes in 2026": "UK SAG-CS Final
+// Safety Opinions" was the oldest of a busy September, so newest-first
+// inside the month left it out; "Lush parental leave" got its place): when
+// a long-period list has more news than fit, each news item gets its
+// closeness to the QUESTION from the search index (the same index as a
+// search by meaning, only among these news; no AI call). News with nothing
+// in the index counts as just at the bar (kept, after the close ones).
+// A failed read changes nothing (newest first, as before).
+async function closenessToQuestion(items, ctx, modules) {
+  const s = getStore();
+  const text = (ctx.understood && (ctx.understood.question_text || ctx.understood.question_typed)) || '';
+  if (!String(text).trim() || typeof s.embed !== 'function') return null;
+  const only = { articleIds: [], pointIds: [] };
+  for (const it of items) (it.module === 'competitor' ? only.pointIds : only.articleIds).push(it.module === 'competitor' ? it.signal_id : it.article_id);
+  try {
+    const vector = await s.embed(text);
+    const got = await s.searchPieces({ vector, clientId: ctx.clientId, moduleIds: modules.map((m) => MODULE_IDS[m]), limit: Math.min(items.length * 5, SEARCH_MAX_PIECES), offset: 0, only });
+    const byKey = new Map();
+    for (const pc of got.pieces || []) {
+      const pl = pc.payload || {};
+      const m = moduleOfId(pl.module_id);
+      const k = `${m}:${m === 'competitor' ? (pl.change_id || pc.id) : pl.article_id}`;
+      if (pc.score != null && (!byKey.has(k) || pc.score > byKey.get(k))) byKey.set(k, pc.score);
+    }
+    const out = new Map();
+    for (const it of items) {
+      const k = `${it.module}:${it.module === 'competitor' ? it.signal_id : it.article_id}`;
+      if (byKey.has(k)) out.set(it.source_id, byKey.get(k));
+    }
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+function periodDays(inputs) {
+  if (!inputs.date_from) return 0;
+  const to = inputs.date_to ? new Date(inputs.date_to) : new Date();
+  return (to - new Date(inputs.date_from)) / 86400000;
+}
+function spreadOverMonths(perModule, max, reasons, closeness = null) {
+  const newest = (a, b) => String(b.date || '').localeCompare(String(a.date || ''));
+  // (C2) inside a month: the news closest to the question first, then newest
+  const score = (it) => (closeness && closeness.has(it.source_id) ? closeness.get(it.source_id) : MIN_SEARCH_SCORE);
+  const inMonth = closeness ? (a, b) => score(b) - score(a) || newest(a, b) : newest;
+  const titles = new Set();
+  const all = perModule.flat().slice().sort(newest).filter((it) => {
+    const k = plain(it.title);
+    if (k && titles.has(k)) { reasons['the same news twice'] = (reasons['the same news twice'] || 0) + 1; return false; }
+    if (k) titles.add(k);
+    return true;
+  });
+  const byMonth = new Map();
+  for (const it of all) {
+    const m = String(it.date || '').slice(0, 7) || 'none';
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(it);
+  }
+  // inside a month: the modules in turns, each newest first
+  const queues = [...byMonth.keys()].sort((a, b) => (a === 'none') - (b === 'none') || b.localeCompare(a)).map((m) => {
+    const mods = new Map();
+    for (const it of byMonth.get(m)) { if (!mods.has(it.module)) mods.set(it.module, []); mods.get(it.module).push(it); }
+    const lists = [...mods.values()].map((l) => l.sort(inMonth));
+    const out = [];
+    for (let i = 0; lists.some((l) => l[i]); i += 1) lists.forEach((l) => { if (l[i]) out.push(l[i]); });
+    return out;
+  });
+  const chosen = [];
+  for (let i = 0; chosen.length < max && queues.some((q) => q[i]); i += 1) {
+    for (const q of queues) { if (q[i] && chosen.length < max) chosen.push(q[i]); }
+  }
+  const picked = new Set(chosen.map((it) => it.source_id));
+  return { items: [...chosen.sort(newest), ...all.filter((it) => !picked.has(it.source_id))], months: queues.length };
 }
 // 26 Nov (browser: "recent regulatory filings in last 3 days" -> nothing
 // found; the newest news in the data was 17 Nov): an empty search with
@@ -924,9 +1221,23 @@ async function structuredSearch(inputs, ctx) {
   // company only in its text).
   const started = Date.now();
   const modules = modulesOf(inputs);
-  const named = (inputs.companies || []).length ? await readTags(tagPatterns(inputs, ctx.understood, 'company'), inputs, ctx, modules) : null;
-  const inData = (inputs.companies || []).length ? await companyInData(inputs, ctx, modules, named) : false;
+  let named = (inputs.companies || []).length ? await readTags(tagPatterns(inputs, ctx.understood, 'company'), inputs, ctx, modules) : null;
+  let inData = (inputs.companies || []).length ? await companyInData(inputs, ctx, modules, named) : false;
+  if (inData === 'nowhere') {
+    const w = await typedNameFor(inputs, ctx, modules);
+    if (w) {
+      notes.push(`companies: ${inputs.companies.join(', ')} found nowhere in the data; the word as typed, "${w}", is, so it is searched`);
+      inputs = { ...inputs, companies: [w] };
+      named = await readTags(tagPatterns(inputs, ctx.understood, 'company'), inputs, ctx, modules);
+      inData = await companyInData(inputs, ctx, modules, named);
+    }
+  }
+  const fz = fuzzyOf(inputs, named, inData);
+  if (fz) { inputs = { ...inputs, fuzzy_rx: fz }; notes.push(`companies: ${inputs.companies.join(', ')} found in the data with one letter more or changed`); }
   if (named) timing.named_signals = named.articleIds.length + named.pointIds.length;
+  // a long period is read whole (like "by impact"), then spread over its months
+  const spread = inputs.order !== 'impact' && periodDays(inputs) > SPREAD_AFTER_DAYS;
+  const readWhole = inputs.order === 'impact' || spread;
   // the modules are read at the same time (each page after page)
   const perModule = await Promise.all(modules.map(async (module) => {
     const t = TABLES[module];
@@ -940,7 +1251,7 @@ async function structuredSearch(inputs, ctx) {
       got = keep(await itemsFromRows(module, rows, null, ctx.clientId, reasons), inData);
     }
     for (let offset = 0; offset < EXACT_READ_MAX_ROWS; offset += page) {
-      if (inputs.order !== 'impact' && got.length >= max) break;
+      if (!readWhole && got.length >= max) break;
       const rows = await s.readRecent(t.table, {
         clientId: ctx.clientId, dateCol: t.dateCol, from: inputs.date_from, to: readUntil(inputs, ctx.understood), limit: page, offset,
       });
@@ -948,7 +1259,7 @@ async function structuredSearch(inputs, ctx) {
       timing.pages += 1;
       // newest first: once this module has enough, older pages are not
       // needed; by impact, the whole period is read (up to the cap)
-      if (rows.length < page || (inputs.order !== 'impact' && got.length >= max)) break;
+      if (rows.length < page || (!readWhole && got.length >= max)) break;
       if (offset + page >= EXACT_READ_MAX_ROWS) notes.push(`${module}: only the newest ${EXACT_READ_MAX_ROWS} signals were read`);
     }
     // the named news (read first) and the pages in one newest-first order
@@ -959,6 +1270,12 @@ async function structuredSearch(inputs, ctx) {
   let items = perModule.flat();
   if (inputs.order === 'impact') {
     items.sort((a, b) => (IMPACT_RANK[String(b.impact || '').toLowerCase()] || 0) - (IMPACT_RANK[String(a.impact || '').toLowerCase()] || 0) || String(b.date).localeCompare(String(a.date)));
+  } else if (spread) {
+    const all = perModule.flat();
+    const closeness = all.length > max ? await closenessToQuestion(all, ctx, modules) : null;
+    const sp = spreadOverMonths(perModule, max, reasons, closeness);
+    items = sp.items;
+    if (sp.months > 1) notes.push(`the period is long: the news is taken in turns from each of its ${sp.months} months (${closeness ? 'closest to the question' : 'newest'} first inside a month)`);
   } else {
     items = fairShare(perModule, max, reasons);
   }
@@ -1345,11 +1662,16 @@ function namedInQuestion(ctx) {
   const words = rareWordsOf(baseVars(ctx).question, { companies }, u).filter((w) => !w.includes(' '));
   return { companies, words };
 }
-function onlyAboutAsked(findings, ctx, reasons) {
+// 26 Nov (question bank, "Should we be concerned about Estée Lauder's
+// increased presence in India?" -> India crackdown risks first; Rhamsydil ->
+// trends about the whole industry): also for trends, gaps, ideas and risks
+// (withText: a point whose own words name it counts too).
+function onlyAboutAsked(findings, ctx, reasons, withText = false) {
   const { companies, words } = namedInQuestion(ctx);
   if (!findings.length || (!companies.length && !words.length)) return findings;
   const rx = words.length ? new RegExp(squeezedRegex(words), 'i') : null;
-  const about = (f) => f.sources.some((id) => {
+  const names = (text) => companies.some((c) => hasWords(text, companyCore(c)) || namesWordRun(text, c)) || Boolean(rx && rx.test(text));
+  const about = (f) => (withText && names([f.text, f.name, f.why, f.why_it_matters].filter(Boolean).join(' '))) || f.sources.some((id) => {
     const it = ctx.sources.get(id);
     return it && (companies.some((c) => namesCompany(it, c)) || (rx && rx.test(`${it.title} ${it.text}`)));
   });
@@ -1383,6 +1705,9 @@ const NOTHING_PASSED = 'nothing the AI wrote passed the checks';
 // the 25 Nov "€5.7 million in refills" can not come back: the sentence says
 // "water infrastructure"). No such sentence in its sources -> removed.
 const SHORT_FACT_WORDS = 4;   // fewer than this (and at least 2) = a short fact
+// small joining words a name or a title may hold ("Packaging and Packaging
+// Waste Regulation", "Bank of America") — a small fixed grammar set
+const LABEL_GLUE = new Set(['and', 'of', 'the', 'for', 'in', 'on', 'at', 'to', 'a', 'an', 'by', 'with', 'de', 'la', 'le', 'du', 'des', 'et']);
 const factTokens = (t) => plain(t).split(' ').filter((w) => w && (/\d/.test(w) || (w.length >= 3 && !GRAMMAR_WORDS.has(w) && !['the', 'and', 'for', 'not'].includes(w)))).map(stem);
 function newsSentence(text, sourceIds, ctx) {
   const need = [...new Set(factTokens(text))];
@@ -1414,15 +1739,34 @@ async function extractFacts(inputs, ctx) {
     // refills: €5.7 million" was made from a water-plant article — the number
     // was real, but the AI's "about" made a claim the news does not make.)
     let text = f && f.text;
-    const wordCount = (String(text || '').match(/\p{L}{2,}|\d+/gu) || []).length;
+    // (26 Nov, question bank: "144.5" is one number, it was counted as two,
+    // so "Rs 144.5 crore" passed as a 4-word fact)
+    const words = String(text || '').match(/\p{L}{2,}|\d+(?:[.,]\d+)*/gu) || [];
+    const wordCount = words.length;
+    // 26 Nov (question bank): a LABEL is not a fact either — only names and
+    // numbers ("LG Household & Health Care", "The European Union's Packaging
+    // and Packaging Waste Regulation"); nor a PIECE cut from a sentence
+    // ("65, replacing the dates …"). Both are replaced by the news sentence
+    // holding them, or removed. A fact starting with a small letter ("adds
+    // migration limits …") is replaced when the news has that sentence,
+    // else kept as written.
+    const label = wordCount >= 2 && words.every((w) => /^\d/.test(w) || /^\p{Lu}/u.test(w) || LABEL_GLUE.has(w.toLowerCase()));
+    const piece = /^\s*\d[\d.,]*\s*[,;)]/.test(String(text || ''));
+    const small = /^\s*\p{Ll}/u.test(String(text || ''));
+    const must = wordCount >= 2 && (wordCount < SHORT_FACT_WORDS || label || piece);
     // (one word or none: removed as "too short" by makePoint, as before;
     // no real source: makePoint says why, as before)
-    const ids = wordCount >= 2 && wordCount < SHORT_FACT_WORDS ? sourcesFrom(rawSources(f), n, {}, null).ids : [];
+    const ids = must || small ? sourcesFrom(rawSources(f), n, {}, null).ids : [];
     if (ids.length) {
       const sentence = newsSentence(text, ids, ctx);
-      if (!sentence) { count(reasons, 'a short fact the news does not say in a sentence'); example(ctx, 'short fact, no news sentence', f); return null; }
-      count(reasons, 'a short fact written as the news sentence holding it');
-      text = sentence;
+      if (!sentence && must) {
+        const why = wordCount < SHORT_FACT_WORDS ? 'a short fact the news does not say in a sentence' : label ? 'a label (names only) the news does not say in a sentence' : 'a piece of a sentence the news does not say whole';
+        count(reasons, why); example(ctx, why, f); return null;
+      }
+      if (sentence) {
+        count(reasons, must ? 'a short fact, label or piece written as the news sentence holding it' : 'a fact starting in the middle written as the news sentence holding it');
+        text = sentence;
+      }
     }
     return makePoint(f, n, ctx, reasons, { text, kind: 'fact', extra: { about } });
   }).filter(Boolean);
@@ -1468,7 +1812,7 @@ async function compare(inputs, ctx) {
   const reasons = {};
   const notes = [];
   const letters = ['A', 'B', 'C', 'D'];
-  const sides = [].concat(inputs.sides || []).slice(0, 4).map((sd, k) => {
+  let sides = [].concat(inputs.sides || []).slice(0, 4).map((sd, k) => {
     const r = resultOf(sd.ref, ctx);
     const all = r && Array.isArray(r.output.items) ? r.output.items : [];
     const picked = pickItems([all], Math.floor(RUN_LIMITS.max_items_to_ai / Math.max(2, (inputs.sides || []).length)));
@@ -1487,7 +1831,29 @@ async function compare(inputs, ctx) {
     // a row of the table and gives it to the short answer
     found: sides.map((sd) => ({ label: sd.label, count: sd.found, sources: sd.all.slice(0, 3).map((it) => it.source_id) })),
     rows, differences, empty_sides: sides.filter((sd) => !sd.items.length).map((sd) => sd.label),
+    ...(ownNotCompared ? { own_not_compared: ownNotCompared } : {}),
   });
+  // 26 Nov (question bank, "What does Estée Lauder's Skin Longevity
+  // Institute mean for Lumière?"): the side "Lumière" had no news (the data
+  // is news about the market, not about the client), every cell said "no
+  // news found" and the answer read it as a fact ("Lumière has no news
+  // items, so it may be missing opportunities"). The client's own side with
+  // no news is not compared (said in plain words); the other side's news
+  // goes on as it is.
+  const ownName = ctx.understood && ctx.understood.client && ctx.understood.client.company_name;
+  const ownEmpty = ownName ? sides.filter((sd) => !sd.items.length && sameCompany(ownName, sd.label)) : [];
+  let ownNotCompared = null;
+  if (ownEmpty.length && sides.some((sd) => sd.items.length)) {
+    sides = sides.filter((sd) => !ownEmpty.includes(sd));
+    ownNotCompared = ownName;
+    notes.push(`no news about ${ownName} itself in the data, so it is not compared`);
+    if (sides.length < 2) {
+      // one side left: its main news (3 best, by title), made by code
+      const cells = {};
+      for (const sd of sides) { const top = sd.items.slice(0, 3); cells[sd.label] = { text: top.map((it) => cut(it.title, 120)).join('; '), sources: top.map((it) => it.source_id) }; }
+      return finishAi({ ...out([{ point: COMPARE_BY_CODE_POINT, cells }], []) }, reasons, notes);
+    }
+  }
   const emptySides = sides.filter((sd) => !sd.items.length).map((sd) => sd.label);
   if (emptySides.length) notes.push(`no news found for: ${emptySides.join(', ')} (its cells stay empty)`);
   if (emptySides.length === sides.length) return finishAi(out([], []), reasons, [NO_EVIDENCE, ...notes]);
@@ -1639,7 +2005,7 @@ async function identifyPatterns(inputs, ctx) {
     });
   }
   patterns.sort((a, b) => (a.kind === b.kind ? b.source_count - a.source_count : a.kind === 'trend' ? -1 : 1));
-  return finishAi({ patterns }, reasons, notes, g);
+  return finishAi({ patterns: onlyAboutAsked(patterns.map((x) => ({ ...x, text: x.description })), ctx, reasons, true).map(({ text, ...x }) => x) }, reasons, notes, g);
 }
 
 // ── DI – 10 / 11 / 12. gaps, opportunities, risks ────────────────────────
@@ -1651,7 +2017,7 @@ async function identifyGaps(inputs, ctx) {
   const p = await askAi('identify_gaps', { evidence: n.text }, ctx, needsList('gaps'), 800);
   const findings = p.gaps.slice(0, 6).map((x) => makePoint(x, n, ctx, reasons, { text: x && x.text, kind: 'interpretation' })).filter(Boolean)
     .map((f) => ({ ...f, kind: weaker(f.kind, 'interpretation') }));
-  return finishAi({ findings }, reasons, [], g);
+  return finishAi({ findings: onlyAboutAsked(findings, ctx, reasons, true) }, reasons, [], g);
 }
 
 async function discoverOpportunities(inputs, ctx) {
@@ -1663,7 +2029,7 @@ async function discoverOpportunities(inputs, ctx) {
   const findings = p.opportunities.slice(0, 6)
     .map((x) => makePoint(x, n, ctx, reasons, { text: x && x.text, kind: 'hypothesis', extra: { why: cut(x && x.why, 300) } })).filter(Boolean)
     .map((f) => ({ ...f, kind: 'hypothesis' }));
-  return finishAi({ findings }, reasons, [], g);
+  return finishAi({ findings: onlyAboutAsked(findings, ctx, reasons, true) }, reasons, [], g);
 }
 
 const IMPACT_ORDER = ['Critical', 'High', 'Medium', 'Low'];
@@ -1683,7 +2049,7 @@ async function analyseRisks(inputs, ctx) {
   }).filter(Boolean);
   const rank = (l) => (l ? IMPACT_ORDER.indexOf(l) : IMPACT_ORDER.length);
   findings.sort((a, b) => rank(a.level) - rank(b.level));
-  return finishAi({ findings }, reasons, [], g);
+  return finishAi({ findings: onlyAboutAsked(findings, ctx, reasons, true) }, reasons, [], g);
 }
 
 // ── validate_evidence (code only, no AI) ─────────────────────────────────
@@ -1916,7 +2282,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 }
 
 module.exports = {
-  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, wordsInTitles, rareWordsOf, namesTogether,
+  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

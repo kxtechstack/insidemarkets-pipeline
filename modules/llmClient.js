@@ -12,7 +12,7 @@
 
 const axios = require('axios');
 
-const { apiUrl, apiKey, model } = require('./llmConfig');
+const { apiUrl, apiKey, model, extraBody, extraBodyProblem } = require('./llmConfig');
 // Records each AI call in Phoenix, but ONLY during a DI chat question and
 // ONLY when the .env has PHOENIX_COLLECTOR_ENDPOINT. Otherwise it does nothing.
 const { traceLLM } = require('./dynamicRag/chatTracing');
@@ -20,6 +20,9 @@ const { traceLLM } = require('./dynamicRag/chatTracing');
 const LLM_API_URL = apiUrl;
 const LLM_MODEL = model;
 const LLM_API_KEY = apiKey;
+// extra settings for every call, from .env LLM_EXTRA_BODY (see llmConfig.js)
+const LLM_EXTRA_BODY = extraBody;
+if (extraBodyProblem) console.log(`  [llmClient] WARNING: ${extraBodyProblem}`);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -43,11 +46,11 @@ const callLLM = async (messages, options = {}) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const requestBody = {
+        ...LLM_EXTRA_BODY,   // first, so it can never change the fields below
         model: LLM_MODEL,
         messages,
         temperature,
         max_tokens,
-        reasoning_effort: 'low',
       };
       const response = await traceLLM(requestBody, () => axios.post(LLM_API_URL, requestBody, {
         timeout,

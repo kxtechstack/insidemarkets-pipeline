@@ -197,15 +197,22 @@ function userMessage(cleaned) {
 // question (not an English word: "Dr.Althea", "cosmetotextiles", "kbeauty")
 // is in the client's news titles -> it names something real: accept.
 // lookup(text) gives the words found (runWorkflow.wordsInTitles).
+// 26 Nov (question bank: "lg hair loss compound rhamsydil", "humble bee bio
+// elastrix discovery", "notno ai decision-making" were REJECTED as not
+// business): the same check when the AI says no — a question naming
+// something the client's own news titles hold is about that news. A
+// greeting is never changed; nothing found -> the AI's answer stands.
 async function decideWithData(ai, cleaned, lookup) {
   const d = decide(ai, cleaned);
-  if (d.status !== 'clarification' || ai.label !== 'clarification' || typeof lookup !== 'function') return d;
+  const askedBack = d.status === 'clarification' && ai.label === 'clarification';
+  const saidNo = d.status === 'reject' && ai.label === 'reject';
+  if ((!askedBack && !saidNo) || typeof lookup !== 'function') return d;
   let words = [];
   try { words = await lookup(cleaned.preprocessed_query); } catch (e) { words = []; }
   if (!words.length) return d;
   return {
     status: 'accept',
-    reason: `code: the AI asked back (${ai.reason || 'no reason'}), but the question names ${words.join(', ')}, found in the news titles`,
+    reason: `code: the AI ${askedBack ? 'asked back' : 'said no'} (${ai.reason || 'no reason'}), but the question names ${words.join(', ')}, found in the news titles`,
     message: null,
     ai_label: ai.label,
     changed_by_code: true,

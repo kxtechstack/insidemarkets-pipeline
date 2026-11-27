@@ -139,6 +139,8 @@ async function handleChat(req, res) {
         answer_details: details ? {
           status: details.status, summary: details.summary, sections: details.sections, confidence: details.confidence,
           limits: details.limits, sources: details.sources,
+          // the answer without the Sources block, source numbers as #source-N links (26 Nov)
+          body: details.body || null,
         } : null,
         ...(isTest ? { debug } : {}),
       });

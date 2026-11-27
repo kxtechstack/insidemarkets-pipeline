@@ -133,8 +133,16 @@ const MODULE_WORDS = [
   ['market', /\b(market dynamics|market signals?|market moves?)\b/i],
   ['outlook', /\b(outlook|forward outlook)\b/i],
 ];
-function modulesNamed(question, understood) {
-  const q = String(question || '');
+// 27 Nov (dbcheck on Hy4 Flash, "exosome skincare regulation": the 3 news
+// were in Forward Outlook, the search looked in Policy only): a TOPIC word
+// ("regulation", "rules", "law", "compliance") says what the news is about,
+// not which tab it sits in. It still narrows the exact read (no search
+// words: "latest regulations"), but a search by meaning with a topic looks
+// in all 4 modules unless the user names the tab itself ("policy alerts",
+// "competitor moves", "forward outlook").
+const POLICY_TOPIC_WORDS = /\b(regulat\w*|compliance|laws?|rules?)\b/gi;
+function modulesNamed(question, understood, tabNamesOnly = false) {
+  const q = tabNamesOnly ? String(question || '').replace(POLICY_TOPIC_WORDS, ' ') : String(question || '');
   const named = MODULE_WORDS.filter(([, re]) => re.test(q)).map(([m]) => m);
   if (understood && understood.all_competitors && !named.includes('competitor')) named.push('competitor');
   return MODULES.filter((m) => named.includes(m));
@@ -1627,7 +1635,8 @@ function searchTask(search, plan, understood, question, allSearches = [search]) 
   companies = companies.filter((c) => !ex.companies.some((x) => same(x, c)));
   const inputs = {};
   if (!exactRead) inputs.query = cleanSearchWords(withoutOwnWords(search.words, understood));
-  inputs.modules = (exactRead || allList) && named.length ? named : [...MODULES];
+  const tabsNamed = exactRead ? named : modulesNamed(question, understood, true);
+  inputs.modules = (exactRead || allList) && tabsNamed.length ? tabsNamed : [...MODULES];
   if (dateFrom) inputs.date_from = dateFrom;
   if (dateTo) inputs.date_to = dateTo;
   if (companies.length) inputs.companies = companies.slice(0, 20);
