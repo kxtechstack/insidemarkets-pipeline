@@ -708,6 +708,25 @@
     {
       "kind": "topic with no news of this client (grid news is another client's)",
       "q": "power grid news"
+    },
+    {
+      "kind": "Competitive Radar topic (the article a row opens)",
+      "q": "YSL Beauty price changes in the UK",
+      "expectTitles": [
+        [
+          "YSL",
+          "price"
+        ]
+      ]
+    },
+    {
+      "kind": "Competitive Radar topic (the article a row opens)",
+      "q": "Shiseido loyalty points offer",
+      "expectTitles": [
+        [
+          "double points"
+        ]
+      ]
     }
   ]
 }

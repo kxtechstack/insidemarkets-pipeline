@@ -5768,6 +5768,16 @@ async function testStep10() {
     const s2 = answerer.checkSummary('The deadline is 19 October 2026 [1]. However, it was postponed to October 2028 [2].', book, pts, 'When is the halal deadline?');
     return (!r.ok && !s2.ok && r.problems.some((p) => /first sentence \(the direct answer\) was taken out and the next one leans on it/.test(p))) || [r, s2];
   });
+  await check('v73 fix 1: the first sentence is taken out and the next one adds to it a few words in ("The news also points to ...") -> leans on it, the AI answer is not used; a sentence standing on its own stays (must not change)', async () => {
+    const book = answerer.sourceBook({ sources: {
+      'x:1': { title: 'YSL Beauty lowers Youth Reload Cream price', text: 'Price cut.', date: '2026-11-11', module: 'competitor' },
+      'x:2': { title: 'Boots Black Friday discounts on YSL', text: 'Black Friday.', date: '2026-11-11', module: 'competitor' } } });
+    const pts = [{ code: 'P1', kind: 'fact', text: 'YSL Beauty lowered Youth Reload Cream price', sources: book.nums(['x:1']) },
+      { code: 'P2', kind: 'interpretation', text: 'Black Friday discounts deepen at Boots', sources: book.nums(['x:2']) }];
+    const r = answerer.checkSummary('YSL cut 12 prices in Germany [1]. The news also points to deeper Black Friday discounts at Boots [2].', book, pts, 'q');
+    const k = answerer.checkSummary('YSL cut 12 prices in Germany [1]. Boots deepens Black Friday discounts on YSL [2].', book, pts, 'q');
+    return (!r.ok && r.problems.some((p) => /leans on it/.test(p)) && k.ok && /^Boots deepens/.test(k.text)) || [r, k];
+  });
   await check('A sentence without source numbers gets only the points it is really about: "Estée Lauder acquired Forest Essentials for $160 million" -> the Forest Essentials item, not the two $210 million lawsuit items that share only the company name and "million"; word endings match ("launched" = "launches")', async () => {
     const srcs = {
       'x:1': { title: 'Estée Lauder Acquires Remaining 51% Stake in Forest Essentials for $160 million', text: '', date: '2026-10-05', module: 'competitor' },
@@ -5868,6 +5878,22 @@ async function testStep10() {
     const other = lists.find((x) => x.title === 'Other news found');
     return (used && other && used.items.length === 1 && /Lancôme opens/.test(used.items[0].title) && other.items.length > 0 &&
       /### News used in the answer[\s\S]*### Other news found/.test(a.answer_text)) || { titles: a.sections.map((x) => `${x.title}:${(x.items || []).length}`), text: a.answer_text.slice(0, 400) };
+  });
+  await check('v73 fix 2: under an answer the AI wrote, the screen gets no list: Key Signals (sources) are the news the answer cites, the rest is other_sources; the body has no list and links only the Key Signals; the saved answer text keeps the whole list', async () => {
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const keyNs = a.sources.map((x) => x.n);
+    return (a.summary_by === 'ai' && a.sources.length === 1 && /Lancôme opens/.test(a.sources[0].title) && a.other_sources.length > 0 &&
+      !a.other_sources.some((x) => keyNs.includes(x.n)) && !/###/.test(a.body) && !/#source-(?!1\))/.test(a.body.replace(`#source-${keyNs[0]})`, '#source-1)')) &&
+      /### News used in the answer[\s\S]*### Other news found/.test(a.answer_text)) || { by: a.summary_by, src: a.sources.map((x) => x.title), other: a.other_sources.length, body: a.body.slice(0, 300) };
+  });
+  await check('v73 fix 2 (must not change): a question asking for a list (goal "list") keeps its list on the screen and every news in Key Signals; an answer by code too', async () => {
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 }, u: { ...understood, primary_goal: 'list' } });
+    replies = { dynamic_rag_answer_v1: 'x' };
+    const { a: b } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    return (a.summary_by === 'ai' && a.sources.length > 1 && a.other_sources.length === 0 && /### News used in the answer/.test(a.body) &&
+      b.summary_by !== 'ai' && b.other_sources.length === 0 && /### News found/.test(b.body)) || { a: [a.sources.length, a.other_sources.length], b: [b.summary_by, b.other_sources.length] };
   });
   await check('v61 K (must not change): an answer written by code, or a list answer with no AI text, keeps ONE "News found" list', async () => {
     replies = { dynamic_rag_answer_v1: 'x' };
@@ -6622,8 +6648,10 @@ async function testDbCheck() {
     const r = await good(t.q);
     const j = r.json || {};
     const det = j.answer_details || {};
-    // a source also stands for the copies of the same news with the same link (same_link)
-    const got = new Set((det.sources || []).flatMap((x) => [x.source_id, ...(x.same_link || [])]));
+    // a source also stands for the copies of the same news with the same link (same_link);
+    // 27 Nov (v73): the news found but not used (other_sources) is still shown, so it counts
+    const shown = [...(det.sources || []), ...(det.other_sources || [])];
+    const got = new Set(shown.flatMap((x) => [x.source_id, ...(x.same_link || [])]));
     // the answer's own status (answered / nothing_found); else the chat's (reject, clarification …)
     const status = det.status || j.status || `http ${r.status}`;
     const problems = [];
@@ -6635,7 +6663,7 @@ async function testDbCheck() {
     // the same news is often saved more than once (several articles): a
     // group of title words = any source whose title holds all those words
     (t.expectTitles || []).forEach((words, g) => {
-      if (!(det.sources || []).some((x) => words.every((w) => String(x.title || '').toLowerCase().includes(String(w).toLowerCase())))) problems.push(`title group ${g + 1}: no source title with ${words.join(' + ')}`);
+      if (!shown.some((x) => words.every((w) => String(x.title || '').toLowerCase().includes(String(w).toLowerCase())))) problems.push(`title group ${g + 1}: no source title with ${words.join(' + ')}`);
     });
     const text = String(j.answer || '');
     for (const w of t.say || []) if (!text.toLowerCase().includes(String(w).toLowerCase())) problems.push(`the answer does not say "${w}"`);
@@ -6667,7 +6695,11 @@ async function testDbCheck() {
         // 27 Nov: why the news was left out (counts) and every news kept, with its closeness
         const whyOut = res.output && res.output.removed ? Object.entries(res.output.removed.reasons || {}).map(([a, b]) => `${a} ${b}`).join(', ') : '';
         if (whyOut) out(`      left out: ${whyOut}`);
-        for (const it of ((res.output && res.output.items) || []).slice(0, 20)) out(`      ${it.score != null ? Number(it.score).toFixed(2) : ' -  '} ${it.date || ''} ${it.module} ${it.title.slice(0, 90)}${(t.expect || []).flat().includes(it.source_id) ? '   <- expected' : ''}`);
+        for (const it of ((res.output && res.output.items) || []).slice(0, 20)) {
+          out(`      ${it.score != null ? Number(it.score).toFixed(2) : ' -  '} ${it.date || ''} ${it.module} ${it.title.slice(0, 90)}${(t.expect || []).flat().includes(it.source_id) ? '   <- expected' : ''}`);
+          // 27 Nov (v72): the article a Competitive Radar row opens inside its card
+          if (it.open_title) out(`           -> opens article: ${String(it.open_title).slice(0, 90)}`);
+        }
       }
     }
     out(String(text).split('\n').slice(0, 14).map((l) => `   | ${l}`).join('\n'));
@@ -6986,7 +7018,7 @@ async function runQuestionBank() {
     const j = r.json || {};
     const det = j.answer_details || {};
     const status = det.status || j.status || `http ${r.status}`;
-    const sources = det.sources || [];
+    const sources = [...(det.sources || []), ...(det.other_sources || [])];
     const answer = String(j.answer || '').split(/\*\*(?:Sources|Key Signals Leading to This Intelligence):\*\*/)[0].trim();
     const problems = [];
     let verdict = null;

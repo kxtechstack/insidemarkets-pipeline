@@ -457,6 +457,10 @@ function ownNameIn(text, ownName) {
 const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || '')) || /(^|[^A-Za-z])us([^A-Za-z]|$)/.test(String(question || '')) || ownNameIn(question, ownName);
 
 const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
+// 27 Nov (YSL "price changes in the UK", fix 1): the answer began "The news
+// ALSO points to ...": a word that adds to something said before, a few
+// words in. Leans back too (small grammar set).
+const ADDED_WORDS = /^["']?(\S+\s+){1,3}(also|too|additionally|furthermore|further|again)\b/i;
 function checkSummary(text, book, points, question, ownName = null) {
   const usAsked = questionAboutUs(question, ownName);
   const problems = [];
@@ -520,7 +524,7 @@ function checkSummary(text, book, points, question, ownName = null) {
   // (the first point of each part) is, as when the whole check fails. A
   // first sentence taken out with the rest standing on its own ("The GCC
   // updated ...") still gives the AI answer without it.
-  const leansBack = firstOut && kept.length > 0 && BACK_WORDS.test(kept[0]);
+  const leansBack = firstOut && kept.length > 0 && (BACK_WORDS.test(kept[0]) || ADDED_WORDS.test(kept[0]));
   if (leansBack) problems.push('the first sentence (the direct answer) was taken out and the next one leans on it, so the AI answer is not used');
   return { ok: kept.length > 0 && !leansBack, problems, text: finalText };
 }
@@ -666,6 +670,23 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   const usedNums = new Set([...summary.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
   for (const s of sections) for (const x of [...(s.points || []), ...(s.items || []), ...(s.differences || []), ...(s.rows || []).flatMap((r) => r.cells)]) (x.sources || []).forEach((n) => usedNums.add(n));
   const sources = book.list.filter((s) => usedNums.has(s.n));
+  // 27 Nov (Sneha, Shiseido "loyalty points offer", fix 2): the screen showed
+  // the same news three times: "News used in the answer", "Other news found"
+  // and the Key Signals list (all 20; the answer used 2). Under an answer the
+  // AI wrote, the screen's Key Signals are the news the answer cites (and
+  // the news of its other parts); the rest of the list is other_sources (the
+  // screen shows it as one closed line), and the body has no list. A
+  // question asking for a list (goal "list") or an answer by code keeps its
+  // list as before. The saved answer text keeps everything (nothing hidden).
+  const listOnScreen = summaryBy !== 'ai' || (understood && understood.primary_goal === 'list');
+  const screenNums = new Set([...summary.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+  for (const s of sections) {
+    if (s.kind === 'list' && !listOnScreen) continue;
+    for (const x of [...(s.points || []), ...(s.items || []), ...(s.differences || []), ...(s.rows || []).flatMap((r) => r.cells)]) (x.sources || []).forEach((n) => screenNums.add(n));
+  }
+  const keySources = listOnScreen ? sources : sources.filter((x) => screenNums.has(x.n));
+  const otherSources = listOnScreen ? [] : sources.filter((x) => !screenNums.has(x.n));
+  const screenSections = listOnScreen ? sections : sections.filter((x) => x.kind !== 'list');
 
   const status = nothing ? 'nothing_found' : 'answered';
   const answerText = nothing
@@ -673,11 +694,12 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
     : renderAnswer(summary, sections, confidence, limits, sources);
   // the answer for the screen: no Sources block, and every source number a
   // link the screen opens as that signal ("[2]" -> "[[2]](#source-2)")
-  const body = (nothing ? answerText : renderAnswer(summary, sections, confidence, limits, sources, false))
-    .replace(/\[(\d+)\](?!\()/g, (m, n) => (sources.some((x) => x.n === Number(n)) ? `[[${n}]](#source-${n})` : m));
+  const body = (nothing ? answerText : renderAnswer(summary, screenSections, confidence, limits, keySources, false))
+    .replace(/\[(\d+)\](?!\()/g, (m, n) => (keySources.some((x) => x.n === Number(n)) ? `[[${n}]](#source-${n})` : m));
   const out = {
     status, answer_text: answerText, body, summary, summary_by: summaryBy,
-    sections: nothing ? [] : sections, confidence, limits, sources: nothing ? [] : sources,
+    sections: nothing ? [] : sections, confidence, limits, sources: nothing ? [] : keySources,
+    other_sources: nothing ? [] : otherSources,
     ai_calls: aiCalls, check,
   };
   if (options.save !== false && request && request.conversation_id) out.saved = await saveAnswer(request, status, answerText, out);

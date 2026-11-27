@@ -1251,6 +1251,7 @@ async function openSignalsOf(items, ctx, inputs, output) {
     if (!mine.length) continue;
     const best = mine.map((r) => ({ r, f: fit(r) })).sort((a, b) => b.f - a.f || day(b.r).localeCompare(day(a.r)))[0].r;
     it.open_id = best.id;
+    it.open_title = best.signal_title || null;   // (the test tool prints it)
   }
 }
 function periodDays(inputs) {
