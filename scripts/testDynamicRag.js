@@ -5887,13 +5887,13 @@ async function testStep10() {
       !a.other_sources.some((x) => keyNs.includes(x.n)) && !/###/.test(a.body) && !/#source-(?!1\))/.test(a.body.replace(`#source-${keyNs[0]})`, '#source-1)')) &&
       /### News used in the answer[\s\S]*### Other news found/.test(a.answer_text)) || { by: a.summary_by, src: a.sources.map((x) => x.title), other: a.other_sources.length, body: a.body.slice(0, 300) };
   });
-  await check('v74 fix 2: the goal the AI guessed ("list") does not change it: under an AI answer Key Signals are still the cited news, the rest other_sources; an answer by code keeps its list and every news in Key Signals (must not change)', async () => {
+  await check('v74 fix 2: the goal the AI guessed ("list") does not change it: under an AI answer Key Signals are still the cited news, the rest other_sources; an answer by code has every news in Key Signals and (v76) no list on the screen, the saved text keeps it', async () => {
     replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
     const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 }, u: { ...understood, primary_goal: 'list' } });
     replies = { dynamic_rag_answer_v1: 'x' };
     const { a: b } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
     return (a.summary_by === 'ai' && a.sources.length === 1 && a.other_sources.length > 0 && !/###/.test(a.body) &&
-      b.summary_by !== 'ai' && b.other_sources.length === 0 && /### News found/.test(b.body)) || { a: [a.sources.length, a.other_sources.length], b: [b.summary_by, b.other_sources.length] };
+      b.summary_by !== 'ai' && b.other_sources.length === 0 && b.sources.length > 1 && !/### News found/.test(b.body) && /### News found/.test(b.answer_text)) || { a: [a.sources.length, a.other_sources.length], b: [b.summary_by, b.other_sources.length, b.body.slice(0, 200)] };
   });
   await check('v61 K (must not change): an answer written by code, or a list answer with no AI text, keeps ONE "News found" list', async () => {
     replies = { dynamic_rag_answer_v1: 'x' };

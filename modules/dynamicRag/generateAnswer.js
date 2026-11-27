@@ -688,7 +688,11 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   }
   const keySources = listOnScreen ? sources : sources.filter((x) => screenNums.has(x.n));
   const otherSources = listOnScreen ? [] : sources.filter((x) => !screenNums.has(x.n));
-  const screenSections = listOnScreen ? sections : sections.filter((x) => x.kind !== 'list');
+  // v76 (Sneha): an answer by code ("latest policy news in the UK") showed
+  // its 19 news twice, as "News found" and as the Key Signals rows. The
+  // Key Signals rows hold every one of them (clickable), so the screen
+  // never shows a list section; the saved answer text keeps it.
+  const screenSections = sections.filter((x) => x.kind !== 'list');
 
   const status = nothing ? 'nothing_found' : 'answered';
   const answerText = nothing
