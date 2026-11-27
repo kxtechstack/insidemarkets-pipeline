@@ -5964,14 +5964,15 @@ async function testStep10() {
     await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])]);
     return (/UAE bans parabens in cosmetics \(Policy and Risk, [^)]*\): New rule in the UAE\./.test(prompt)) || prompt.slice(0, 600);
   });
-  await check('v51: a search kept to OUR company that finds nothing is not given to the short answer as a limit (the AI read it as "Lumière has no news, so it is missing out"); the user still sees it', async () => {
+  await check('v51: a search kept to OUR company that finds nothing is not given to the short answer as a limit (the AI read it as "Lumière has no news, so it is missing out"); v78: nor the user (kept in check.hidden_limits)', async () => {
     let prompt = '';
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => { prompt = t; return J({ answer: 'x' }); } };
     const tasks = [search('T1'), search('T2', { query: 'lumiere market activity', companies: ['Lumière Beauty Group'] }),
       job('T3', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']), job('T4', 'validate_evidence', { findings: ['T3.output', 'T2.output'] }, ['T3', 'T2'])];
     const { a } = await answerFor(tasks);
     const limitLine = (prompt.split('\n').find((l) => l.startsWith('LIMITS:')) || '');
-    return (a.limits.some((l) => /lumiere market activity/.test(l)) && !/lumiere market activity/.test(limitLine)) || { limits: a.limits, limitLine };
+    // v78 (fix 4, Sneha): the user no longer sees it either (kept in check.hidden_limits)
+    return (!a.limits.some((l) => /lumiere market activity/.test(l)) && (a.check.hidden_limits || []).some((l) => /lumiere market activity/.test(l)) && !/lumiere market activity/.test(limitLine)) || { limits: a.limits, limitLine };
   });
   await check('v51: a comparison where one side is OUR company with no news -> not compared, no AI call for it, the other side\'s main news shown, said in plain words; a competitor side with no news still gets "no news found" cells (must not change)', async () => {
     replies = { dynamic_rag_answer_v1: J({ answer: 'x' }) };
@@ -5982,6 +5983,60 @@ async function testStep10() {
     const o = run.results.T3.output;
     return (o.own_not_compared === 'Lumière Beauty Group' && o.rows.length === 1 && o.rows[0].cells['Estée Lauder'] && /Estée Lauder launches/.test(o.rows[0].cells['Estée Lauder'].text) &&
       !o.rows[0].cells['Lumière Beauty Group'] && a.limits.some((l) => /not about Lumière Beauty Group itself/.test(l))) || { o, limits: a.limits };
+  });
+  await check('v78 fix 1: the codes of the items the AI was given never reach the user ("Based on F1, F9 and S4: ..." -> the words only); codes it was not given stay ("vitamin D3", dyes "K10"); a point code in the short answer ("based on P1:") goes too', async () => {
+    const codes = new Set(['F1', 'F9', 'S4', 'S1', 'A1']);
+    const w = runner.withoutCodes;
+    const u1 = w('Based on F1, F9 and S4: mandatory halal certification covers imported cosmetics.', codes);
+    const u2 = w('New guidelines (F1, S1) create a gap.', codes);
+    const u3 = w('Vitamin D3 and dyes K3 and K10 are restricted.', codes);
+    const u4 = w('A1 rules apply.', codes);
+    replies = { dynamic_rag_job_opportunities_v1: (t) => J({ opportunities: [{ text: 'Sell paraben-free cosmetics in the UAE', why: `Based on ${code(t, 'UAE bans parabens')}: the UAE bans parabens.`, sources: [code(t, 'UAE bans parabens')] }] }),
+      dynamic_rag_answer_v1: (t) => J({ answer: `Based on P1: Lumiere could sell paraben-free cosmetics in the UAE ${nums(t, 'paraben-free')}.` }) };
+    const { a, run } = await answerFor([search('T1'), job('T2', 'discover_opportunities', { inputs: ['T1.output'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])]);
+    const f = (run.results.T2.output.findings || [])[0] || {};
+    return (u1 === 'Mandatory halal certification covers imported cosmetics.' && u2 === 'New guidelines create a gap.' && u3 === 'Vitamin D3 and dyes K3 and K10 are restricted.' && u4 === 'A1 rules apply.' &&
+      f.why === 'The UAE bans parabens.' && !/\b[SFP]\d+\b/.test(a.answer_text.split('**Key Signals')[0])) || { u1, u2, u3, u4, why: f.why, s: a.summary };
+  });
+  await check('v78 fix 2: a sentence of the short answer that copies a line of what was not found ("No news found for ...") is taken out; the line stays in the list under the answer', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}. No news found for "zz nothing here at all" ${nums(t, 'UAE bans parabens')}.` }) };
+    const tasks = [search('T1'), search('T2', { query: 'zz nothing here at all', modules: ['policy'], countries: ['Atlantis'] }),
+      job('T3', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']), job('T4', 'validate_evidence', { findings: ['T3.output', 'T2.output'] }, ['T3', 'T2'])];
+    const { a } = await answerFor(tasks);
+    return (a.summary_by === 'ai' && !/No news found/.test(a.summary) && /UAE bans parabens/.test(a.summary) && a.check.problems.some((p) => /copies a line of what was not found/.test(p)) &&
+      a.limits.some((l) => /zz nothing here at all/.test(l))) || { s: a.summary, limits: a.limits, p: a.check.problems };
+  });
+  await check('v78 fix 3: a comparison side that IS our company keeps only news naming us: filled with other news (searched by topic) -> not compared, said in plain words; the competitor side is compared as before', async () => {
+    replies = { dynamic_rag_answer_v1: J({ answer: 'x' }) };
+    const tasks = [search('T1', { companies: ['Estée Lauder'] }), search('T2', { query: 'cosmetics rules' }),
+      job('T3', 'compare', { sides: [{ label: 'Estée Lauder', ref: 'T1.output' }, { label: 'Lumière Beauty Group', ref: 'T2.output' }], dimensions: ['launches'] }, ['T1', 'T2']),
+      job('T4', 'validate_evidence', { findings: ['T3.output'] }, ['T3'])];
+    const { a, run } = await answerFor(tasks);
+    const o = run.results.T3.output;
+    return (o.own_not_compared === 'Lumière Beauty Group' && !o.rows.some((r) => r.cells['Lumière Beauty Group'] && r.cells['Lumière Beauty Group'].text) &&
+      (o.removed.reasons['news on the Lumière Beauty Group side that does not name Lumière Beauty Group'] || 0) > 0 && a.limits.some((l) => /not about Lumière Beauty Group itself|Lumière Beauty Group/.test(l))) || { o, limits: a.limits };
+  });
+  await check('v78 fix 4: "No news found for" a search naming our own company is not shown to the user (kept in check.hidden_limits); other searches that found nothing still are (must not change)', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}.` }) };
+    const tasks = [search('T1'), search('T2', { query: 'Lumière business risks Atlantis', modules: ['policy'], countries: ['Atlantis'] }), search('T5', { query: 'zz other nothing', modules: ['policy'], countries: ['Atlantis'] }),
+      job('T3', 'extract_facts', { evidence: ['T1.output'], what_to_find: ['rules'] }, ['T1']), job('T4', 'validate_evidence', { findings: ['T3.output', 'T2.output', 'T5.output'] }, ['T3', 'T2', 'T5'])];
+    const { a } = await answerFor(tasks);
+    return (!a.limits.some((l) => /Lumière business risks/.test(l)) && (a.check.hidden_limits || []).some((l) => /Lumière business risks/.test(l)) && a.limits.some((l) => /zz other nothing/.test(l))) || { limits: a.limits, hidden: a.check.hidden_limits };
+  });
+  await check('v78 fix 5: two jobs of one kind (two summaries) are ONE part; a point repeated in both is listed once', async () => {
+    const pts = (t) => J({ points: [{ text: 'The UAE bans parabens in cosmetics', sources: [code(t, 'UAE bans parabens')] }, { text: 'Saudi Arabia sets halal rules for cosmetics', sources: [code(t, 'Saudi Arabia sets halal')] }] });
+    replies = { dynamic_rag_job_summarise_v1: [pts, pts], dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'summarise', { input: ['T1.output'] }, ['T1']), job('T3', 'summarise', { input: ['T1.output'], focus: 'how it affects us' }, ['T1']),
+      job('T4', 'validate_evidence', { findings: ['T2.output', 'T3.output'] }, ['T2', 'T3'])]);
+    const sums = a.sections.filter((x) => x.title === 'Summary');
+    return (sums.length === 1 && sums[0].points.length === 2 && (a.answer_text.match(/### Summary/g) || []).length === 1) || a.sections.map((x) => `${x.title}:${(x.points || []).length}`);
+  });
+  await check('v78 fix 6: two steps of one kind, one found something and one nothing -> the answer does not say that step "found nothing"; one kind that found nothing still says it (must not change)', async () => {
+    replies = { dynamic_rag_job_opportunities_v1: [(t) => J({ opportunities: [{ text: 'Sell paraben-free cosmetics in the UAE', why: 'The UAE bans parabens.', sources: [code(t, 'UAE bans parabens')] }] }), J({ opportunities: [] })],
+      dynamic_rag_job_gaps_v1: J({ gaps: [] }), dynamic_rag_answer_v1: (t) => J({ answer: `Lumiere could sell paraben-free cosmetics in the UAE ${nums(t, 'paraben-free')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'discover_opportunities', { inputs: ['T1.output'] }, ['T1']), job('T3', 'discover_opportunities', { inputs: ['T1.output'], focus: 'other' }, ['T1']),
+      job('T5', 'identify_gaps', { inputs: ['T1.output'] }, ['T1']), job('T4', 'validate_evidence', { findings: ['T2.output', 'T3.output', 'T5.output'] }, ['T2', 'T3', 'T5'])]);
+    return (a.sections.some((x) => /Opportunities/.test(x.title)) && !a.limits.some((l) => /opportunities step found nothing/.test(l)) && a.limits.some((l) => /gaps step found nothing/.test(l))) || { limits: a.limits, t: a.sections.map((x) => x.title) };
   });
   runner.useAi(null);
   runner.usePrompts(null);

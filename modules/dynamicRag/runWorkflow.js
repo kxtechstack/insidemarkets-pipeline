@@ -1736,8 +1736,35 @@ function sourcesAboutPoint(ids, texts, ctx, reasons) {
   return kept;
 }
 
+// 27 Nov (Sneha, "Should Lumière enter the Indonesian market?", fix 1): the
+// AI wrote the codes of the items it was given into its text ("Based on F1,
+// F9 and S4: mandatory halal certification ..."), and the user read them.
+// A code is taken out of what the user reads only when it is one of the
+// codes the job was given: with the words pointing to it ("based on",
+// "from", "see", "per", "according to") or in round brackets; alone only
+// the item, finding and point codes (S, F, P), never a side letter alone
+// (a vitamin "D3", dyes "K10" stay).
+const CODE_RX = '[A-Z]\\d{1,3}';
+const CODE_LIST = `${CODE_RX}(?:\\s*(?:,|and|&|/)\\s*${CODE_RX})*`;
+function withoutCodes(text, codes) {
+  const t = String(text == null ? '' : text);
+  if (!t || !codes || !codes.size) return t;
+  const known = (m, letters = null) => {
+    const cs = String(m).match(/[A-Z]\d{1,3}/g) || [];
+    return cs.length > 0 && cs.every((c) => codes.has(c) && (!letters || letters.includes(c[0])));
+  };
+  let out = t.replace(new RegExp(`\\(\\s*(?:(?:based on|from|see|per|according to)\\s*)?:?\\s*(${CODE_LIST})\\s*\\)`, 'gi'), (m, l) => (known(l) ? '' : m));
+  out = out.replace(new RegExp(`\\b(?:based on|from|see|per|according to)\\s+(?:(?:items?|findings?|points?)\\s+)?(${CODE_LIST})\\s*[:,;.-]?\\s*`, 'gi'), (m, l) => (known(l) ? '' : m));
+  out = out.replace(new RegExp(`(^|[\\s,;])(${CODE_LIST})(?=[\\s,;:.]|$)`, 'g'), (m, pre, l) => (known(l, 'SFP') ? pre : m));
+  if (out === t) return t;
+  return out.replace(/\s+([,.;:])/g, '$1').replace(/\s{2,}/g, ' ').replace(/^[\s,;:.\-—]+/, '').trim()
+    .replace(/[,;:]$/, '.').replace(/^\p{Ll}/u, (c) => c.toUpperCase());
+}
+const codesOf = (n) => new Set(n && n.map ? n.map.keys() : []);
 function makePoint(raw, n, ctx, reasons, { text, kind, extra = {}, letter = null }) {
-  const t = cut(text, 400);
+  const codes = codesOf(n);
+  const t = withoutCodes(cut(text, 400), codes);
+  for (const k of Object.keys(extra)) if (typeof extra[k] === 'string') extra = { ...extra, [k]: withoutCodes(extra[k], codes) };
   if (!t) { count(reasons, 'empty point'); example(ctx, 'empty point', raw); return null; }
   // a point must say something: at least 2 words ("4" or "5" alone, 25 Nov)
   if ((t.match(/\p{L}{2,}/gu) || []).length < 2) { count(reasons, 'too short to mean anything'); example(ctx, 'too short', raw); return null; }
@@ -1970,6 +1997,24 @@ async function compare(inputs, ctx) {
   // no news is not compared (said in plain words); the other side's news
   // goes on as it is.
   const ownName = ctx.understood && ctx.understood.client && ctx.understood.client.company_name;
+  // 27 Nov (Sneha, "What are our competitors doing on sustainability", fix
+  // 3): the side "Lumière Beauty Group" was searched by its topic words and
+  // filled with industry news (a CCIP meeting, EU green-claims rules); the
+  // answer said "Lumière's industry meeting". A side that IS the client
+  // keeps only news that names the client (its company field or its words);
+  // the rest is left out (counted), so a side with none is not compared.
+  if (ownName) {
+    for (const sd of sides) {
+      if (!sameCompany(ownName, sd.label) || !sd.items.length) continue;
+      const namesUs = (it) => (it.companies || []).some((c) => sameCompany(ownName, c)) || namesWordRun(`${it.title} ${it.text || ''}`, ownName) || hasWords(`${it.title} ${it.text || ''}`, companyCore(ownName));
+      const ours = sd.items.filter(namesUs);
+      if (ours.length === sd.items.length) continue;
+      count(reasons, `news on the ${ownName} side that does not name ${ownName}`, sd.items.length - ours.length);
+      sd.items = ours;
+      sd.all = sd.all.filter(namesUs);
+      sd.found = sd.all.length;
+    }
+  }
   const ownEmpty = ownName ? sides.filter((sd) => !sd.items.length && sameCompany(ownName, sd.label)) : [];
   let ownNotCompared = null;
   if (ownEmpty.length && sides.some((sd) => sd.items.length)) {
@@ -2048,7 +2093,7 @@ async function compare(inputs, ctx) {
     let any = false;
     for (const sd of sides) {
       const c = (raw.cells && (raw.cells[sd.letter] || raw.cells[sd.label])) || {};
-      const text = cut(c.text, 300);
+      const text = withoutCodes(cut(c.text, 300), codesOf(n));
       if (!text) { cells[sd.label] = { text: '', sources: [] }; continue; }
       const s = sourcesFrom(rawSources(c), n, reasons, sd.letter);
       if (!s.ids.length) { count(reasons, 'a cell with no source of its own side (left empty)'); cells[sd.label] = { text: '', sources: [] }; continue; }
@@ -2413,7 +2458,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 
 module.exports = {
   runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
-  newestShare, isCommonWord, searchTextOf,
+  newestShare, isCommonWord, searchTextOf, withoutCodes,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

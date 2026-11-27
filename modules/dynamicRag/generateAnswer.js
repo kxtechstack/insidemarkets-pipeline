@@ -193,6 +193,36 @@ function buildSections(run, workflow, book) {
       if (points.length) sections.push({ title, kind: 'points', points });
     }
   }
+  // 27 Nov (Sneha, "full view of the EU cosmetics rules", fix 5): two jobs
+  // of one kind (two summaries) gave two "Summary" parts with nearly the
+  // same points. Parts of points with the same title are one part, and a
+  // point whose words are all inside another point's (with its sources
+  // inside the other's) is kept once, the longer one.
+  {
+    const byTitle = new Map();
+    const one = [];
+    for (const x of sections) {
+      if (x.kind !== 'points') { one.push(x); continue; }
+      const first = byTitle.get(x.title);
+      if (!first) { const c = { ...x, points: [...x.points], empty_headings: [...(x.empty_headings || [])] }; byTitle.set(x.title, c); one.push(c); continue; }
+      first.points.push(...x.points);
+      first.empty_headings = [...new Set([...first.empty_headings, ...(x.empty_headings || [])])];
+    }
+    const words = (p) => new Set(String(p.text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean));
+    const inside = (a, b) => [...a].every((w) => b.has(w));
+    for (const x of byTitle.values()) {
+      const kept = [];
+      for (const p of x.points) {
+        const k = kept.findIndex((q) => (inside(words(p), words(q)) && p.sources.every((n) => q.sources.includes(n))) || (inside(words(q), words(p)) && q.sources.every((n) => p.sources.includes(n))));
+        if (k < 0) { kept.push(p); continue; }
+        if (String(p.text).length > String(kept[k].text).length) kept[k] = p;
+      }
+      x.points = kept;
+      x.empty_headings = x.empty_headings.filter((h) => !kept.some((p) => p.heading === h));
+    }
+    sections.length = 0;
+    sections.push(...one);
+  }
   // 25 Nov (Step 10 report): "Forward outlook signals about sustainability"
   // showed the same news three times (three searches = three lists, "60 news
   // items" for 30). All the lists are one list, every signal once.
@@ -255,6 +285,12 @@ function confidenceOf(evidence, sections) {
 function limitsOf(run, evidence) {
   const out = [];
   const plainJob = (cap) => JOB_WORDS[cap] || cap;
+  // 27 Nov (Sneha, Indonesia entry, fix 6): two opportunities steps ran, one
+  // found ideas, one nothing; the answer showed ideas AND "The opportunities
+  // step found nothing to report". A kind of step that found something is
+  // not said to have found nothing.
+  const hasContent = (o) => Boolean(o) && ['findings', 'patterns', 'rows', 'groups', 'items'].some((k) => Array.isArray(o[k]) && o[k].length > 0);
+  const foundSome = new Set(Object.values(run.results || {}).filter((r) => r.status === 'done' && hasContent(r.output)).map((r) => r.capability));
   for (const l of (evidence && evidence.limitations) || []) {
     let m = l.match(/^the search T\d+ "(.*)" found nothing$/);
     if (m) { out.push(`No news found for "${m[1]}"`); continue; }
@@ -262,6 +298,7 @@ function limitsOf(run, evidence) {
     if (m) { out.push(`The ${plainJob(m[1])} step did not finish (${m[2].replace('_', ' ')})`); continue; }
     m = l.match(/^T\d+ \((\w+)\) found nothing/);
     if (m && /nothing the AI wrote passed the checks/.test(l)) { out.push(`The ${plainJob(m[1])} step is left out: what the AI wrote did not pass the checks`); continue; }
+    if (m && foundSome.has(m[1])) continue;
     if (m) { out.push(`The ${plainJob(m[1])} step found nothing to report`); continue; }
     m = l.match(/^no news found for (.+?)( \(comparison side\))?$/);
     if (m) { out.push(`No news found for ${m[1].replace(/^\w+: /, '')}${m[2] ? ' (one side of the comparison)' : ''}`); continue; }
@@ -452,16 +489,21 @@ function ownNameIn(text, ownName) {
   const name = flat(ownName);
   if (name && t.includes(` ${name} `)) return true;
   // a word of the name that is not English ("Lumière") names it too
-  return workflowTools.rareWordsOf(ownName, {}, null).filter((w) => !w.includes(' ')).some((w) => t.includes(` ${w} `));
+  if (workflowTools.rareWordsOf(ownName, {}, null).filter((w) => !w.includes(' ')).some((w) => t.includes(` ${w} `))) return true;
+  // 27 Nov (fix 4): "lumiere" was read as an English word by its ending
+  // ("-ere"), so "Lumière business risks" did not name us. A word of the name
+  // past the most used English words (4+ letters) names it too.
+  return name.split(' ').filter((w) => w.length >= 4 && !workflowTools.isCommonWord(w)).some((w) => t.includes(` ${w} `));
 }
 const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || '')) || /(^|[^A-Za-z])us([^A-Za-z]|$)/.test(String(question || '')) || ownNameIn(question, ownName);
 
+const LIMIT_START_WORDS = 5;
 const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
 // 27 Nov (YSL "price changes in the UK", fix 1): the answer began "The news
 // ALSO points to ...": a word that adds to something said before, a few
 // words in. Leans back too (small grammar set).
 const ADDED_WORDS = /^["']?(\S+\s+){1,3}(also|too|additionally|furthermore|further|again)\b/i;
-function checkSummary(text, book, points, question, ownName = null) {
+function checkSummary(text, book, points, question, ownName = null, limits = []) {
   const usAsked = questionAboutUs(question, ownName);
   const problems = [];
   let t = cut(text, 1200);
@@ -470,6 +512,8 @@ function checkSummary(text, book, points, question, ownName = null) {
   // number stands for that point's sources; [1, 3] = [1][3]
   t = t.replace(/\[((?:P?\d+)(?:\s*,\s*P?\d+)+)\]/gi, (m, list) => list.split(',').map((x) => `[${x.trim()}]`).join(''));
   t = t.replace(/\[P(\d+)\]/gi, (m, k) => { const p = points[Number(k) - 1]; return p ? cites(p.sources) : m; });
+  // 27 Nov (fix 1): point codes written in the text ("based on P2:") are taken out
+  t = workflowTools.withoutCodes(t, new Set(points.map((p, k) => p.code || `P${k + 1}`)));
   t = tidyCites(t);
   // "Sentence. [2]" -> "Sentence [2]." so each sentence keeps its numbers
   t = t.replace(/([.!?])\s*((?:\[\d+\]\s*)+)/g, (m, end, nums) => ` ${nums.trim()}${end} `).replace(/\s+/g, ' ').trim();
@@ -492,6 +536,17 @@ function checkSummary(text, book, points, question, ownName = null) {
   for (const [index, raw] of sentences.entries()) {
     if (index === 1 && !kept.length) firstOut = true;
     let sentence = raw.trim();
+    // 27 Nov (Sneha, Indonesia entry, fix 2): the AI copied a line of what
+    // was not found into the answer, cut and with sources that are not its
+    // own ("No news found for "Indonesia cosmetics market attractiveness
+    // ... dist" [1][2][3]"). A sentence that starts like a line of that list
+    // (its first LIMIT_START_WORDS words) is taken out: the list is shown
+    // under the answer anyway.
+    const startOf = (x) => String(x).toLowerCase().replace(/\[\d+\]/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').slice(0, LIMIT_START_WORDS).join(' ');
+    if ((limits || []).some((l) => startOf(l).split(' ').length >= LIMIT_START_WORDS && startOf(sentence) === startOf(l))) {
+      problems.push(`taken out (copies a line of what was not found): ${cut(sentence, 120)}`);
+      continue;
+    }
     const own = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
     const unknown = own.filter((n) => !book.item(n));
     if (unknown.length) { problems.push(`taken out (source numbers that do not exist: ${[...new Set(unknown)].join(', ')}): ${cut(sentence, 120)}`); continue; }
@@ -609,7 +664,14 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   const evidence = evidenceOf(run, workflow);
   // the named news is real but no point was checked: "some evidence"
   const confidence = named.length ? { level: 'some', label: ANSWER_TEXT.confidence.some } : confidenceOf(evidence, sections);
-  const limits = limitsOf(run, evidence);
+  // 27 Nov (Sneha, fix 4): "No news found for "Lumière business risks
+  // Indonesia"" was shown in 4 answers: the data is news about the market,
+  // a search for the client's own name finds nothing, and the user read it
+  // as a failure. Such a line is not shown (kept in check.hidden_limits).
+  const ownNameA = understood && understood.client && understood.client.company_name;
+  const allLimits = limitsOf(run, evidence);
+  const ownSearch = (l) => { const m = String(l).match(/^No news found for "(.*)"/); return Boolean(m && ownNameA && ownNameIn(m[1], ownNameA)); };
+  const limits = allLimits.filter((l) => !ownSearch(l));
   const points = pointsForAi(sections);
   const nothing = confidence.level === 'not_enough' || !points.length;
   // a list of the newest / highest-impact news (exact read) is answered by
@@ -619,6 +681,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   const onlyLists = named.length > 0 || (sections.length > 0 && sections.every((s) => s.kind === 'list' && s.from !== 'retrieve_data'));
   const question = (understood && (understood.question_typed || understood.question_text)) || (request && request.original_query) || '';
   const check = { passed: null, problems: [] };
+  if (allLimits.length !== limits.length) check.hidden_limits = allLimits.filter(ownSearch);
   let aiCalls = 0;
   const foundNews = Object.keys((run && run.sources) || {}).length > 0;
   let summary = codeSummary(sections, nothing, foundNews, named.length > 0);
@@ -657,7 +720,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
         const parsed = workflowTools.readReplyText(reply);
         const text = parsed && typeof parsed.answer === 'string' ? parsed.answer : null;
         if (!text) { check.problems.push(`reply not readable: ${cut(reply, 200)}`); continue; }   // asked again only if a call is left
-        const res = checkSummary(text, book, points, question, understood && understood.client && understood.client.company_name);
+        const res = checkSummary(text, book, points, question, understood && understood.client && understood.client.company_name, limits);
         check.problems.push(...res.problems);
         if (res.problems.length) check.ai_text = cut(text, 600);
         if (res.ok) { summary = res.text; summaryBy = 'ai'; check.passed = true; } else { check.passed = false; }
