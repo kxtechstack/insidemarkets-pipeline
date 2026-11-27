@@ -149,7 +149,8 @@ module.exports = {
     no_news_cell: 'no news found',
     evidence_title: 'How good the evidence is',
     limits_title: 'Not found or not done',
-    sources_title: 'Sources',
+    // 27 Nov (Sneha): the old answer cards' wording
+    sources_title: 'Key Signals Leading to This Intelligence',
     conflicts: 'Some sources give different numbers for the same thing (see the facts)',
     compare_by_code: 'The AI could not write the comparison, so the main news of each side is shown side by side instead',
     compare_by_code_point: 'main news found',

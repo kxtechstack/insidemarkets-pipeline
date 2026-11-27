@@ -148,6 +148,12 @@ function realStore() {
       for (const m of members) if (active.has(m.trend_id) && !out.has(m.signal_id)) out.set(m.signal_id, { id: m.trend_id, name: active.get(m.trend_id).name });
       return out;
     },
+    // Competitive Radar: the news (articles) on these change cards, as the
+    // Competitive Radar tab shows them (competitor_signals_live)
+    async readCardSignals(changeIds) {
+      return inChunks(changeIds, async (part) => must(await supabase.from('competitor_signals_live')
+        .select('id, change_id, signal_title, summary, published_date, event_date').in('change_id', part), 'competitor_signals_live'));
+    },
     async readCards(cardIds) {
       const rows = await inChunks(cardIds, async (part) => must(await supabase.from('market_insights').select('*').in('id', part), 'market_insights'));
       return new Map(rows.map((r) => [r.id, r.title || r.insight_title || r.name || r.headline || '']));
@@ -859,6 +865,8 @@ const addReasons = (into, from) => { for (const [k, v] of Object.entries(from)) 
 // topic word, or topics of common words only ("awards"): nothing changes.
 const COMMON_WORD_RANK = 5000;
 // a word's place in the most-used list (a word ending in s / ed / ing ... counts as its base word)
+// one of the COMMON_WORD_RANK most used English words (Step 10 writes "the news suggests that more ..." only then)
+function isCommonWord(w) { englishWords(); return wordRankOf(String(w || '').toLowerCase()) <= COMMON_WORD_RANK; }
 function wordRankOf(w) {
   if (englishWordRank.has(w)) return englishWordRank.get(w);
   const base = WORD_ENDINGS.map((e) => (w.endsWith(e) ? w.slice(0, -e.length) : null)).filter((b) => b && englishWordRank.has(b));
@@ -957,6 +965,20 @@ function newestShare(kept, max, notes, rankOf = null, asked = []) {
   notes.push(`${moved} newer news on the topic of the best news (${on}) put in place of closer older ones`);
   return [...head, ...newest, ...rest.filter((it) => !picked.has(it)), ...copies];
 }
+// 27 Nov (dbcheck #74 "power grid news", Q): the plan searched "power grid
+// news headlines source links"; words about the FORM of the answer pulled
+// the search by meaning toward news about the news business (Kentucky
+// media, ITV and Sky, Penske Media). They say what the user wants back,
+// not what it is about, so they are left out of the text searched by
+// meaning (a small grammar set, like the tab names). A search of only such
+// words ("news updates") is searched as written. Titles, rare words and
+// filters still use the search as written.
+const ANSWER_FORM_WORDS = /\b(news|headlines?|sources?|links?|articles?|reports?|updates?)\b/gi;
+function searchTextOf(query) {
+  const q = String(query || '');
+  const t = q.replace(ANSWER_FORM_WORDS, ' ').replace(/\s+/g, ' ').trim();
+  return /[a-z]{3,}/i.test(t) ? t : q;
+}
 async function retrieveDataOnce(inputs, ctx) {
   const s = getStore();
   const notes = [];
@@ -970,7 +992,9 @@ async function retrieveDataOnce(inputs, ctx) {
   // each signal: so a search with them reads more pieces per page
   const page = RUN_LIMITS.search_pieces * (codeFilters ? SEARCH_WIDEN : 1);
   let t0 = Date.now();
-  const vector = await s.embed(inputs.query);
+  const meaningText = searchTextOf(inputs.query);
+  if (meaningText !== inputs.query) timing.search_text = meaningText;
+  const vector = await s.embed(meaningText);
   timing.embed_ms = Date.now() - t0;
   let useDates = true;
   const ask = (offset, only) => s.searchPieces({
@@ -1192,6 +1216,41 @@ async function closenessToQuestion(items, ctx, modules) {
     return out;
   } catch (e) {
     return null;
+  }
+}
+// 27 Nov (Sneha, frontend Key Signals): a key signal opens the ONE news
+// it is in its tab. Forward Outlook, Market Dynamics and Policy news are one
+// article each already. A Competitive Radar news is a whole change card
+// (the search index holds one piece per card, its own text written from
+// all its articles), so the chat never knew which article. For each card
+// found, its articles are read and the one closest to the question gets
+// open_id (the article id the tab opens inside the card): the article
+// holding the most words of the question, a rarer word counting more (its
+// place in the most-used English words list), the newest on a tie. A failed
+// read is noted; those cards open as the card (as before).
+const wordWeight = (w) => { const r = wordRankOf(w); return Math.log(Math.min(Number.isFinite(r) ? r : 100000, 100000) + 1); };
+async function openSignalsOf(items, ctx, inputs, output) {
+  const cards = items.filter((it) => it.module === 'competitor' && it.signal_id && !it.open_id);
+  const s = getStore();
+  if (!cards.length || typeof s.readCardSignals !== 'function') return;
+  const u = ctx.understood || {};
+  englishWords();
+  const words = [...new Set(plain([u.question_text || u.question_typed, inputs && inputs.query].filter(Boolean).join(' '))
+    .split(' ').filter((w) => w.length >= 3).map(stemOf))];
+  let rows;
+  try {
+    rows = await s.readCardSignals([...new Set(cards.map((it) => it.signal_id))]);
+  } catch (e) {
+    output.note = [output.note, `the articles of ${cards.length} Competitive Radar cards could not be read, they open as the card (${String(e.message).slice(0, 80)})`].filter(Boolean).join('; ');
+    return;
+  }
+  const fit = (r) => { const t = ` ${plain(`${r.signal_title || ''} ${r.summary || ''}`)}`; return words.filter((w) => t.includes(` ${w}`)).reduce((a, w) => a + wordWeight(w), 0); };
+  const day = (r) => String(r.published_date || r.event_date || '');
+  for (const it of cards) {
+    const mine = (rows || []).filter((r) => r.change_id === it.signal_id && r.id);
+    if (!mine.length) continue;
+    const best = mine.map((r) => ({ r, f: fit(r) })).sort((a, b) => b.f - a.f || day(b.r).localeCompare(day(a.r)))[0].r;
+    it.open_id = best.id;
   }
 }
 function periodDays(inputs) {
@@ -2311,6 +2370,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
       // check uses these, never other dates (25 Nov, playground)
       const inp = t.inputs || {};
       const win = { from: inp.date_from || null, until: inp.date_to ? readUntil(inp, ctx.understood) : null };
+      await openSignalsOf(r.output.items, ctx, inp, r.output);
       for (const it of r.output.items) {
         ctx.sources.set(it.source_id, it);
         if (!ctx.windows.has(it.source_id)) ctx.windows.set(it.source_id, []);
@@ -2352,7 +2412,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 
 module.exports = {
   runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
-  newestShare,
+  newestShare, isCommonWord, searchTextOf,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

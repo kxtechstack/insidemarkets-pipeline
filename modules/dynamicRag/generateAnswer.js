@@ -49,6 +49,8 @@ const SECTION_TITLES = {
   extract_facts: 'Facts', summarise: 'Summary', compare: 'Comparison', cluster: 'Main groups of news',
   identify_patterns: 'Trends', identify_gaps: 'Gaps and unmet needs', discover_opportunities: 'Opportunities (ideas to test)',
   analyse_risks: 'Risks', retrieve_data: 'News found', structured_search: 'News found',
+  // K: under an answer the AI wrote, the list is split in these two
+  list_used: 'News used in the answer', list_other: 'Other news found',
 };
 const JOB_WORDS = {
   extract_facts: 'facts', summarise: 'summary', compare: 'comparison', cluster: 'grouping', identify_patterns: 'trends',
@@ -98,6 +100,14 @@ function sourceBook(run) {
       list.push({
         n: list.length + 1, source_id: id, module: it.module, module_name: MODULE_NAMES[it.module] || it.module,
         signal_id: it.signal_id, title: it.title, date: it.date, url: it.url || null,
+        // 27 Nov: the one news a click opens in its tab (a Competitive Radar
+        // card: the article closest to the question; others: the signal)
+        open_id: it.open_id || it.signal_id,
+        // 27 Nov (Sneha, P): the card the news sits on, so the screen can
+        // link to it like the old "Key Signals Leading to This Intelligence":
+        // Forward Outlook -> its active trend, Market Dynamics -> its market
+        // card; Policy and Competitive Radar news open as the signal itself
+        card: it.group && it.group.id ? { kind: it.group.type === 'trend' ? 'trend' : 'market_card', id: it.group.id, name: it.group.name || null } : null,
         countries: it.countries || [], companies: it.companies || [], same_link: [],
       });
     }
@@ -114,6 +124,15 @@ function resultRefs(run, workflow) {
   const check = tasks.find((t) => t.capability === 'validate_evidence');
   let ids = check ? [].concat(check.inputs.findings || []).map((r) => String(r).split('.')[0]) : [];
   if (!ids.length) ids = Object.keys(run.results || {}).filter((id) => run.results[id].capability !== 'validate_evidence');
+  // 27 Nov (dbcheck #59 "Compare cosmetics rules in Indonesia and
+  // Malaysia", L): the compare job ran, the summary was built from it, but
+  // the plan's evidence check listed only the summary, so the side-by-side
+  // table was never shown (it depends on the AI planner: sometimes shown,
+  // sometimes not). A finished comparison is the main answer to "compare A
+  // and B": it is always shown, first, listed or not (never twice). Other
+  // jobs are shown only when listed, as before.
+  const compares = Object.keys(run.results || {}).filter((id) => run.results[id].capability === 'compare');
+  ids = [...compares, ...ids.filter((id) => !compares.includes(id))];
   // the AI results first; the searches only when there is no AI result
   const done = ids.filter((id) => run.results[id] && run.results[id].status === 'done' && run.results[id].output);
   const ai = done.filter((id) => !SEARCHES.includes(run.results[id].capability));
@@ -299,6 +318,35 @@ function datesGap(run, workflow) {
   if (!gaps.length || gaps.some((g) => !g)) return null;
   return { from: gaps.map((g) => g.from).sort()[0], to: gaps.map((g) => g.to).sort().pop(), newest: gaps.map((g) => g.newest).sort().pop() };
 }
+// "More targeted actives" -> "more targeted actives"; "AI ...", "Skims
+// Beauty ...", "Shiseido ..." stay as they are
+function smallFirstLetter(text) {
+  const t = String(text || '');
+  const first = (t.match(/^[A-Za-z]+/) || [''])[0];
+  const asWord = first.length > 1 && first === first.charAt(0) + first.slice(1).toLowerCase();
+  return asWord && workflowTools.isCommonWord(first) ? first.charAt(0).toLowerCase() + t.slice(1) : t;
+}
+// Said already: a sentence written before rests on at least half of this
+// point's sources AND shares at least SAID_BEFORE_WORDS of its main words
+// (the same news told twice in other words: "AI is set to speed product
+// development ... [1][2][3][4]" and "AI is being used to ... launch products
+// faster [1][2][3][5][15]"); or it shares SAID_BEFORE_SHARE of its main words.
+const SAID_BEFORE_SHARE = 0.6;
+const SAID_BEFORE_WORDS = 0.3;
+function saidBefore(text, sources, said) {
+  const words = (x) => new Set(workflowTools.plainWords(x));
+  const mine = words(text);
+  if (!mine.size) return false;
+  const src = new Set(sources || []);
+  return said.some((t) => {
+    const theirs = words(t.text);
+    let n = 0;
+    for (const w of mine) if (theirs.has(w)) n += 1;
+    const share = n / mine.size;
+    const sameNews = src.size > 0 && [...src].filter((k) => t.sources.includes(k)).length * 2 >= src.size;
+    return share >= SAID_BEFORE_SHARE || (sameNews && share >= SAID_BEFORE_WORDS);
+  });
+}
 function codeSummary(sections, nothing, foundNews = false, named = false) {
   // 26 Nov (DI tab): "what is operation sindhoora" said "The searches below
   // found nothing" but the searches had found news, none of which answered
@@ -314,13 +362,23 @@ function codeSummary(sections, nothing, foundNews = false, named = false) {
   const lead = { fact: '', interpretation: 'The news suggests that ', hypothesis: 'One idea to test: ' };
   const sentence = (text, ns) => `${String(text).trim().replace(/[.;:,]+$/, '')} ${cites(ns)}.`;
   const out = [];
+  const said = [];
   for (const s of sections) {
     if (out.length >= 3) break;
     if (s.kind === 'points' && s.points.length) {
-      const p = s.points[0];
-      // a trend "Name: description" -> the description
-      let t = p.trend ? p.text.replace(/^[^:]{1,120}: /, '') : p.text;
-      if (lead[p.kind] && p.kind === 'interpretation') t = t.charAt(0).toLowerCase() + t.slice(1);
+      // 27 Nov (DI tab, N2): the first point of Summary and of Trends said
+      // the same thing twice; a point whose main words were mostly said
+      // already gives its place to the next point of its part
+      const textOf = (p) => (p.trend ? p.text.replace(/^[^:]{1,120}: /, '') : p.text);   // a trend "Name: description" -> the description
+      const p = s.points.find((x) => !saidBefore(textOf(x), x.sources, said));
+      if (!p) continue;
+      let t = textOf(p);
+      // 27 Nov (DI tab, N): "the news suggests that aI ...", "that skims
+      // Beauty", "that shiseido": the first letter is made small only when
+      // the first word is a common English word written as a word ("More",
+      // "Skincare"), never a short form ("AI") or a name ("Shiseido")
+      if (lead[p.kind] && p.kind === 'interpretation') t = smallFirstLetter(t);
+      said.push({ text: t, sources: p.sources || [] });
       out.push(sentence(`${lead[p.kind] || ''}${t}`, p.sources));
     }
     if (s.kind === 'table') {
@@ -330,7 +388,7 @@ function codeSummary(sections, nothing, foundNews = false, named = false) {
         const parts = row.cells.map((c, k) => (c.text ? `${s.sides[k]}: ${c.text.replace(/[.;]+$/, '')}` : `${s.sides[k]}: ${ANSWER_TEXT.no_news_cell}`));
         out.push(sentence(`On ${row.point}, ${parts.join('; ')}`, [...new Set(row.cells.flatMap((c) => c.sources))].sort((a, b) => a - b)));
       } else if (s.differences.length) {
-        out.push(sentence(`The news suggests that ${s.differences[0].text.charAt(0).toLowerCase()}${s.differences[0].text.slice(1)}`, s.differences[0].sources));
+        out.push(sentence(`The news suggests that ${smallFirstLetter(s.differences[0].text)}`, s.differences[0].sources));
       }
     }
   }
@@ -498,7 +556,8 @@ function renderAnswer(summary, sections, confidence, limits, sources, withSource
   if (limits.length) { L.push('', `**${ANSWER_TEXT.limits_title}:**`); for (const l of limits) L.push(`- ${l}`); }
   if (sources.length && withSources) {
     L.push('', `**${ANSWER_TEXT.sources_title}:**`);
-    for (const s of sources) L.push(`[${s.n}] ${s.title} — ${s.module_name}, ${s.date || 'no date'}`);
+    // "[1] FORWARD OUTLOOK · Red Pantz ... — 2026-09-29" (the tab first, like the old cards)
+    for (const s of sources) L.push(`[${s.n}] ${String(s.module_name || '').toUpperCase()} · ${s.title} — ${s.date || 'no date'}`);
   }
   return L.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -519,6 +578,24 @@ function aiLimits(limits, run, workflow, ownName) {
   return limits.filter((l) => !ownQueries.some((q) => l.includes(`"${q}"`)) && !l.includes(`${ownName} (one side of the comparison)`));
 }
 
+// 27 Nov (DI tab, K, "Give me compliance requirement in singapore"): the
+// list under the answer held every Singapore news found, the answer's own
+// sources and unrelated ones (Adampak, Singtel, SGX) mixed. Closeness cannot
+// part them (the Sudan IV news the answer uses scored 0.26, Adampak 0.29).
+// Under an answer the AI wrote, the list is split: the news the answer cites
+// first, then the other news found. Nothing is hidden. A list with all or
+// none of its news cited stays one list.
+function splitUsedList(sections, summary) {
+  const cited = new Set([...String(summary || '').matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+  if (!cited.size) return sections;
+  return sections.flatMap((s) => {
+    if (s.kind !== 'list') return [s];
+    const used = s.items.filter((it) => it.sources.some((n) => cited.has(n)));
+    const other = s.items.filter((it) => !it.sources.some((n) => cited.has(n)));
+    if (!used.length || !other.length) return [s];
+    return [{ ...s, title: SECTION_TITLES.list_used, items: used }, { ...s, title: SECTION_TITLES.list_other, items: other }];
+  });
+}
 async function generateAnswer(run, workflow, understood, request, options = {}) {
   const book = sourceBook(run);
   let sections = buildSections(run, workflow, book);
@@ -584,6 +661,7 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
       }
     }
   }
+  if (summaryBy === 'ai') sections = splitUsedList(sections, summary);
   // the sources really used, in their order
   const usedNums = new Set([...summary.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
   for (const s of sections) for (const x of [...(s.points || []), ...(s.items || []), ...(s.differences || []), ...(s.rows || []).flatMap((r) => r.cells)]) (x.sources || []).forEach((n) => usedNums.add(n));

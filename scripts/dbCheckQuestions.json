@@ -173,7 +173,8 @@
           "competitor:8cfc2f63-910f-470d-915c-749a78e3704c",
           "competitor:efc7f21f-a842-4b87-ac1c-92c45d073eaf"
         ]
-      ]
+      ],
+      "table": true
     },
     {
       "kind": "all competitors",
@@ -585,7 +586,8 @@
         [
           "malaysia"
         ]
-      ]
+      ],
+      "table": true
     },
     {
       "kind": "list, module, place",
@@ -688,6 +690,24 @@
         "2028",
         "notification"
       ]
+    },
+    {
+      "kind": "rules + place (list noise)",
+      "q": "Give me compliance requirement in singapore"
+    },
+    {
+      "kind": "only in a candidate trend (honest no)",
+      "q": "explain more about red pantz",
+      "status": "nothing_found"
+    },
+    {
+      "kind": "news only of OTHER clients (honest no)",
+      "q": "crypto trend in cambodia",
+      "status": "nothing_found"
+    },
+    {
+      "kind": "topic with no news of this client (grid news is another client's)",
+      "q": "power grid news"
     }
   ]
 }

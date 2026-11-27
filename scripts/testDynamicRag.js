@@ -5091,6 +5091,16 @@ function fakeStep9Store(opts = {}) {
     },
     async readActiveTrends(ids) { return new Map(ids.filter((i) => i === 'o1').map((i) => [i, { id: 't1', name: 'Refill packaging' }])); },
     async readCards(ids) { return new Map(ids.map((i) => [i, 'Luxury retail expansion'])); },
+    ...(opts.cardSignals ? {
+      async readCardSignals(changeIds) {
+        if (opts.cardSignals === 'fail') throw new Error('view not found');
+        return [
+          { id: 'e1', change_id: 'x1', signal_title: 'Estée Lauder names a new retail head', summary: 'People news.', published_date: '2025-05-03' },
+          { id: 'e2', change_id: 'x1', signal_title: 'Estée Lauder launches Revitalizing serum in Riyadh', summary: 'Serum launch in Saudi Arabia.', published_date: '2025-05-01' },
+          { id: 'e9', change_id: 'zz', signal_title: 'Another card article', summary: 'Serum.', published_date: '2025-05-09' },
+        ].filter((r) => changeIds.includes(r.change_id));
+      },
+    } : {}),
   };
 }
 
@@ -5629,13 +5639,31 @@ async function testStep10() {
     const n = book.nums(['outlook:a', 'outlook:b', 'outlook:c', 'outlook:d', 'outlook:e']);
     return (J(n) === J([1, 2, 3, 4]) && book.list.length === 4 && J(book.list[0].same_link) === J(['outlook:b']) && book.list[1].same_link.length === 0) || { n, list: book.list.map((x) => [x.title, x.same_link]) };
   });
-  await check('Sources are the signals themselves, never an outside web link: the answer text lists "title — tab, date" with no link; the body for the screen has no Sources block and every source number is a #source-N link; a number that is not a source stays as it is', async () => {
+  await check('Sources are the signals themselves, never an outside web link: the answer text lists them under "Key Signals Leading to This Intelligence" as "TAB · title — date" with no link (v64 P); the body for the screen has no Sources block and every source number is a #source-N link; a number that is not a source stays as it is', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}.` }) };
     const { a } = await answerFor(withFacts);
     const n1 = a.sources[0];
-    return (a.sources.length > 0 && !/https?:\/\//.test(a.answer_text) && /\*\*Sources:\*\*/.test(a.answer_text) &&
-      a.answer_text.includes(`[1] ${n1.title} — ${n1.module_name}`) && !/\*\*Sources:\*\*/.test(a.body) && /\[\[1\]\]\(#source-1\)/.test(a.body) &&
+    return (a.sources.length > 0 && !/https?:\/\//.test(a.answer_text) && /\*\*Key Signals Leading to This Intelligence:\*\*/.test(a.answer_text) &&
+      a.answer_text.includes(`[1] ${n1.module_name.toUpperCase()} · ${n1.title} — `) && !/\*\*Key Signals Leading to This Intelligence:\*\*/.test(a.body) && /\[\[1\]\]\(#source-1\)/.test(a.body) &&
       !/\[\d+\](?!\()/.test(a.body.replace(/\[\[\d+\]\]\(#source-\d+\)/g, '').replace(/\[(High|Medium|Low|Critical)\]/g, '')) && Boolean(a.sources[0].url)) || { t: a.answer_text.slice(-300), b: a.body.slice(0, 300) };
+  });
+  await check('v64 P: every source carries the card it sits on (Forward Outlook -> its active trend, Market Dynamics -> its market card) so the screen can link to it; Policy / Competitive Radar news have no card (opened as the signal)', async () => {
+    const book = answerer.sourceBook({ sources: {
+      'outlook:o1': { title: 'Refill trend news', module: 'outlook', signal_id: 'o1', date: '2026-10-01', group: { type: 'trend', id: 't1', name: 'Refill packaging' } },
+      'market:m1': { title: 'Lancome store', module: 'market', signal_id: 'm1', date: '2026-10-02', group: { type: 'card', id: 'card1', name: 'Luxury retail expansion' } },
+      'policy:p1': { title: 'UAE bans parabens', module: 'policy', signal_id: 'p1', date: '2026-10-03', group: null } } });
+    book.nums(['outlook:o1', 'market:m1', 'policy:p1']);
+    const [o, m, p] = book.list;
+    return (o.card && o.card.kind === 'trend' && o.card.id === 't1' && o.card.name === 'Refill packaging' && m.card && m.card.kind === 'market_card' && m.card.id === 'card1' && p.card === null) || book.list;
+  });
+  await check('v72: every source carries open_id, the one news a click opens: a Competitive Radar card -> the article picked for it, any other news -> its own signal id', async () => {
+    const book = answerer.sourceBook({ sources: {
+      'competitor:x1': { title: 'Estée Lauder serum', module: 'competitor', signal_id: 'x1', open_id: 'e2', date: '2026-10-01', group: null },
+      'competitor:x2': { title: 'Shiseido points', module: 'competitor', signal_id: 'x2', date: '2026-10-02', group: null },
+      'outlook:o1': { title: 'Refill trend news', module: 'outlook', signal_id: 'o1', date: '2026-10-03', group: { type: 'trend', id: 't1', name: 'Refill packaging' } } } });
+    book.nums(['competitor:x1', 'competitor:x2', 'outlook:o1']);
+    const [a, b, c] = book.list;
+    return (a.open_id === 'e2' && a.signal_id === 'x1' && b.open_id === 'x2' && c.open_id === 'o1') || book.list.map((x) => [x.signal_id, x.open_id]);
   });
   await check('A dot the news itself writes inside a name ("Dr. Groot") does not end a sentence; other sentences are still split and checked (must not change)', async () => {
     const { sourceBook, checkSummary } = answerer;
@@ -5666,7 +5694,7 @@ async function testStep10() {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics. ${nums(t, 'UAE bans parabens')} Saudi Arabia sets halal rules ${nums(t, 'halal rules')}.`, points_used: ['P1', 'P2'] }) };
     const { a, answerCalls } = await answerFor(withFacts);
     return (a.summary_by === 'ai' && a.check.passed === true && answerCalls === 1 && /The UAE bans parabens in cosmetics \[1\]\[2\]\./.test(a.summary) &&
-      a.sources.length === 6 && /### Facts/.test(a.answer_text) && /\*\*Sources:\*\*/.test(a.answer_text)) || a;
+      a.sources.length === 6 && /### Facts/.test(a.answer_text) && /\*\*Key Signals Leading to This Intelligence:\*\*/.test(a.answer_text)) || a;
   });
   await check('AI short answer with a made-up number ("grew 45%") -> NOT shown; code\'s own short answer is used, the reason recorded', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE market grew 45% after the parabens ban ${nums(t, 'UAE bans parabens')}.` }) };
@@ -5704,6 +5732,25 @@ async function testStep10() {
       r.problems.some((p) => /number 8 is not/.test(p))) || r;
   });
   // 25 Nov, playground (after the final run)
+  await check('v61 N: code\'s short answer makes the first letter small only for a common English word ("More targeted ..." -> "more targeted ..."); a short form ("AI"), a name ("Shiseido", "Skims Beauty") keep their capital', async () => {
+    const one = (text) => answerer.codeSummary([{ kind: 'points', points: [{ kind: 'interpretation', text, sources: [1] }] }], false);
+    const a = one('More targeted actives are emerging');
+    const b = one('AI is set to speed product development');
+    const c = one('Shiseido is taking legal action');
+    const d = one('Skims Beauty is preparing to launch in 2027');
+    return (/that more targeted/.test(a) && /that AI is/.test(b) && /that Shiseido is/.test(c) && /that Skims Beauty/.test(d)) || [a, b, c, d];
+  });
+  await check('v61 N2: code\'s short answer does not say the same news twice (a Trends point resting on the same sources as the Summary point, in other words, gives its place to the next Trends point); different points are all kept (must not change)', async () => {
+    const secs = [
+      { kind: 'points', points: [{ kind: 'interpretation', text: 'AI is set to speed product development, ingredient discovery, and R&D cycles across beauty and consumer goods', sources: [1, 2, 3, 4] }] },
+      { kind: 'points', points: [
+        { kind: 'interpretation', trend: true, text: 'AI speeds product development: AI is being used to create ingredients, repurpose molecules, and launch products faster. This is spreading across skincare, haircare, and consumer goods.', sources: [1, 2, 3, 5, 15] },
+        { kind: 'interpretation', trend: true, text: 'Digital commerce platform shifts: Beauty and retail companies are moving brands or markets to Shopify.', sources: [7, 8, 9] }] },
+    ];
+    const r = answerer.codeSummary(secs, false);
+    const keep = answerer.codeSummary([{ kind: 'points', points: [{ kind: 'fact', text: 'Shiseido cut UK prices on four products', sources: [1] }] }, { kind: 'points', points: [{ kind: 'fact', text: 'Lancome opened a store in Dubai', sources: [2] }] }], false);
+    return (!/repurpose molecules/.test(r) && /Shopify/.test(r) && /Shiseido cut/.test(keep) && /Lancome opened/.test(keep)) || [r, keep];
+  });
   await check('A sentence ending in a word in capitals ("… in the GCC. The rules …") is split and checked on its own; "H.P.N." still does not end a sentence (must not change)', async () => {
     const book = answerer.sourceBook({ sources: { 'x:1': { title: 'GCC updates cosmetics rules GSO 1943', text: 'GSO 1943 covers safety', date: '2026-08-27', module: 'policy' } } });
     const pts = [{ code: 'P1', kind: 'fact', text: 'Facts: The GCC updated cosmetics rules GSO 1943 with safety requirements', sources: book.nums(['x:1']) }];
@@ -5794,6 +5841,39 @@ async function testStep10() {
     replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
     const { a, answerCalls } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
     return (answerCalls === 1 && a.summary_by === 'ai' && a.sections[0].kind === 'list') || a;
+  });
+  await check('v62 L: a finished comparison is always shown, FIRST, even when the evidence check lists only another job (dbcheck #59); listed too -> shown once', async () => {
+    const cmp = (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] } } }], differences: [] });
+    const plan = (listed) => [search('T1', { countries: ['United Arab Emirates'] }), search('T2', { countries: ['Saudi Arabia'] }),
+      job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']),
+      job('T4', 'extract_facts', { evidence: ['T1.output', 'T2.output'], what_to_find: ['rules'] }, ['T1', 'T2']),
+      job('T5', 'validate_evidence', { findings: listed }, ['T3', 'T4'])];
+    replies = { dynamic_rag_job_compare_v1: cmp, dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: 'x' };
+    const a = await answerFor(plan(['T4.output']), { aiOpts: { aiCalls: 1 } });
+    replies = { dynamic_rag_job_compare_v1: cmp, dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: 'x' };
+    const b = await answerFor(plan(['T3.output', 'T4.output']), { aiOpts: { aiCalls: 1 } });
+    const kinds = (x) => x.a.sections.map((s) => s.kind);
+    return (kinds(a)[0] === 'table' && kinds(a).includes('points') && /### Comparison/.test(a.a.answer_text) && kinds(b).filter((k) => k === 'table').length === 1) || { a: kinds(a), b: kinds(b) };
+  });
+  await check('v62 L (must not change): a plan with no comparison shows only the jobs the evidence check lists', async () => {
+    replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor(withFacts, { aiOpts: { aiCalls: 1 } });
+    return (!a.sections.some((s) => s.kind === 'table') && a.sections.some((s) => s.kind === 'points')) || a.sections.map((s) => s.kind);
+  });
+  await check('v61 K: under an answer the AI wrote, the list is split: "News used in the answer" (the news it cites) first, then "Other news found"; nothing hidden', async () => {
+    replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const lists = a.sections.filter((x) => x.kind === 'list');
+    const used = lists.find((x) => x.title === 'News used in the answer');
+    const other = lists.find((x) => x.title === 'Other news found');
+    return (used && other && used.items.length === 1 && /Lancôme opens/.test(used.items[0].title) && other.items.length > 0 &&
+      /### News used in the answer[\s\S]*### Other news found/.test(a.answer_text)) || { titles: a.sections.map((x) => `${x.title}:${(x.items || []).length}`), text: a.answer_text.slice(0, 400) };
+  });
+  await check('v61 K (must not change): an answer written by code, or a list answer with no AI text, keeps ONE "News found" list', async () => {
+    replies = { dynamic_rag_answer_v1: 'x' };
+    const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
+    const lists = a.sections.filter((x) => x.kind === 'list');
+    return (a.summary_by !== 'ai' && lists.length === 1 && lists[0].title === 'News found') || { by: a.summary_by, titles: a.sections.map((x) => x.title) };
   });
   await check('The AI may name the points ([P1], [P1, P2]) or write [1, 3]: read as their source numbers; a number written twice is listed once', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: [FACTS, FACTS], dynamic_rag_answer_v1: [J({ answer: 'The UAE bans parabens in cosmetics [P1]. Saudi Arabia sets halal rules [P1, P2].' }), (t) => J({ answer: `The UAE bans parabens in cosmetics [1, 2][1].` })] };
@@ -5934,6 +6014,30 @@ async function testV51() {
     const a = await runSearch('retrieve_data', { query: 'faivleytech sustainable packaging', companies: ['Faivleytech'] });
     const b = await runSearch('structured_search', { modules: ['policy'], companies: ['Faivleytech'] });
     return (ids(a).join() === 'pfv' && /one letter more or changed/.test(a.output.note) && ids(b).join() === 'pfv') || { a: ids(a), note: a.output && a.output.note, b: ids(b) };
+  });
+  await check('v72: a Competitive Radar news is a whole card, so the article of the card closest to the question gets open_id (the article a click opens inside the card); no question word in any article -> the newest; other tabs get no open_id; a failed read is noted and the card opens as the card', async () => {
+    const u = understoodFor({ question_text: 'Estée Lauder serum launch in Saudi Arabia' });
+    const r = await runSearch('retrieve_data', { query: 'serum launch saudi' }, u, { cardSignals: true });
+    const x1 = r.output.items.find((i) => i.signal_id === 'x1');
+    const others = r.output.items.filter((i) => i.module !== 'competitor');
+    const r2 = await runSearch('retrieve_data', { query: 'bonus points' }, understoodFor({ question_text: 'loyalty bonus points' }), { cardSignals: true });
+    const y1 = r2.output.items.find((i) => i.signal_id === 'x1');
+    const r3 = await runSearch('retrieve_data', { query: 'serum launch saudi' }, u, { cardSignals: 'fail' });
+    const z1 = r3.output.items.find((i) => i.signal_id === 'x1');
+    const r4 = await runSearch('retrieve_data', { query: 'serum launch saudi' }, u);
+    const w1 = r4.output.items.find((i) => i.signal_id === 'x1');
+    return (x1 && x1.open_id === 'e2' && others.length > 0 && others.every((i) => !i.open_id) && y1 && y1.open_id === 'e1' &&
+      z1 && !z1.open_id && /articles of 1 Competitive Radar cards could not be read/.test(r3.output.note || '') && w1 && !w1.open_id) ||
+      { x1: x1 && x1.open_id, y1: y1 && y1.open_id, z1: z1 && z1.open_id, note: r3.output.note };
+  });
+  await check('v68 Q: words about the FORM of the answer (news, headlines, sources, links, articles, reports, updates) are left out of the text searched by meaning ("power grid news headlines source links" -> "power grid"); a search of only such words ("news updates") stays as written', async () => {
+    const a = runner.searchTextOf('power grid news headlines source links');
+    const b = runner.searchTextOf('news updates');
+    const c = runner.searchTextOf('Estée Lauder social impact report');
+    const d = runner.searchTextOf('halal certification deadline cosmetics Indonesia');
+    const r = await runSearch('retrieve_data', { query: 'lg hair loss compound rhamsydil news updates' });
+    return (a === 'power grid' && b === 'news updates' && c === 'Estée Lauder social impact' && d === 'halal certification deadline cosmetics Indonesia' &&
+      r.output.timing.search_text === 'lg hair loss compound rhamsydil' && ids(r)[0] === 'prh') || [a, b, c, d, r.output && r.output.timing];
   });
   await check('v58 (I2): more close news than fit ("cosmetic rules in indonesia"): a NEWER news on a topic of the best news ("halal", newer than every best news holding it) takes a place: the 2028 news is kept; a newer news about nothing the best news are about (junk), one not close (0.30) and an older one on the same topic never take a place; noted', async () => {
     const r = await runSearch('retrieve_data', { query: 'cosmetic rules in indonesia', modules: ['policy'], countries: ['Indonesia'] }, understoodFor({ places: ['Indonesia'], question_text: 'cosmetic rules in indonesia' }), { v58: true });
@@ -6535,6 +6639,8 @@ async function testDbCheck() {
     });
     const text = String(j.answer || '');
     for (const w of t.say || []) if (!text.toLowerCase().includes(String(w).toLowerCase())) problems.push(`the answer does not say "${w}"`);
+    // 27 Nov: a comparison question must show its side-by-side table
+    if (t.table && !/### Comparison/.test(text)) problems.push('the answer has no comparison table');
     const ok = problems.length === 0;
     byKind[t.kind] = byKind[t.kind] || { pass: 0, fail: 0 };
     byKind[t.kind][ok ? 'pass' : 'fail'] += 1;
@@ -6545,7 +6651,9 @@ async function testDbCheck() {
     // what each search looked for and found (debug, test tools only)
     const run = j.debug && j.debug.runWorkflow;
     const tasks = (j.debug && j.debug.buildWorkflow && j.debug.buildWorkflow.tasks) || [];
-    if (run && !ok) {
+    // "dbcheck q71 steps": the searches of a PASSED question are printed too
+    const showAll = process.argv.slice(2).map((x) => x.toLowerCase()).includes('steps');
+    if (run && (!ok || showAll)) {
       for (const [id, res] of Object.entries(run.results || {})) {
         if (!['retrieve_data', 'structured_search'].includes(res.capability)) {
           const why = res.output && res.output.removed ? Object.entries(res.output.removed.reasons || {}).map(([a, b]) => `${a} ${b}`).join(', ') : '';
@@ -6879,7 +6987,7 @@ async function runQuestionBank() {
     const det = j.answer_details || {};
     const status = det.status || j.status || `http ${r.status}`;
     const sources = det.sources || [];
-    const answer = String(j.answer || '').split('**Sources:**')[0].trim();
+    const answer = String(j.answer || '').split(/\*\*(?:Sources|Key Signals Leading to This Intelligence):\*\*/)[0].trim();
     const problems = [];
     let verdict = null;
     let reason = '';
