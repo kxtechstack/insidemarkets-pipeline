@@ -750,12 +750,21 @@ async function testStep3() {
     ['two competitors', cleanedWith({ companies_named: [{ name: 'Lancôme', kind: 'competitor' }, { name: 'Estée Lauder', kind: 'competitor' }] })],
     ['a place', cleanedWith({ places_named: ['Middle East'] })],
     ['"competitors"', cleanedWith({ preprocessed_query: 'which competitor is growing fastest and what should we do' })],
+    ['a tab of the client ("future outlook", v60 J1)', cleanedWith({ preprocessed_query: 'what is midterm product future outlook? what are expected changes' })],
+    ['a tab of the client ("policy alerts", v60 J1)', cleanedWith({ preprocessed_query: 'any new policy alerts' })],
+    ['a tab of the client ("market dynamics", v60 J1)', cleanedWith({ preprocessed_query: 'whats new in market dynamics' })],
   ]) {
     await check(`clarification but the question names ${what} -> accept (decided by code, reason kept)`, async () => {
       const r = decide({ label: 'clarification', reason: 'no topic', question: 'Which product?' }, cleaned);
       return (r.status === 'accept' && r.changed_by_code === true && /no topic/.test(r.reason)) || r;
     });
   }
+  await check('v60 J1 (must not change): a topic word that is not a tab name ("what are the rules?", "any regulations") is still asked back; the "competitors" reason is not doubled', async () => {
+    const a = decide({ label: 'clarification', reason: 'r', question: 'Which place?' }, cleanedWith({ preprocessed_query: 'what are the rules?' }));
+    const b = decide({ label: 'clarification', reason: 'r', question: 'Which place?' }, cleanedWith({ preprocessed_query: 'any regulations' }));
+    const c = decide({ label: 'clarification', reason: 'r', question: 'Which?' }, cleanedWith({ preprocessed_query: 'what are competitors doing' }));
+    return (a.status === 'clarification' && b.status === 'clarification' && c.status === 'accept' && !/Competitive Radar/.test(c.reason)) || [a, b, c];
+  });
   await check('clarification and the question names nothing ("tell me abt the mkt") -> still asked back', async () => {
     const r = decide({ label: 'clarification', reason: 'r', question: 'Which market do you mean?' }, cleanedWith({ preprocessed_query: 'tell me abt the mkt' }));
     return r.status === 'clarification' || r;

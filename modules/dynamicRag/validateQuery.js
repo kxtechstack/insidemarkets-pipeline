@@ -134,6 +134,17 @@ function topicsFound(cleaned) {
   for (const c of cleaned.companies_named || []) found.push(`${c.name} (${c.kind})`);
   for (const p of cleaned.places_named || []) found.push(`${p} (place)`);
   if (/\b(competitors?|rivals?|competition)\b/i.test(String(cleaned.preprocessed_query || ''))) found.push('competitors of the client');
+  // 27 Nov (DI tab, "what is midterm product future outlook? what are
+  // expected changes" -> asked back "electric vehicles, coffee, or
+  // smartphones?"): a question naming one of the client's own tabs is about
+  // that tab's news, like "competitors" above. The tab names are the plan's
+  // own (buildWorkflow modulesNamed, tab names only: "outlook", "policy",
+  // "market dynamics", "competitive radar"); topic words like "rules" do
+  // not count here.
+  const TAB_NAMES = { policy: 'Policy and Risk', competitor: 'Competitive Radar', market: 'Market Dynamics', outlook: 'Forward Outlook' };
+  for (const m of require('./buildWorkflow').modulesNamed(cleaned.preprocessed_query, null, true)) {
+    if (m !== 'competitor' || !found.includes('competitors of the client')) found.push(`the client's ${TAB_NAMES[m] || m} news`);
+  }
   return found;
 }
 
