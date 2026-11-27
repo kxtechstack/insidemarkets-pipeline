@@ -428,7 +428,9 @@ function codeSummary(sections, nothing, foundNews = false, named = false) {
     if (n === 1) return named ? ANSWER_TEXT.named_list_intro_one : ANSWER_TEXT.list_intro_one;
     return (named ? ANSWER_TEXT.named_list_intro : ANSWER_TEXT.list_intro).replace('{n}', String(n));
   }
-  const lead = { fact: '', interpretation: 'The news suggests that ', hypothesis: 'One idea to test: ' };
+  // v88 (Sneha): no "The news suggests that ..." in the answer: it is written
+  // about the topic itself (the part below still marks it an interpretation)
+  const lead = { fact: '', interpretation: '', hypothesis: 'One idea to test: ' };
   const sentence = (text, ns) => `${String(text).trim().replace(/[.;:,]+$/, '')} ${cites(ns)}.`;
   const out = [];
   const said = [];
@@ -457,7 +459,7 @@ function codeSummary(sections, nothing, foundNews = false, named = false) {
         const parts = row.cells.map((c, k) => (c.text ? `${s.sides[k]}: ${c.text.replace(/[.;]+$/, '')}` : `${s.sides[k]}: ${ANSWER_TEXT.no_news_cell}`));
         out.push(sentence(`On ${row.point}, ${parts.join('; ')}`, [...new Set(row.cells.flatMap((c) => c.sources))].sort((a, b) => a - b)));
       } else if (s.differences.length) {
-        out.push(sentence(`The news suggests that ${smallFirstLetter(s.differences[0].text)}`, s.differences[0].sources));
+        out.push(sentence(String(s.differences[0].text).replace(/^\p{Ll}/u, (c) => c.toUpperCase()), s.differences[0].sources));
       }
     }
   }
@@ -530,6 +532,15 @@ function ownNameIn(text, ownName) {
 const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || '')) || /(^|[^A-Za-z])us([^A-Za-z]|$)/.test(String(question || '')) || ownNameIn(question, ownName);
 
 const LIMIT_START_WORDS = 5;
+// v88 (Sneha: "in every answer it says the news says, the news shows ... it
+// should be normal"): the answer talks about the topic, never about the
+// news. A sentence that only says the answer rests on few news is taken out
+// (the evidence line below says it); "based on limited news" inside a
+// sentence, "According to the news," and "The news shows that ..." at its
+// start are taken out of it (small grammar sets).
+const ABOUT_NEWS_ONLY = /^(?:this|the)\s+(?:answer|information|summary)\s+(?:is|rests)\s+(?:only\s+)?(?:based\s+)?on\s+(?:limited|few|a few)\s+news\b/i;
+const NEWS_LEAD = /^(?:(?:according to|based on|from|in)\s+(?:the\s+)?(?:limited\s+)?(?:news|news items?|data),?\s+|(?:the|this|these)\s+news(?:\s+items?)?\s+(?:also\s+)?(?:shows?|says?|suggests?|indicates?|reports?|reveals?|states?|confirms?|highlights?|mentions?)\s+that\s+)/i;
+const LIMITED_NEWS = /,?\s*(?:and\s+)?based on (?:limited|few|a few) news(?:\s+items?)?(?=[\s.,;\[]|$)/gi;
 const SAME_POINT_SHARE = 0.7;
 // v84 (Sneha, "list the tariff updates"): the user's OWN words ask for a
 // list (not the goal the AI guessed): every news found is a Key Signal
@@ -585,6 +596,9 @@ function checkSummary(text, book, points, question, ownName = null, limits = [])
   for (const [index, raw] of sentences.entries()) {
     if (index === 1 && !kept.length) firstOut = true;
     let sentence = raw.trim();
+    if (ABOUT_NEWS_ONLY.test(sentence)) { problems.push(`taken out (says only that the news is limited): ${cut(sentence, 120)}`); continue; }
+    sentence = sentence.replace(LIMITED_NEWS, '').replace(/^,\s*/, '');
+    if (NEWS_LEAD.test(sentence)) sentence = sentence.replace(NEWS_LEAD, '').replace(/^\p{Ll}/u, (c) => c.toUpperCase());
     // 27 Nov (Sneha, Indonesia entry, fix 2): the AI copied a line of what
     // was not found into the answer, cut and with sources that are not its
     // own ("No news found for "Indonesia cosmetics market attractiveness

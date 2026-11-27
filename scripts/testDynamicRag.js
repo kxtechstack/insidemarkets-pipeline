@@ -5743,7 +5743,8 @@ async function testStep10() {
     const b = one('AI is set to speed product development');
     const c = one('Shiseido is taking legal action');
     const d = one('Skims Beauty is preparing to launch in 2027');
-    return (/that more targeted/.test(a) && /that AI is/.test(b) && /that Shiseido is/.test(c) && /that Skims Beauty/.test(d)) || [a, b, c, d];
+    // v88: no "The news suggests that" lead any more: each point keeps its own first letter
+    return (/^More targeted/.test(a) && /^AI is/.test(b) && /^Shiseido is/.test(c) && /^Skims Beauty/.test(d) && ![a, b, c, d].some((x) => /news suggests/i.test(x))) || [a, b, c, d];
   });
   await check('v61 N2: code\'s short answer does not say the same news twice (a Trends point resting on the same sources as the Summary point, in other words, gives its place to the next Trends point); different points are all kept (must not change)', async () => {
     const secs = [
@@ -5920,7 +5921,7 @@ async function testStep10() {
       job('T3', 'compare', { sides: [{ label: 'United Arab Emirates', ref: 'T1.output' }, { label: 'Saudi Arabia', ref: 'T2.output' }] }, ['T1', 'T2']), job('T4', 'validate_evidence', { findings: ['T3.output'] }, ['T3'])], { aiOpts: { aiCalls: 1 } });
     replies.dynamic_rag_answer_v1 = 'x';
     const p = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])], { aiOpts: { aiCalls: 1 } });
-    return (/^On rules, United Arab Emirates: Parabens ban; Saudi Arabia: Halal rules \[\d\]\[\d\]\.$/.test(c.a.summary) && /^The news suggests that more Gulf rules \[1\]\[2\]\.$/.test(p.a.summary)) || [c.a.summary, p.a.summary];
+    return (/^On rules, United Arab Emirates: Parabens ban; Saudi Arabia: Halal rules \[\d\]\[\d\]\.$/.test(c.a.summary) && /^More Gulf rules \[1\]\[2\]\.$/.test(p.a.summary)) || [c.a.summary, p.a.summary];
   });
   await check('A comparison table ends with the row made by code: "news items found in your data" for each side; code\'s own short answer never uses that row; the short answer may use the numbers', async () => {
     replies = { dynamic_rag_job_compare_v1: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] } } }], differences: [] }), dynamic_rag_answer_v1: 'x' };
@@ -6088,6 +6089,13 @@ async function testStep10() {
     const r4 = answerer.checkSummary('The weather was sunny all week long [5].', book, pts, 'what is operation soundarya');
     return (r.ok && /\[1\]\.$/.test(r.text) && !/\[5\]|\[8\]/.test(r.text) && q === 'operation soundarya' && !/\[9\]|\[12\]/.test(r2.text || '') &&
       r3.ok && /lipsticks in Kerala \[1\]\.$/.test(r3.text) && !/sunny/.test(r4.text || '')) || { r, r2, r3, r4, q };
+  });
+  await check('v88: the answer talks about the topic, not the news: "This answer is based on limited news" is taken out, "based on limited news" inside a sentence and "The news shows that" / "According to the news," at its start are removed; code\'s answer has no "The news suggests that"', async () => {
+    const book = answerer.sourceBook({ sources: { 'x:1': { title: 'UAE bans parabens in cosmetics', text: 'The UAE bans parabens in cosmetics.', date: '2026-08-27', module: 'policy' } } });
+    const pts = [{ code: 'P1', kind: 'fact', text: 'The UAE bans parabens in cosmetics', sources: book.nums(['x:1']) }];
+    const r = answerer.checkSummary('The news shows that the UAE bans parabens in cosmetics [1]. Yes, the UAE bans parabens in cosmetics, based on limited news [1]. According to the news, the UAE bans parabens in cosmetics [1]. This answer is based on limited news [1].', book, pts, 'q');
+    const c = answerer.codeSummary([{ title: 'Trends', kind: 'points', points: [{ text: 'Gulf rules tighten', kind: 'interpretation', sources: [1] }] }], false, true, false);
+    return (r.ok && !/news/i.test(r.text) && /^The UAE bans parabens in cosmetics \[1\]\./.test(r.text) && r.problems.some((p) => /says only that the news is limited/.test(p)) && c === 'Gulf rules tighten [1].') || { t: r.text, p: r.problems, c };
   });
   await check('v78 fix 2: a sentence of the short answer that copies a line of what was not found ("No news found for ...") is taken out; the line stays in the list under the answer', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}. No news found for "zz nothing here at all" ${nums(t, 'UAE bans parabens')}.` }) };
