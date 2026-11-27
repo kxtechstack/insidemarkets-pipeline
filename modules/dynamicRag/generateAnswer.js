@@ -208,20 +208,43 @@ function buildSections(run, workflow, book) {
       first.points.push(...x.points);
       first.empty_headings = [...new Set([...first.empty_headings, ...(x.empty_headings || [])])];
     }
-    const words = (p) => new Set(String(p.text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean));
-    const inside = (a, b) => [...a].every((w) => b.has(w));
+    // v79 (Sneha, Indonesia entry, B): two opportunity steps wrote "Build a
+    // halal-ready Indonesia product line before entry, with formulas ..." and
+    // "Build a halal-ready Indonesia product line aligned with BPJPH
+    // requirements before entry": not all words inside, other sources. Two
+    // points under the same heading are the same when SAME_POINT_SHARE of the
+    // shorter one's words (3+ letters) are in the other and they hold the
+    // same numbers (two price cuts of other products never merge): the
+    // longer one is kept, with the sources of both.
+    const words = (p) => new Set(String(p.text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter((w) => w.length >= 3));
+    const numsOf = (p) => (String(p.text || '').match(/\d+(?:[.,]\d+)?/g) || []).sort().join(' ');
+    const same = (p, q) => {
+      if ((p.heading || '') !== (q.heading || '') || numsOf(p) !== numsOf(q)) return false;
+      const a = words(p);
+      const b = words(q);
+      const small = a.size <= b.size ? a : b;
+      const big = small === a ? b : a;
+      return small.size > 0 && [...small].filter((w) => big.has(w)).length / small.size >= SAME_POINT_SHARE;
+    };
     for (const x of byTitle.values()) {
       const kept = [];
       for (const p of x.points) {
-        const k = kept.findIndex((q) => (inside(words(p), words(q)) && p.sources.every((n) => q.sources.includes(n))) || (inside(words(q), words(p)) && q.sources.every((n) => p.sources.includes(n))));
+        const k = kept.findIndex((q) => same(p, q));
         if (k < 0) { kept.push(p); continue; }
-        if (String(p.text).length > String(kept[k].text).length) kept[k] = p;
+        const both = [...new Set([...kept[k].sources, ...p.sources])].sort((m, n) => m - n);
+        kept[k] = { ...(String(p.text).length > String(kept[k].text).length ? p : kept[k]), sources: both };
       }
       x.points = kept;
       x.empty_headings = x.empty_headings.filter((h) => !kept.some((p) => p.heading === h));
     }
+    // v79 (Sneha, sustainability, E): our own side was not compared, the
+    // table kept one column ("Competitors": 3 titles picked by date, not by
+    // topic) while the summary already said it all. A table with one side
+    // is shown only when it is the only part.
+    const rest = one.filter((x) => !(x.kind === 'table' && (x.sides || []).length < 2));
+    const hasContent = (x) => (x.points || x.rows || x.items || []).length > 0;
     sections.length = 0;
-    sections.push(...one);
+    sections.push(...(rest.some(hasContent) ? rest : one));
   }
   // 25 Nov (Step 10 report): "Forward outlook signals about sustainability"
   // showed the same news three times (three searches = three lists, "60 news
@@ -311,7 +334,7 @@ function limitsOf(run, evidence) {
   if (evidence && (evidence.conflicts || []).length) out.push(ANSWER_TEXT.conflicts);
   for (const r of Object.values(run.results || {})) {
     if (r.capability === 'compare' && r.status === 'done' && r.output && r.output.made_by === 'code') out.push(ANSWER_TEXT.compare_by_code);
-    if (r.capability === 'compare' && r.status === 'done' && r.output && r.output.own_not_compared) out.push(ANSWER_TEXT.own_not_compared.replace('{name}', r.output.own_not_compared));
+    if (r.capability === 'compare' && r.status === 'done' && r.output && r.output.own_not_compared) out.push(ANSWER_TEXT.own_not_compared.split('{name}').join(r.output.own_not_compared));   // every {name} (27 Nov: the second stayed)
   }
   return [...new Set(out)];
 }
@@ -498,6 +521,8 @@ function ownNameIn(text, ownName) {
 const questionAboutUs = (question, ownName) => ABOUT_US.test(String(question || '')) || /(^|[^A-Za-z])us([^A-Za-z]|$)/.test(String(question || '')) || ownNameIn(question, ownName);
 
 const LIMIT_START_WORDS = 5;
+const SAME_POINT_SHARE = 0.7;
+const SUMMARY_MAX_CHARS = 1200;
 const BACK_WORDS = /^["']?(other|others|it|its|this|that|these|those|they|their|also|however|but|still|yet|instead|meanwhile|both)\b/i;
 // 27 Nov (YSL "price changes in the UK", fix 1): the answer began "The news
 // ALSO points to ...": a word that adds to something said before, a few
@@ -506,7 +531,15 @@ const ADDED_WORDS = /^["']?(\S+\s+){1,3}(also|too|additionally|furthermore|furth
 function checkSummary(text, book, points, question, ownName = null, limits = []) {
   const usAsked = questionAboutUs(question, ownName);
   const problems = [];
-  let t = cut(text, 1200);
+  // v79 (Sneha, EU full view, C): a long answer was cut in the middle ("…").
+  // It is cut after the last whole sentence within SUMMARY_MAX_CHARS.
+  let t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (t.length > SUMMARY_MAX_CHARS) {
+    const head = t.slice(0, SUMMARY_MAX_CHARS);
+    const ends = [...head.matchAll(/[.!?](?:\s*\[[^\]]{1,12}\])*(?=\s|$)/g)];
+    const last = ends.length ? ends[ends.length - 1] : null;
+    t = last ? head.slice(0, last.index + last[0].length) : cut(t, SUMMARY_MAX_CHARS);
+  }
   if (!t) return { ok: false, problems: ['empty answer'] };
   // the AI may name the points ([P1], [P2, P3]) or write [1, 3]: a point
   // number stands for that point's sources; [1, 3] = [1][3]

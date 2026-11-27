@@ -5998,6 +5998,37 @@ async function testStep10() {
     return (u1 === 'Mandatory halal certification covers imported cosmetics.' && u2 === 'New guidelines create a gap.' && u3 === 'Vitamin D3 and dyes K3 and K10 are restricted.' && u4 === 'A1 rules apply.' &&
       f.why === 'The UAE bans parabens.' && !/\b[SFP]\d+\b/.test(a.answer_text.split('**Key Signals')[0])) || { u1, u2, u3, u4, why: f.why, s: a.summary };
   });
+  await check('v79 A: "{name}" is filled everywhere in a line of what was not done ("not about Lumière Beauty Group itself, so Lumière Beauty Group is not compared"); E: a table left with one side is not shown next to other parts, shown when it is the only part (must not change)', async () => {
+    replies = { dynamic_rag_job_summarise_v1: (t) => J({ points: [{ text: 'Estée Lauder launches a serum in Saudi Arabia', sources: [code(t, 'Estée Lauder launches')] }] }), dynamic_rag_answer_v1: J({ answer: 'x' }) };
+    const cmp = (more) => [search('T1', { companies: ['Estée Lauder'] }), search('T2', { query: 'cosmetics rules' }),
+      job('T3', 'compare', { sides: [{ label: 'Estée Lauder', ref: 'T1.output' }, { label: 'Lumière Beauty Group', ref: 'T2.output' }], dimensions: ['launches'] }, ['T1', 'T2']),
+      ...more, job('T4', 'validate_evidence', { findings: ['T3.output', ...more.map((m) => `${m.task_id}.output`)] }, ['T3', ...more.map((m) => m.task_id)])];
+    const { a } = await answerFor(cmp([job('T5', 'summarise', { input: ['T1.output'] }, ['T1'])]));
+    const { a: b } = await answerFor(cmp([]));
+    const line = a.limits.find((l) => /is not compared/.test(l)) || '';
+    return (!/\{name\}/.test(line) && /so Lumière Beauty Group is not compared/.test(line) && !a.sections.some((x) => x.kind === 'table') && a.sections.some((x) => x.kind === 'points') &&
+      b.sections.some((x) => x.kind === 'table')) || { line, a: a.sections.map((x) => x.kind), b: b.sections.map((x) => x.kind) };
+  });
+  await check('v79 B: two points that say nearly the same (70% of the shorter one\'s words, same numbers) are ONE point with the sources of both; points with other numbers stay two (must not change)', async () => {
+    const pts1 = (t) => J({ points: [{ text: 'Build a halal-ready UAE product line before entry, with formulas aligned to the paraben ban', sources: [code(t, 'UAE bans parabens')] },
+      { text: 'The UAE bans parabens in 3 cosmetics product types', sources: [code(t, 'UAE bans parabens')] }] });
+    const pts2 = (t) => J({ points: [{ text: 'Build a halal-ready UAE product line aligned with the paraben ban before entry', sources: [code(t, 'Saudi Arabia sets halal')] },
+      { text: 'The UAE bans parabens in 5 cosmetics product types', sources: [code(t, 'UAE bans parabens')] }] });
+    replies = { dynamic_rag_job_summarise_v1: [pts1, pts2], dynamic_rag_answer_v1: J({ answer: 'x' }) };
+    const { a } = await answerFor([search('T1'), job('T2', 'summarise', { input: ['T1.output'] }, ['T1']), job('T3', 'summarise', { input: ['T1.output'], focus: 'other' }, ['T1']),
+      job('T4', 'validate_evidence', { findings: ['T2.output', 'T3.output'] }, ['T2', 'T3'])]);
+    const sum = a.sections.find((x) => x.title === 'Summary') || { points: [] };
+    const halal = sum.points.filter((p) => /halal-ready/.test(p.text));
+    return (halal.length === 1 && halal[0].sources.length === 2 && /with formulas/.test(halal[0].text) && sum.points.filter((p) => /product types/.test(p.text)).length === 2) || sum.points.map((p) => [p.text, p.sources]);
+  });
+  await check('v79 C: a short answer longer than the limit is cut after its last whole sentence, never in the middle with "…"', async () => {
+    const book = answerer.sourceBook({ sources: { 'x:1': { title: 'UAE bans parabens in cosmetics', text: 'The UAE bans parabens in cosmetics.', date: '2026-08-27', module: 'policy' } } });
+    const pts = [{ code: 'P1', kind: 'fact', text: 'The UAE bans parabens in cosmetics', sources: book.nums(['x:1']) }];
+    const one = `The UAE bans parabens [1] in cosmetics, ${Array.from({ length: 12 }, () => 'in every product sold in the country').join(', ')} [1].`;
+    const long = [one, one, one].join(' ');
+    const r = answerer.checkSummary(long, book, pts, 'q');
+    return (r.text && !/…/.test(r.text) && /\[1\]\.$/.test(r.text) && r.text.length <= 1200) || { t: r.text && r.text.slice(-80), n: r.text && r.text.length };
+  });
   await check('v78 fix 2: a sentence of the short answer that copies a line of what was not found ("No news found for ...") is taken out; the line stays in the list under the answer', async () => {
     replies = { dynamic_rag_job_extract_facts_v1: FACTS, dynamic_rag_answer_v1: (t) => J({ answer: `The UAE bans parabens in cosmetics ${nums(t, 'UAE bans parabens')}. No news found for "zz nothing here at all" ${nums(t, 'UAE bans parabens')}.` }) };
     const tasks = [search('T1'), search('T2', { query: 'zz nothing here at all', modules: ['policy'], countries: ['Atlantis'] }),
