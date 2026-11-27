@@ -680,6 +680,14 @@
           "outlook:006f66e4-509d-4889-b1c9-9bf871f29327"
         ]
       ]
+    },
+    {
+      "kind": "rules + place (broad)",
+      "q": "cosmetic rules in indonesia",
+      "say": [
+        "2028",
+        "notification"
+      ]
     }
   ]
 }

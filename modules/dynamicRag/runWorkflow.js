@@ -858,16 +858,17 @@ const addReasons = (into, from) => { for (const [k, v] of Object.entries(from)) 
 // competitor news left out is counted). Competitor news that holds the
 // topic word, or topics of common words only ("awards"): nothing changes.
 const COMMON_WORD_RANK = 5000;
+// a word's place in the most-used list (a word ending in s / ed / ing ... counts as its base word)
+function wordRankOf(w) {
+  if (englishWordRank.has(w)) return englishWordRank.get(w);
+  const base = WORD_ENDINGS.map((e) => (w.endsWith(e) ? w.slice(0, -e.length) : null)).filter((b) => b && englishWordRank.has(b));
+  return base.length ? Math.min(...base.map((b) => englishWordRank.get(b))) : Infinity;
+}
 function uncommonTopicWords(inputs, understood) {
   const u = understood || {};
   const names = new Set([...(inputs.companies || []), ...(inputs.countries || []), u.client && u.client.company_name]
     .filter(Boolean).flatMap((n) => plain(n).split(' ')));
-  const rankOf = (w) => {
-    englishWords();
-    if (englishWordRank.has(w)) return englishWordRank.get(w);
-    const base = WORD_ENDINGS.map((e) => (w.endsWith(e) ? w.slice(0, -e.length) : null)).filter((b) => b && englishWordRank.has(b));
-    return base.length ? Math.min(...base.map((b) => englishWordRank.get(b))) : Infinity;
-  };
+  const rankOf = (w) => { englishWords(); return wordRankOf(w); };
   const words = [...(u.topics || []), ...(u.products || [])].flatMap((t) => plain(t).split(' '));
   const rare = [...new Set(words.filter((w) => w.length >= 4 && /^[a-z]+$/.test(w) && !names.has(w) && rankOf(w) > COMMON_WORD_RANK))];
   return rare.sort((a, b) => rankOf(b) - rankOf(a)).slice(0, 1);   // the rarest one
@@ -889,6 +890,72 @@ async function retrieveData(inputs, ctx) {
   if (wide.items.length > onTopic.length) reasons['other news not about the topic'] = wide.items.length - onTopic.length;
   const count = Object.values(reasons).reduce((a, b) => a + b, 0);
   return { ...wide, items: onTopic, removed: { count, reasons }, note: [note, wide.note].filter(Boolean).join('; ') };
+}
+// 27 Nov (dbcheck #70 "cosmetic rules in indonesia"): 51 Indonesia news
+// were close to the question (0.78 to about 0.5); the best 20 by closeness
+// were kept, and the news saying the halal deadline was moved to 2028 (the
+// newest, 12 Nov, 0.51) was left out, less close than ten older copies of
+// "halal by October 2026": the answer gave a deadline that had passed.
+// Closeness alone cannot pick it: junk ("BASF partnership", "Japanese
+// skincare", 0.53-0.55) is closer (I, v58, let junk in and pushed the
+// expected news of #58 "mercury in face creams" out). What makes it count:
+// it UPDATES the top news. So (I2): when a search has more news than fit,
+// a news of the rest takes one of the last NEWEST_PLACES places only when
+//   - its closeness is within NEWEST_BAND of the last place,
+//   - its title shares an uncommon word (past the COMMON_WORD_RANK most used
+//     English words) with at least 2 titles of the best ones, a word that is
+//     not a word of the question, a place or a company asked, or the client's
+//     industry (those are what every news found shares: "cosmetic",
+//     "indonesia"),
+//   - and it is NEWER than every one of the best news holding that word.
+// Newest first; noted. Nothing updates the top news -> nothing changes.
+const NEWEST_PLACES = 5;
+const NEWEST_BAND = 0.15;
+function uncommonTitleWords(title) {
+  englishWords();
+  return new Set(plain(title).split(' ').filter((w) => w.length >= 4 && /^[a-z]+$/.test(w) && wordRankOf(w) > COMMON_WORD_RANK).map(stemOf));
+}
+// The closeness is the search's own rank (news found by a rare word of its
+// title stays ahead of the wide search: a newer wide-search news never takes
+// its place).
+function newestShare(kept, max, notes, rankOf = null, asked = []) {
+  const seen = new Set();
+  const uniq = [];
+  const copies = [];
+  for (const it of kept) {
+    const k = plain(it.title);
+    if (k && seen.has(k)) { copies.push(it); continue; }
+    if (k) seen.add(k);
+    uniq.push(it);
+  }
+  if (uniq.length <= max || max <= NEWEST_PLACES) return kept;
+  const score = rankOf || ((it) => (it.score == null ? MIN_SEARCH_SCORE : it.score));
+  const bar = score(uniq[max - 1]) - NEWEST_BAND;
+  const head = uniq.slice(0, max - NEWEST_PLACES);
+  const rest = uniq.slice(max - NEWEST_PLACES);
+  const askedWords = new Set(asked.filter(Boolean).flatMap((t) => plain(t).split(' ')).filter(Boolean).map(stemOf));
+  const words = new Map(uniq.map((it) => [it, new Set([...uncommonTitleWords(it.title)].filter((w) => !askedWords.has(w)))]));
+  // the topic words of the best news, and the newest date of each
+  const newestOf = new Map();
+  const inHead = new Map();
+  for (const it of head) {
+    for (const w of words.get(it)) {
+      inHead.set(w, (inHead.get(w) || 0) + 1);
+      const d = String(it.date || '');
+      if (!newestOf.has(w) || d > newestOf.get(w)) newestOf.set(w, d);
+    }
+  }
+  const topic = new Set([...inHead].filter(([, n]) => n >= 2).map(([w]) => w));
+  const updates = (it) => [...words.get(it)].filter((w) => topic.has(w) && String(it.date || '') > newestOf.get(w));
+  const newest = rest.filter((it) => score(it) >= bar && updates(it).length)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+    .slice(0, NEWEST_PLACES);
+  const moved = newest.filter((it) => rest.indexOf(it) >= NEWEST_PLACES).length;
+  if (!moved) return kept;
+  const picked = new Set(newest);
+  const on = [...new Set(newest.flatMap(updates))].slice(0, 3).map((w) => `"${w}"`).join(', ');
+  notes.push(`${moved} newer news on the topic of the best news (${on}) put in place of closer older ones`);
+  return [...head, ...newest, ...rest.filter((it) => !picked.has(it)), ...copies];
 }
 async function retrieveDataOnce(inputs, ctx) {
   const s = getStore();
@@ -1053,6 +1120,8 @@ async function retrieveDataOnce(inputs, ctx) {
   const rank = (x) => (wordTitled.has(x.source_id) ? 10 : 0) + (x.score == null ? MIN_SEARCH_SCORE : x.score);
   kept.sort((a, b) => rank(b) - rank(a));
   kept = onlyTogether(allNamesFirst(kept, inputs.companies), inputs, ctx, reasons, notes);
+  kept = newestShare(kept, max, notes, rank, [inputs.query, ctx.understood && (ctx.understood.question_text || ctx.understood.question_typed),
+    ...(inputs.countries || []), ...(inputs.companies || []), ctx.understood && ctx.understood.client && ctx.understood.client.industry]);
   const out = await noteNewest(finish(kept, inputs.label || inputs.query, reasons, notes, max), inputs, ctx, modules);
   // the news found by a rare word of its title (Step 10 shows it when the AI fails)
   if (wordTitled.size) out.titled = out.items.filter((it) => wordTitled.has(it.source_id)).map((it) => it.source_id);
@@ -2283,6 +2352,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 
 module.exports = {
   runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
+  newestShare,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,
   readReplyText: (text) => { const o = strictReply(text); return o !== undefined ? o : readReply(text); },

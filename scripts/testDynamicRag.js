@@ -4972,6 +4972,27 @@ function fakeStep9Store(opts = {}) {
     add('policy_signals', { id: 'psa2', article_id: 'psa2a', country: 'South Africa', signal_title: 'South African cloud market to double by 2029', summary: 'Cloud growth.' }, 0.7);
     add('policy_signals', { id: 'psa3', article_id: 'psa3a', country: 'South Africa', signal_title: 'Clicks takes control of ARC', summary: 'A deal.' }, null);
   }
+  if (opts.v58) {
+    // 27 Nov dbcheck #70: 24 older Indonesia rules news close to the question,
+    // one NEWER a little less close (the deadline moved to 2028), one newer far
+    const topics = ['halal certification step', 'cosmetic notification procedure', 'distribution permit revocation'];
+    for (let i = 0; i < 24; i += 1) {
+      rows.policy_signals.push({ id: `pid${i}`, client_id: C1, article_id: `pida${i}`, signal_title: `Indonesia ${topics[i % 3]} ${i}`, summary: 'Halal by October 2026.', country: 'Indonesia', source_published_date: `2026-07-${String(25 - i).padStart(2, '0')}T08:00:00Z`, impact_level: 'Low' });
+      pieces.push(piece('policy', `pida${i}`, 0.7 - i * 0.004));
+    }
+    if (!opts.v58noNew) {
+      rows.policy_signals.push({ id: 'pidNew', client_id: C1, article_id: 'pidaNew', signal_title: 'Indonesia extends halal transition period to 2028', summary: 'Moved to 2028.', country: 'Indonesia', source_published_date: '2026-11-12T08:00:00Z', impact_level: 'Low' });
+      pieces.push(piece('policy', 'pidaNew', 0.52));
+    }
+    // newer and close, but about nothing the best news are about (junk)
+    rows.policy_signals.push({ id: 'pidJunk', client_id: C1, article_id: 'pidaJunk', signal_title: 'Japanese skincare grows popular with shoppers', summary: 'J-beauty.', country: 'Indonesia', source_published_date: '2026-11-02T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pidaJunk', 0.6));
+    // on a topic of the best news, but OLDER than them (no update)
+    rows.policy_signals.push({ id: 'pidOld', client_id: C1, article_id: 'pidaOld', signal_title: 'Indonesia halal certification recap', summary: 'Recap.', country: 'Indonesia', source_published_date: '2026-06-01T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pidaOld', 0.6));
+    rows.policy_signals.push({ id: 'pidFar', client_id: C1, article_id: 'pidaFar', signal_title: 'Indonesia hosts a beauty fair', summary: 'A fair.', country: 'Indonesia', source_published_date: '2026-11-20T08:00:00Z', impact_level: 'Low' });
+    pieces.push(piece('policy', 'pidaFar', 0.3));
+  }
   if (opts.v55) {
     // 27 Nov bank run: eyelash serum news of an unnamed cosmetics company
     rows.policy_signals.push({ id: 'pes', client_id: C1, article_id: 'pesa', signal_title: 'Cosmetic company falsely advertises eyelash serums with a harmful ingredient', summary: 'The serums hold a prostaglandin analogue.', country: 'United States', source_published_date: '2025-02-12T08:00:00Z', impact_level: 'Low' });
@@ -5905,6 +5926,20 @@ async function testV51() {
     const b = await runSearch('structured_search', { modules: ['policy'], companies: ['Faivleytech'] });
     return (ids(a).join() === 'pfv' && /one letter more or changed/.test(a.output.note) && ids(b).join() === 'pfv') || { a: ids(a), note: a.output && a.output.note, b: ids(b) };
   });
+  await check('v58 (I2): more close news than fit ("cosmetic rules in indonesia"): a NEWER news on a topic of the best news ("halal", newer than every best news holding it) takes a place: the 2028 news is kept; a newer news about nothing the best news are about (junk), one not close (0.30) and an older one on the same topic never take a place; noted', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetic rules in indonesia', modules: ['policy'], countries: ['Indonesia'] }, understoodFor({ places: ['Indonesia'], question_text: 'cosmetic rules in indonesia' }), { v58: true });
+    const top = ids(r);
+    return (top.length === 20 && top.includes('pidNew') && !top.includes('pidFar') && !top.includes('pidJunk') && !top.includes('pidOld') && top.slice(0, 15).every((x) => /^pid\d+$/.test(x)) && /newer news on the topic of the best news \("halal"/.test(r.output.note)) || { got: top, note: r.output && r.output.note };
+  });
+  await check('v58 (I2, must not change: dbcheck #58): no news is newer than the best news on their topics -> the 20 closest are kept as they are, no note (junk and older news stay out)', async () => {
+    const r = await runSearch('retrieve_data', { query: 'cosmetic rules in indonesia', modules: ['policy'], countries: ['Indonesia'] }, understoodFor({ places: ['Indonesia'], question_text: 'cosmetic rules in indonesia' }), { v58: true, v58noNew: true });
+    const top = ids(r);
+    return (top.length === 20 && top.every((x) => /^pid\d+$/.test(x)) && !/newer news on the topic/.test(r.output.note || '')) || { got: top, note: r.output && r.output.note };
+  });
+  await check('v58 (I, must not change): a search with fewer news than fit keeps its order and has no "newest" note', async () => {
+    const r = await runSearch('retrieve_data', { query: 'lg hair loss compound rhamsydl' });
+    return (ids(r)[0] === 'prh' && !/newer news on the topic/.test(r.output.note || '')) || { got: ids(r), note: r.output && r.output.note };
+  });
   await check('v55 (F): "a competitor\'s safety issues with eyelash serums" (the user named no company): none of the competitors\' news holds the rarest topic word "eyelash" (one has "serum": not enough) -> searched again without the company filter, the eyelash serum news of another company is found; noted, the competitor news left out is counted', async () => {
     const u = understoodFor({ all_competitors: true, topics: ['eyelash serum safety issues'] });
     const r = await runSearch('retrieve_data', { query: 'eyelash serum safety issues', companies: ['Lancôme', 'Estée Lauder', 'Dior'] }, u, { v51: true, v55: true });
@@ -6512,7 +6547,10 @@ async function testDbCheck() {
         const f = [i.modules && i.modules.length < 4 ? `modules ${i.modules.join('/')}` : null, i.date_from || i.date_to ? `dates ${i.date_from || '…'}..${i.date_to || '…'}` : null,
           i.countries ? `places ${i.countries.join('/')}` : null, i.companies ? `companies ${i.companies.join('/')}` : null].filter(Boolean).join(' · ');
         out(`   ${id} ${res.capability} "${i.query || '(newest)'}" ${f ? `[${f}]` : ''} -> ${res.status}, ${res.output ? res.output.items.length : 0} news${res.output && res.output.note ? ` · note: ${res.output.note}` : ''}`);
-        for (const it of ((res.output && res.output.items) || []).slice(0, 4)) out(`      ${it.date || ''} ${it.module} ${it.title.slice(0, 90)}${(t.expect || []).flat().includes(it.source_id) ? '   <- expected' : ''}`);
+        // 27 Nov: why the news was left out (counts) and every news kept, with its closeness
+        const whyOut = res.output && res.output.removed ? Object.entries(res.output.removed.reasons || {}).map(([a, b]) => `${a} ${b}`).join(', ') : '';
+        if (whyOut) out(`      left out: ${whyOut}`);
+        for (const it of ((res.output && res.output.items) || []).slice(0, 20)) out(`      ${it.score != null ? Number(it.score).toFixed(2) : ' -  '} ${it.date || ''} ${it.module} ${it.title.slice(0, 90)}${(t.expect || []).flat().includes(it.source_id) ? '   <- expected' : ''}`);
       }
     }
     out(String(text).split('\n').slice(0, 14).map((l) => `   | ${l}`).join('\n'));
