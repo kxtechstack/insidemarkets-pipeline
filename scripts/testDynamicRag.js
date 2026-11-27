@@ -5887,12 +5887,12 @@ async function testStep10() {
       !a.other_sources.some((x) => keyNs.includes(x.n)) && !/###/.test(a.body) && !/#source-(?!1\))/.test(a.body.replace(`#source-${keyNs[0]})`, '#source-1)')) &&
       /### News used in the answer[\s\S]*### Other news found/.test(a.answer_text)) || { by: a.summary_by, src: a.sources.map((x) => x.title), other: a.other_sources.length, body: a.body.slice(0, 300) };
   });
-  await check('v73 fix 2 (must not change): a question asking for a list (goal "list") keeps its list on the screen and every news in Key Signals; an answer by code too', async () => {
+  await check('v74 fix 2: the goal the AI guessed ("list") does not change it: under an AI answer Key Signals are still the cited news, the rest other_sources; an answer by code keeps its list and every news in Key Signals (must not change)', async () => {
     replies = { dynamic_rag_answer_v1: (t) => J({ answer: `Lancome opened a store in Dubai ${nums(t, 'Lancôme opens')}.` }) };
     const { a } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 }, u: { ...understood, primary_goal: 'list' } });
     replies = { dynamic_rag_answer_v1: 'x' };
     const { a: b } = await answerFor([search('T1'), job('T2', 'validate_evidence', { findings: ['T1.output'] }, ['T1'])], { aiOpts: { aiCalls: 1 } });
-    return (a.summary_by === 'ai' && a.sources.length > 1 && a.other_sources.length === 0 && /### News used in the answer/.test(a.body) &&
+    return (a.summary_by === 'ai' && a.sources.length === 1 && a.other_sources.length > 0 && !/###/.test(a.body) &&
       b.summary_by !== 'ai' && b.other_sources.length === 0 && /### News found/.test(b.body)) || { a: [a.sources.length, a.other_sources.length], b: [b.summary_by, b.other_sources.length] };
   });
   await check('v61 K (must not change): an answer written by code, or a list answer with no AI text, keeps ONE "News found" list', async () => {

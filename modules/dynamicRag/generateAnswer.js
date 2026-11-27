@@ -675,10 +675,12 @@ async function generateAnswer(run, workflow, understood, request, options = {}) 
   // and the Key Signals list (all 20; the answer used 2). Under an answer the
   // AI wrote, the screen's Key Signals are the news the answer cites (and
   // the news of its other parts); the rest of the list is other_sources (the
-  // screen shows it as one closed line), and the body has no list. A
-  // question asking for a list (goal "list") or an answer by code keeps its
-  // list as before. The saved answer text keeps everything (nothing hidden).
-  const listOnScreen = summaryBy !== 'ai' || (understood && understood.primary_goal === 'list');
+  // screen shows it as one closed line), and the body has no list. An
+  // answer by code (a list asked for: "latest policy news in the UK") keeps
+  // its list as before. The saved answer text keeps everything (nothing
+  // hidden). Not by the goal the AI guessed (v74: "Shiseido loyalty points
+  // offer" was guessed a list question and kept all 20).
+  const listOnScreen = summaryBy !== 'ai';
   const screenNums = new Set([...summary.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
   for (const s of sections) {
     if (s.kind === 'list' && !listOnScreen) continue;
