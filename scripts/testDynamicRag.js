@@ -5670,13 +5670,16 @@ async function testStep10() {
   const search = (id, extra = {}) => ({ task_id: id, capability: 'retrieve_data', inputs: { query: 'cosmetics rules', modules: MODS, ...extra }, depends_on: [] });
   const job = (id, capability, inputs, deps) => ({ task_id: id, capability, inputs, depends_on: deps });
   const request = { request_id: 'r-1', conversation_id: 'c-1', client_id: 'client-1', user_id: 'u-1', original_query: 'test question' };
-  const answerFor = async (tasks, { aiOpts = {}, u = understood } = {}) => {
+  const answerFor = async (tasks, { aiOpts = {}, u = understood, custom = null } = {}) => {
     const st = fakeStep9Store();
+    if (custom) st.searchCustom = async () => ({ results: custom, wordSearch: 'on' });
     runner.useStore(st);
+    runner.useCustomSources(Boolean(custom));
     aiCalls = 0;
     saved.length = 0;
     const wf = { tasks };
     const run = await runner.runWorkflow({ status: 'approved', batches: tasks.map((t) => [t.task_id]) }, wf, u, { client_id: st.clientId }, { aiBudget: 10 });
+    runner.useCustomSources(null);
     const before = J(run);
     const callsBefore = aiCalls;
     const a = await answerer.generateAnswer(run, wf, u, request, aiOpts);
@@ -5923,6 +5926,16 @@ async function testStep10() {
     const { a } = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'discover_opportunities', { inputs: ['T2.output'] }, ['T2']),
       job('T4', 'analyse_risks', { evidence: ['T1.output'] }, ['T1']), job('T5', 'validate_evidence', { findings: ['T3.output', 'T4.output'] }, ['T3', 'T4'])], { aiOpts: { aiCalls: 1 } });
     return (/Offer a paraben-free range.*_\(idea to test\)_/.test(a.answer_text) && /\[Critical\] Halal certification costs/.test(a.answer_text) && a.sections.length === 2) || a.answer_text;
+  });
+  await check('29 Nov: a point resting only on the client\'s documents (no date) says "(one-off event)", never "(one-off event,)"; the document is listed as "YOUR DOCUMENTS · name · heading · page" with "no date"', async () => {
+    const niq = { score: 0.03, meaningScore: 0.7, wordPlace: null, sourceId: 'src-1', documentId: 'doc-1', sourceName: 'NIQ State of Beauty 2026', title: 'NIQ State of Beauty 2026', heading: 'Beauty Sales Growth', pageFrom: 7, pageTo: 7, pieceNo: 3, pieceId: 'piece-3', text: 'Beauty value growth is strongest in developing markets.', url: null, publishedAt: null };
+    replies = {
+      dynamic_rag_job_patterns_v1: (t) => J({ patterns: [{ name: 'Growth led by developing markets', description: 'Developing markets grow fastest', sources: [code(t, 'NIQ State of Beauty')] }] }),
+      dynamic_rag_answer_v1: 'no json',
+    };
+    const { a } = await answerFor([search('T1'), job('T2', 'identify_patterns', { evidence: ['T1.output'] }, ['T1']), job('T3', 'validate_evidence', { findings: ['T2.output'] }, ['T2'])], { aiOpts: { aiCalls: 1 }, custom: [niq] });
+    return (/Growth led by developing markets.*\(one-off event\)/.test(a.answer_text) && !/one-off event,\)/.test(a.answer_text) &&
+      /YOUR DOCUMENTS · NIQ State of Beauty 2026 · Beauty Sales Growth · page 7 — no date/.test(a.answer_text)) || a.answer_text;
   });
   await check('A comparison is a table; a side with no news shows "no news found" in its cells and is listed in what was not found', async () => {
     replies = { dynamic_rag_job_compare_v1: (t) => J({ rows: [{ point: 'rules', cells: { A: { text: 'Parabens ban', sources: [code(t, 'UAE bans parabens')] }, B: { text: 'Halal rules', sources: [code(t, 'Saudi Arabia sets halal')] }, C: { text: '', sources: [] } } }], differences: [] }), dynamic_rag_answer_v1: 'x' };

@@ -177,7 +177,9 @@ function buildSections(run, workflow, book) {
     if (Array.isArray(o.patterns)) {
       const points = o.patterns.map((p) => ({
         text: `${p.name}: ${p.description}`, kind: 'interpretation',
-        trend: p.kind === 'trend' ? `trend, ${p.source_count} sources, ${p.first_date} to ${p.last_date}` : `one-off event, ${p.first_date || ''}`.trim(),
+        // 29 Nov: a point resting only on the client's documents has no date
+        // ("one-off event," was shown); no date -> no comma
+        trend: p.kind === 'trend' ? `trend, ${p.source_count} sources, ${p.first_date} to ${p.last_date}` : (p.first_date ? `one-off event, ${p.first_date}` : 'one-off event'),
         sources: book.nums(p.sources),
       })).filter((p) => p.sources.length);
       if (points.length) sections.push({ title, kind: 'points', points });
