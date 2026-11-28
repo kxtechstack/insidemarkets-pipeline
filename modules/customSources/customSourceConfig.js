@@ -57,7 +57,10 @@ module.exports = {
   // Unstructured.io (reads PDF, Word, Excel, PowerPoint).
   // 'auto' lets Unstructured pick per page. 'hi_res' is better for tables and
   // scanned pages but costs more.
+  // Used for Word, Excel and PowerPoint (PDFs with real text are read by readPdf.js).
   UNSTRUCTURED_STRATEGY: process.env.CS_UNSTRUCTURED_STRATEGY || 'auto',
+  // Used for scanned PDFs (pictures of pages): read the pictures.
+  UNSTRUCTURED_SCAN_STRATEGY: process.env.CS_UNSTRUCTURED_SCAN_STRATEGY || 'hi_res',
   UNSTRUCTURED_TIMEOUT_MS: Number(process.env.CS_UNSTRUCTURED_TIMEOUT_MS) || 5 * 60 * 1000,
 
   // Part labels from Unstructured that are never content: running headers,
@@ -75,6 +78,15 @@ module.exports = {
   // Website: if the main article has fewer characters than this, the page
   // probably did not load right (robot check, page built by JavaScript).
   // Then we try Firecrawl.
+  // PDFs: we read the PDF's own text with PDF.js (readPdf.js).
+  PDF_MAX_PAGES: 2000,
+  PDF_CELL_GAP: 1.5,          // a gap wider than 1.5 x the letter size splits a line into cells (a table row)
+  PDF_HEADING_SIZE: 1.2,      // text at least 1.2 x the normal letter size is a heading
+  PDF_BOLD_HEADING_MAX_CHARS: 120, // a bold line on its own, up to this long, is a heading too
+  PDF_PARAGRAPH_GAP: 1.75,    // a line further down than 1.75 x the letter size starts a new paragraph
+  SCANNED_PAGE_MIN_CHARS: 30, // a page with less real text than this is a picture (scanned)
+  SCANNED_SHARE_FOR_OCR: 0.5, // when half the pages or more are pictures, the whole PDF is read as pictures
+
   WEBSITE_MIN_CHARS: Number(process.env.CS_WEBSITE_MIN_CHARS) || 300,
   FIRECRAWL_TIMEOUT_MS: Number(process.env.CS_FIRECRAWL_TIMEOUT_MS) || 60 * 1000,
 

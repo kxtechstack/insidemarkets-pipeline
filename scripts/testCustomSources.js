@@ -9,6 +9,8 @@
  * Run:  node scripts/testCustomSources.js
  */
 
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const zlib = require('zlib');
 const { receiveSource } = require('../modules/customSources/receiveSource');
@@ -20,6 +22,7 @@ const { saveSource } = require('../modules/customSources/saveSource');
 const { reportRun } = require('../modules/customSources/reportRun');
 const { runSource } = require('../modules/customSources/runSource');
 const { searchCustomSources } = require('../modules/customSources/searchCustomSources');
+const { readPdf, linesOfPage, partsFromLines, isSpacedLetters, withoutDoubles } = require('../modules/customSources/readPdf');
 const { SourceError } = require('../modules/customSources/sourceError');
 
 let passed = 0;
@@ -648,7 +651,9 @@ function testCutPieces() {
   const tiny = cutPieces(job, { title: 'T', parts: [textPart(paragraph(1, 9)), textPart('Short end.')] });
   check('tiny end piece joins the piece before', tiny.pieces.length === 1 && tiny.pieces[0].text.endsWith('Short end.'), tiny.pieces.map((p) => p.wordCount).join(','));
   const tinyOther = cutPieces(job, { title: 'T', parts: [textPart(paragraph(1, 9)), { type: 'title', page: 1, sheet: null, text: 'Next' }, textPart('Short end.')] });
-  check('tiny piece under another heading stays its own piece', tinyOther.pieces.length === 2 && tinyOther.pieces[1].heading === 'Next');
+  check('a crumb under another heading joins the piece before, with its heading as a line', tinyOther.pieces.length === 1 && tinyOther.pieces[0].text.endsWith('\nNext\nShort end.'), JSON.stringify(tinyOther.pieces.map((p) => p.text.slice(-30))));
+  const smallOther = cutPieces(job, { title: 'T', parts: [textPart(paragraph(1, 9)), { type: 'title', page: 1, sheet: null, text: 'Next' }, textPart(paragraph(50, 1))] });
+  check('a small section (not a crumb) under another heading stays its own piece', smallOther.pieces.length === 2 && smallOther.pieces[1].heading === 'Next', smallOther.pieces.map((p) => `${p.heading}:${p.wordCount}`).join(','));
 
   // A tiny last piece that starts with the repeated sentence: no double sentence after joining
   const edge = cutPieces(job, { title: 'T', parts: [textPart(paragraph(1, 9) + ' ' + sentence(10)), textPart('Short end.')] });
@@ -698,7 +703,7 @@ function memoryDb(tables = {}, failOn = {}, files = {}) {
     const filters = [];
     let action = 'select';
     let payload = null;
-    const matches = (row) => filters.every(([op, c, v]) => (op === 'eq' ? row[c] === v : row[c] !== v));
+    const matches = (row) => filters.every(([op, c, v]) => (op === 'eq' ? row[c] === v : op === 'in' ? v.includes(row[c]) : row[c] !== v));
     const run = () => {
       const fail = failOn[`${action}:${name}`];
       if (fail) return { data: null, error: { message: fail } };
@@ -728,6 +733,7 @@ function memoryDb(tables = {}, failOn = {}, files = {}) {
       delete() { action = 'delete'; return q; },
       eq(c, v) { filters.push(['eq', c, v]); return q; },
       neq(c, v) { filters.push(['neq', c, v]); return q; },
+      in(c, v) { filters.push(['in', c, v]); return q; },
       async maybeSingle() { const r = run(); return { data: r.data ? r.data[0] || null : null, error: r.error }; },
       then(ok, bad) { return Promise.resolve(run()).then(ok, bad); },
     };
@@ -939,17 +945,130 @@ async function testSearch() {
   await save(id(1), CLIENT, 'NIQ Beauty', ['TikTok Shop sales grew fast.', 'Skin care leads growth.', 'Prices rose in 2025.']);
   await save(id(2), OTHER_CLIENT, 'Other client report', ['TikTok Shop is huge for us.']);
 
-  const hits = await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, { qdrant, embed: topicEmbed });
+  const sdeps = { db, qdrant, embed: topicEmbed };
+  const hits = await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, sdeps);
   check('search: best piece first, with source and page', hits[0] && hits[0].sourceName === 'NIQ Beauty' && hits[0].pageFrom === 1 && /TikTok/.test(hits[0].text), JSON.stringify(hits[0]));
   check('search: never shows another client\'s pieces', hits.every((h) => h.sourceName !== 'Other client report'));
   check('search: always filters by client', JSON.stringify(qdrant.lastFilter.must[0]) === JSON.stringify({ key: 'client_id', match: { value: CLIENT } }));
-  const onlySource = await searchCustomSources({ question: 'TikTok', clientId: CLIENT, sourceIds: [id(9)] }, { qdrant, embed: topicEmbed });
+  check('search: only live documents are searched', qdrant.lastFilter.must[1].key === 'document_id' && qdrant.lastFilter.must[1].match.any.length === 1);
+  const onlySource = await searchCustomSources({ question: 'TikTok', clientId: CLIENT, sourceIds: [id(9)] }, sdeps);
   check('search: can be limited to some sources', onlySource.length === 0);
   const code = async (fn) => { try { await fn(); return 'OK'; } catch (e) { return e.message; } };
-  check('search: empty question stops', /empty/.test(await code(() => searchCustomSources({ question: ' ', clientId: CLIENT }, { qdrant, embed: topicEmbed }))));
-  check('search: missing client stops', /clientId/.test(await code(() => searchCustomSources({ question: 'x', clientId: '' }, { qdrant, embed: topicEmbed }))));
-  const none = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, { qdrant: { search: async () => { throw new Error('Collection custom_source_pieces not found'); } }, embed: topicEmbed });
+  check('search: empty question stops', /empty/.test(await code(() => searchCustomSources({ question: ' ', clientId: CLIENT }, sdeps))));
+  check('search: missing client stops', /clientId/.test(await code(() => searchCustomSources({ question: 'x', clientId: '' }, sdeps))));
+  const none = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, { db, qdrant: { search: async () => { throw new Error('Collection custom_source_pieces not found'); } }, embed: topicEmbed });
   check('search: no collection yet gives no results (not a crash)', Array.isArray(none) && none.length === 0);
+
+  // A source deleted in the admin console: its rows are gone, its vectors are still in Qdrant
+  const docsBefore = db.data['public.custom_source_documents'].length;
+  db.data['public.custom_source_documents'] = db.data['public.custom_source_documents'].filter((d) => d.source_id !== id(1));
+  const afterDelete = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps);
+  check('search: a deleted source never shows up (its vectors are ignored)', afterDelete.length === 0 && qdrant.points().some((p) => p.payload.source_id === id(1)), `${docsBefore} docs before, ${afterDelete.length} hits`);
+
+  // The same file added twice as two sources: the text is shown once
+  await save(id(4), CLIENT, 'Copy A', ['TikTok Shop is growing in Asia.']);
+  await save(id(5), CLIENT, 'Copy B', ['TikTok Shop is growing in Asia.']);
+  const twice = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps);
+  check('search: the same text from two sources is shown once', twice.filter((h) => h.text === 'TikTok Shop is growing in Asia.').length === 1, twice.map((h) => h.sourceName).join(','));
+}
+
+// ── PDFs: readPdf.js (our own reading of the PDF text) ──────────────────
+
+// A text piece on a page: x, y, letter size, width
+const at = (text, x, y, size = 10, extra = {}) => ({ text, x, y, size, width: text.length * size * 0.5, rotated: false, bold: false, ...extra });
+
+async function testReadPdf() {
+  console.log('\nPDFs: readPdf.js');
+
+  // Lines
+  const lines = linesOfPage([
+    at('Amazon', 80, 600), at('23.0', 200, 600), at('23.9%', 300, 600.5),
+    at('Our sales grew', 80, 580), at('in 2025.', 152, 580),
+    at('Number of visible SKUs', 20, 300, 12, { rotated: true }),
+  ]);
+  check('pdf lines: pieces at the same height make one line', lines[0].text === 'Amazon | 23.0 | 23.9%' && lines[0].cells === 3, JSON.stringify(lines[0]));
+  check('pdf lines: a small gap is a space, not a cell', lines[1].text === 'Our sales grew in 2025.' && lines[1].cells === 1, JSON.stringify(lines[1]));
+  check('pdf lines: sideways text is kept as its own line', lines[2].text === 'Number of visible SKUs' && lines[2].rotated);
+  const boldLine = linesOfPage([at('Liquidity and Capital Resources', 80, 500, 10, { bold: true })])[0];
+  check('pdf lines: an all-bold line is marked bold', boldLine.bold === true);
+
+  // Text drawn twice
+  const doubled = withoutDoubles([
+    at('Source:', 23, 46.9), at('NielsenIQ', 53, 46.9),
+    { ...at('Source: NielsenIQ Omnisales, RMS', 23, 46.9), width: 180 },
+    at('MAT Nov 2025', 211, 46.9), at('MAT Nov 2025', 211, 46.9),
+  ]);
+  check('pdf: text drawn twice at the same spot is kept once', doubled.map((i) => i.text).join(' / ') === 'Source: NielsenIQ Omnisales, RMS / MAT Nov 2025', doubled.map((i) => i.text).join(' / '));
+  check('pdf: the same word at another spot is kept', withoutDoubles([at('Sales', 10, 100), at('Sales', 300, 100)]).length === 2);
+
+  check('spaced letters "B E A U T Y" are decoration', isSpacedLetters('B E A U T Y') && isSpacedLetters('s U K S e l b i'));
+  check('normal text is not spaced letters', !isSpacedLetters('A B testing is a way to compare') && !isSpacedLetters('Q3 2025 sales'));
+
+  // Lines -> parts, over 4 pages with a footer and page numbers
+  const CITY = ['Sydney', 'Perth', 'Brisbane', 'Darwin'];
+  const pageLines = (n) => linesOfPage([
+    at(n === 1 ? 'Market overview' : `Market in ${CITY[n - 1]}`, 80, 750, 18),
+    at(`Sales of skincare in ${CITY[n - 1]} grew by 8% in the third quarter, led by sun care and`, 80, 720),
+    at(`serums. Retailers in ${CITY[n - 1]} said demand was strong in all age-`, 80, 708),
+    at('groups and channels.', 80, 696),
+    at(n === 1 ? 'Liquidity and Capital Resources' : `Cash in ${CITY[n - 1]}`, 80, 670, 10, { bold: true }),
+    at(`Our cash in ${CITY[n - 1]} was $48.0 billion at the end of the year.`, 80, 655),
+    at(n === 1 ? 'Region' : `Region in ${CITY[n - 1]}`, 80, 620), at('Share', 300, 620),
+    at('EU', 80, 608), at('31%', 300, 608),
+    at(n === 1 ? '• Audit all labels.' : `• Audit labels in ${CITY[n - 1]}.`, 80, 580),
+    at(n === 1 ? '• Train regional teams.' : `• Train teams in ${CITY[n - 1]}.`, 80, 568),
+    at('Confidential and proprietary, Example Co. All Rights Reserved.', 300, 30, 7), at(String(n), 560, 30, 7),
+    at(String(n), 300, 15, 9),
+  ]);
+  const pages4 = [1, 2, 3, 4].map((n) => ({ page: n, lines: pageLines(n) }));
+  const built = partsFromLines(pages4, 4);
+  const p1 = built.parts.filter((p) => p.page === 1);
+  check('pdf parts: big text is a heading', p1[0].type === 'title' && p1[0].text === 'Market overview');
+  check('pdf parts: lines join into one paragraph, a word broken with "-" is joined', p1[1].type === 'text' && p1[1].text === 'Sales of skincare in Sydney grew by 8% in the third quarter, led by sun care and serums. Retailers in Sydney said demand was strong in all age-groups and channels.', p1[1].text);
+  check('pdf parts: a short bold line is a heading', p1[2].type === 'title' && p1[2].text === 'Liquidity and Capital Resources');
+  check('pdf parts: rows next to each other form one table', p1.some((p) => p.type === 'table' && p.text === 'Region | Share\nEU | 31%'), JSON.stringify(p1));
+  check('pdf parts: bullet lines are list items without the bullet', p1.filter((p) => p.type === 'list').map((p) => p.text).join('/') === 'Audit all labels./Train regional teams.');
+  check('pdf parts: footer with page number removed on every page', !built.parts.some((p) => p.text.includes('All Rights Reserved')));
+  check('pdf parts: page numbers removed', !built.parts.some((p) => /^\d+$/.test(p.text)) && built.notes.some((n) => n.includes('page numbers')), built.notes.join(' '));
+  check('pdf parts: the notes say what was removed', built.notes.some((n) => n.includes('Removed 4 repeated lines')), built.notes.join(' '));
+  check('pdf parts: a sentence end on every page is not a footer ("groups and channels." stays)', built.parts.filter((p) => p.text.includes('groups and channels.')).length === 4);
+  check('pdf parts: page numbers kept on the parts', built.parts.every((p) => p.page >= 1 && p.page <= 4));
+  check('pdf parts: characters counted per page', built.pageChars[1] > 100 && built.pageChars[4] > 100);
+
+  // A long sentence printed big is text, not a heading
+  const big = partsFromLines([{ page: 1, lines: linesOfPage([at('Beauty is entering 2026 with resilience and a new level of complexity.', 80, 700, 16), at('Body text that is long enough to set the normal size of this page for sure.', 80, 600, 10)]) }], 1);
+  check('pdf parts: a big full sentence is text', big.parts[0].type === 'text', JSON.stringify(big.parts[0]));
+
+  // A scanned PDF: most pages have no real text
+  const scanned = await readPdf(Buffer.from('x'), { readPages: async () => ({ pageCount: 3, pages: [{ page: 1, items: [] }, { page: 2, items: [at('Logo', 10, 10)] }, { page: 3, items: [] }] }) });
+  check('pdf: a scanned PDF asks for reading the pictures', scanned.needsPictureReading === true && scanned.pictures === 3);
+
+  // readText: the PDF route, the scanned route, the fallback
+  const job = { sourceName: 'Test PDF' };
+  let usedStrategy = 'not called';
+  const partition = async (bytes, fileName, strategy) => { usedStrategy = strategy; return [{ type: 'NarrativeText', text: 'Read from pictures.', metadata: { page_number: 1 } }]; };
+  const viaScan = await readText(job, { kind: 'file', fileType: 'pdf', bytes: Buffer.from('x'), fileName: 'a.pdf' }, { partition, readPdf: async () => ({ needsPictureReading: true, pictures: 3, pageCount: 3 }) });
+  check('scanned PDF: read by Unstructured as pictures (hi_res), with a note', viaScan.reader === 'unstructured' && usedStrategy === 'hi_res' && viaScan.notes[0].includes('3 of 3 pages have no real text'), `${usedStrategy} ${viaScan.notes.join(' ')}`);
+  const viaFallback = await readText(job, { kind: 'file', fileType: 'pdf', bytes: Buffer.from('x'), fileName: 'a.pdf' }, { partition, readPdf: async () => { throw new Error('Invalid PDF structure'); } });
+  check('broken PDF: Unstructured tries instead, with a note', viaFallback.reader === 'unstructured' && viaFallback.notes[0].includes('could not be read directly'), viaFallback.notes.join(' '));
+  const locked = await (async () => { try { await readText(job, { kind: 'file', fileType: 'pdf', bytes: Buffer.from('x'), fileName: 'a.pdf' }, { partition, readPdf: async () => { throw new SourceError('READ_FAILED', 'locked'); } }); return 'OK'; } catch (e) { return e.code; } })();
+  check('locked PDF: stops with the message (no Unstructured call)', locked === 'READ_FAILED');
+
+  // A real PDF file (scripts/fixtures/regulatory-compliance-test.pdf)
+  const fixture = path.join(__dirname, 'fixtures', 'regulatory-compliance-test.pdf');
+  if (!fs.existsSync(fixture)) {
+    check('real PDF fixture is there (scripts/fixtures/regulatory-compliance-test.pdf)', false);
+    return;
+  }
+  const real = await readText(job, { kind: 'file', fileType: 'pdf', bytes: fs.readFileSync(fixture), fileName: 'regulatory-compliance-test.pdf' }, { partition: async () => { throw new Error('Unstructured must not be called'); } });
+  const realTexts = real.parts.map((p) => p.text);
+  check('real PDF: read with PDF.js, 3 pages, no Unstructured call', real.reader === 'pdf-text' && real.pageCount === 3, `${real.reader} ${real.pageCount}`);
+  check('real PDF: headings found', real.parts.filter((p) => p.type === 'title').map((p) => p.text).includes('Section 2: Ingredient Restrictions'));
+  check('real PDF: the table is exact', realTexts.includes('Region | Change | Deadline\nEU | New allergen labels | Mar 2027\nUK | Preservative limits | Jun 2027\nAPAC | Import testing | Sep 2027'), realTexts.join(' // '));
+  check('real PDF: bullets are clean list items (no "¢")', real.parts.filter((p) => p.type === 'list').map((p) => p.text).join('/') === 'Audit all labels against the new rules./Update supplier contracts with testing clauses./Train regional teams before the deadlines.');
+  check('real PDF: paragraph lines joined, every word kept', realTexts.some((t) => t.startsWith('This is a sample report used to test the Voice of Market PDF viewer. It has three pages with headings, text and a small table.')));
+  const realPieces = cutPieces(job, real);
+  check('real PDF: cut into 3 pieces, the table stays with its section', realPieces.pieces.length === 3 && realPieces.pieces[1].text.includes('Region | Change | Deadline') && realPieces.pieces[1].heading === 'Section 2: Ingredient Restrictions', realPieces.pieces.map((p) => `${p.heading}:${p.wordCount}`).join(' / '));
 }
 
 async function main() {
@@ -960,6 +1079,7 @@ async function main() {
   testCutPieces();
   await testSaveAndRun();
   await testSearch();
+  await testReadPdf();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exitCode = 1;

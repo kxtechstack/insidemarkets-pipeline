@@ -21,7 +21,7 @@
  *   notes say an old copy was left (the next run removes it).
  *
  * The vectors use the same model and settings as the rest of the platform
- * (llmRelevanceProcessor.embedText), so the DI chat can search them later.
+ * (embedText.js), so the DI chat can search them later.
  */
 
 const { randomUUID } = require('crypto');
@@ -33,27 +33,12 @@ function realDeps() {
   if (!shared) {
     const { createClient } = require('@supabase/supabase-js');
     const { QdrantClient } = require('@qdrant/js-client-rest');
-    let embedFn = null;
     shared = {
       db: createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY),
       qdrant: new QdrantClient({
         url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY, checkCompatibility: false, timeout: 60000,
       }),
-      async embed(text) {
-        if (!embedFn) {
-          // the same function the news pipeline and the DI chat use
-          try {
-            const pipelineModule = require('../llmRelevanceProcessor');
-            if (typeof pipelineModule.embedText === 'function') embedFn = pipelineModule.embedText;
-          } catch (e) { /* below */ }
-          if (!embedFn) {
-            const { pipeline } = require('@xenova/transformers');
-            const model = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-            embedFn = async (t) => Array.from((await (await model)(t, { pooling: 'mean', normalize: true })).data);
-          }
-        }
-        return embedFn(text);
-      },
+      embed: require('./embedText').embedText, // the same model and settings as the DI chat
     };
   }
   return shared;

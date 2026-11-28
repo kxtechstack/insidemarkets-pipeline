@@ -19,7 +19,11 @@
  * }
  *
  * How each kind is read:
- *   file    -> Unstructured.io. Every part comes with a label (Title, NarrativeText,
+ *   pdf     -> readPdf.js reads the PDF's own text with PDF.js (exact, free,
+ *              the file stays on our server). Only a scanned PDF (most pages
+ *              are pictures) goes to Unstructured.io, which reads the pictures.
+ *   other files (Word, Excel, PowerPoint), or a PDF that PDF.js cannot open
+ *           -> Unstructured.io. Every part comes with a label (Title, NarrativeText,
  *              Table, Header, Footer ...) and a page number. We drop the labels
  *              that are never content (DROP_PART_TYPES) and keep the rest.
  *              No guessing rules and no word lists.
@@ -38,37 +42,16 @@ const cheerio = require('cheerio');
 const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const {
-  UNSTRUCTURED_STRATEGY, UNSTRUCTURED_TIMEOUT_MS, DROP_PART_TYPES,
+  UNSTRUCTURED_STRATEGY, UNSTRUCTURED_SCAN_STRATEGY, UNSTRUCTURED_TIMEOUT_MS, DROP_PART_TYPES,
   REPEATED_LINE_MAX_CHARS, REPEATED_LINE_MIN_PAGES, REPEATED_LINE_PAGE_SHARE,
   WEBSITE_MIN_CHARS, FIRECRAWL_TIMEOUT_MS,
 } = require('./customSourceConfig');
 const { SourceError } = require('./sourceError');
+const { cleanText, stripBullet, repeatKey, short } = require('./textTools');
+const { readPdf } = require('./readPdf');
 
-// ── Cleaning (the same for every reader) ────────────────────────────────
-
-// Keeps line breaks (tables need them). Never removes words.
-function cleanText(value, { keepLines = false } = {}) {
-  let text = String(value || '').normalize('NFKC');
-  text = text.replace(/ /g, ' ').replace(/[​-‍﻿]/g, '');
-  text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
-  text = text.replace(/\r\n?/g, '\n');
-  if (!keepLines) return text.replace(/\s+/g, ' ').trim();
-  return text.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()).filter(Boolean).join('\n');
-}
-
-/**
- * A part that starts with one symbol and a space ("• ", "▪ ", "* ", or a
- * bullet from a special font that comes out as "¢ ") is a list item: the
- * symbol is the bullet, not content. Returns { text, isBullet }.
- * A symbol followed by a number ("$5", "£ 20") is money, not a bullet.
- */
-function stripBullet(text) {
-  const match = String(text).match(/^([\p{S}\p{Po}\p{Pd}])\s+(?=\S)/u);
-  if (!match) return { text, isBullet: false };
-  const rest = text.slice(match[0].length);
-  if (/^\p{Sc}$/u.test(match[1]) && /^\d/.test(rest)) return { text, isBullet: false };
-  return { text: rest, isBullet: true };
-}
+// ── Cleaning ───────────────────────────────────────────────────────────
+// (cleanText, stripBullet, repeatKey live in textTools.js)
 
 // A table written as HTML -> one line per row, cells split by " | "
 function tableRows(html) {
@@ -87,23 +70,6 @@ function pageCharsOf(parts) {
   const pages = {};
   for (const p of parts) if (p.page) pages[p.page] = (pages[p.page] || 0) + p.text.length;
   return pages;
-}
-
-const short = (text, max = 60) => (text.length > max ? `${text.slice(0, max)}...` : text);
-
-/**
- * How a line is compared with the same line on other pages.
- * A footer often starts or ends with the page number ("... All Rights
- * Reserved. 7"), so a number at the very start or end counts as the same.
- * Numbers in the middle of a line are compared exactly ("sales grew 5%"
- * and "sales grew 7%" are different lines).
- * A line with fewer than 3 letters (like "+14%") is never a header or
- * footer: it gets no key, so it is always kept.
- */
-function repeatKey(text) {
-  const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
-  if ((lower.match(/\p{L}/gu) || []).length < 3) return null;
-  return lower.replace(/^\d+\s*|\s*\d+$/g, '#');
 }
 
 /**
@@ -155,10 +121,10 @@ function defaultPartition() {
       timeoutMs: UNSTRUCTURED_TIMEOUT_MS,
     });
   }
-  return async (bytes, fileName) => sharedUnstructured.general.partition({
+  return async (bytes, fileName, strategy = UNSTRUCTURED_STRATEGY) => sharedUnstructured.general.partition({
     partitionParameters: {
       files: { content: bytes, fileName },
-      strategy: UNSTRUCTURED_STRATEGY,
+      strategy,
       pdfInferTableStructure: true,
     },
   });
@@ -172,10 +138,40 @@ function statusOf(error) {
 }
 
 async function readFile(job, fetched, deps) {
+  const notesBefore = [];
+  let strategy;
+
+  // A PDF: read its own text first
+  if (fetched.fileType === 'pdf') {
+    let pdf = null;
+    try {
+      pdf = await (deps.readPdf || readPdf)(fetched.bytes, deps);
+    } catch (e) {
+      if (e instanceof SourceError) throw e;
+      notesBefore.push(`The PDF text could not be read directly (${short(e.message, 120)}), so it was read by Unstructured.io.`);
+    }
+    if (pdf && !pdf.needsPictureReading) {
+      return {
+        title: job.sourceName,
+        reader: 'pdf-text',
+        parts: pdf.parts,
+        pageCount: pdf.pageCount,
+        pageChars: pdf.pageChars,
+        charCount: sumChars(pdf.parts),
+        publishedAt: null,
+        notes: pdf.notes,
+      };
+    }
+    if (pdf) {
+      notesBefore.push(`${pdf.pictures} of ${pdf.pageCount} pages have no real text (a scanned PDF), so the pages were read as pictures.`);
+      strategy = UNSTRUCTURED_SCAN_STRATEGY;
+    }
+  }
+
   const partition = deps.partition || defaultPartition();
   let result;
   try {
-    result = await partition(fetched.bytes, fetched.fileName);
+    result = await partition(fetched.bytes, fetched.fileName, strategy);
   } catch (e) {
     if (e instanceof SourceError) throw e;
     const status = statusOf(e);
@@ -212,7 +208,7 @@ async function readFile(job, fetched, deps) {
     });
   }
 
-  const notes = [];
+  const notes = [...notesBefore];
   const droppedList = Object.entries(dropped).map(([label, count]) => `${count} ${label}`);
   if (droppedList.length) notes.push(`Left out parts marked as not content: ${droppedList.join(', ')}.`);
 

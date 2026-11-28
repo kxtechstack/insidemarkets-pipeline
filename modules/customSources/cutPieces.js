@@ -19,20 +19,31 @@
  *
  * Rules:
  *   1. A heading starts a new piece, so a piece never mixes two sections.
+ *      But when the piece so far is tiny (under PIECE_MIN_WORDS, like a chart
+ *      label on a slide), the heading stays inside the piece as a line, so we
+ *      never get pieces of one or two words. At the top of a new page (a new
+ *      slide) a heading starts a new piece unless the piece is under half that. Two headings in a row are kept
+ *      together ("Chapter 2 › Market overview"), at most 2 levels.
  *      A new Excel sheet starts a new piece too.
  *   2. A piece is about PIECE_TARGET_WORDS long and never over PIECE_MAX_WORDS.
  *   3. Never cut inside a sentence. Only one giant sentence with no full stop
  *      (longer than a whole piece) is cut by words.
  *   4. The last sentence of a piece is repeated at the start of the next one.
- *   5. A table gets its own pieces. A big table is cut by rows and the header
- *      row is repeated in every piece, so "10%" always stays next to "Share".
+ *   5. A big table gets its own pieces, cut by rows, and the header row is
+ *      repeated in every piece, so "10%" always stays next to "Share".
+ *      A small table (under PIECE_MIN_WORDS) stays inside the text around it.
  *   6. A tiny last piece of a section is joined to the piece before it, if it fits.
+ *      A crumb (under 10 words, like a lone chart number) joins the piece
+ *      before it on the same page, whatever kind.
  *   7. No words are lost: every word of the text is in at least one piece.
  */
 
 const {
   PIECE_TARGET_WORDS, PIECE_MAX_WORDS, PIECE_MIN_WORDS, OVERLAP_MAX_WORDS, HEADING_MAX_CHARS,
 } = require('./customSourceConfig');
+
+// A piece this small is a crumb (a lone chart number, an axis label)
+const CRUMB_WORDS = 10;
 
 const countWords = (text) => (String(text).trim() ? String(text).trim().split(/\s+/).length : 0);
 
@@ -144,17 +155,42 @@ function cutPieces(job, read) {
   for (const part of read.parts || []) {
     const sheet = part.sheet || null;
 
-    // A heading: starts a new section
+    // A heading
     if (part.type === 'title' && part.text.length <= HEADING_MAX_CHARS) {
-      close();
-      // Two headings in a row ("Chapter 2", "Market overview") are kept together
-      heading = lastPartWasHeading && heading ? `${heading} › ${part.text}` : part.text;
-      lastPartWasHeading = true;
+      const levels = heading ? heading.split(' › ').length : 0;
+      // A heading at the top of a new page (a new slide) starts a new piece,
+      // unless the piece so far is really tiny.
+      const newPage = current && part.page && current.pages.length > 0 && part.page > Math.max(...current.pages);
+      const tinyLimit = newPage ? PIECE_MIN_WORDS / 2 : PIECE_MIN_WORDS;
+      if (current && current.words > 0 && current.words < tinyLimit) {
+        // The piece so far is tiny: keep the heading inside it as a line.
+        // Pieces after this one get the new heading.
+        addSentence({ text: part.text, words: countWords(part.text), page: part.page, sheet, newBlock: true, isSentence: false });
+        heading = part.text;
+        lastPartWasHeading = false;
+      } else if (!current && lastPartWasHeading && levels >= 2) {
+        // Already 2 headings in a row: this one is the first line of the piece
+        addSentence({ text: part.text, words: countWords(part.text), page: part.page, sheet, newBlock: false, isSentence: false });
+        lastPartWasHeading = false;
+      } else {
+        close();
+        // Two headings in a row ("Chapter 2", "Market overview") are kept together
+        heading = lastPartWasHeading && heading ? `${heading} › ${part.text}` : part.text;
+        lastPartWasHeading = true;
+      }
       continue;
     }
     lastPartWasHeading = false;
 
-    // A table: its own pieces, header row repeated
+    // A small table: stays in the text around it, one row per line
+    if (part.type === 'table' && countWords(part.text) < PIECE_MIN_WORDS) {
+      part.text.split('\n').filter(Boolean).forEach((row) => {
+        addSentence({ text: row, words: countWords(row), page: part.page, sheet, newBlock: true, isSentence: false });
+      });
+      continue;
+    }
+
+    // A big table: its own pieces, header row repeated
     if (part.type === 'table') {
       close();
       const rows = part.text.split('\n').filter(Boolean);
@@ -199,13 +235,22 @@ function cutPieces(job, read) {
   const merged = [];
   for (const piece of pieces) {
     const before = merged[merged.length - 1];
-    if (before && !piece.isTable && !before.isTable && piece.wordCount < PIECE_MIN_WORDS
-      && before.heading === piece.heading && before.sheet === piece.sheet
-      && before.wordCount + piece.wordCount <= PIECE_MAX_WORDS) {
+    const tinySameSection = !piece.isTable && !before?.isTable && piece.wordCount < PIECE_MIN_WORDS
+      && before?.heading === piece.heading && before?.sheet === piece.sheet;
+    // A crumb (a few words, like a lone chart number) joins the piece before it on the same page, whatever kind
+    const crumb = piece.wordCount < CRUMB_WORDS && before && before.sheet === piece.sheet
+      && (before.pageTo === piece.pageFrom || (before.pageTo === null && piece.pageFrom === null));
+    if (before && (tinySameSection || crumb) && before.wordCount + piece.wordCount <= PIECE_MAX_WORDS) {
       // The tiny piece may start with the repeated last sentence of the piece before: drop that copy
       const raw = piece.overlapText ? piece.text.slice(piece.overlapText.length) : piece.text;
-      const rest = raw.trim();
-      if (rest) before.text += (raw.startsWith('\n') || rest.startsWith('- ') ? '\n' : ' ') + rest;
+      let rest = raw.trim();
+      let newLine = raw.startsWith('\n') || rest.startsWith('- ');
+      // A crumb from another section brings its heading along as a line, so it is not lost
+      if (piece.heading && piece.heading !== before.heading) {
+        rest = `${piece.heading.split(' › ').pop()}\n${rest}`;
+        newLine = true;
+      }
+      if (rest) before.text += (newLine ? '\n' : ' ') + rest;
       before.wordCount = countWords(before.text);
       before.pageFrom = [before.pageFrom, piece.pageFrom].filter((p) => p !== null).reduce((a, b) => Math.min(a, b), Infinity);
       before.pageTo = [before.pageTo, piece.pageTo].filter((p) => p !== null).reduce((a, b) => Math.max(a, b), -Infinity);
