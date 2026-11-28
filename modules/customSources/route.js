@@ -55,7 +55,7 @@ function registerCustomSourcesRoute(app) {
     if (isDeleting(sourceId)) return res.status(409).json({ error: 'This source is being deleted' });
 
     try {
-      const { data, error } = await pick('db', defaultDb()).schema('admin').from('custom_data_sources')
+      const { data, error } = await ((fakes && fakes.db) || defaultDb()).schema('admin').from('custom_data_sources')
         .select('id').eq('id', sourceId).maybeSingle();
       if (error) return res.status(500).json({ error: `Could not read the source: ${error.message}` });
       if (!data) return res.status(404).json({ error: 'Custom data source not found' });
