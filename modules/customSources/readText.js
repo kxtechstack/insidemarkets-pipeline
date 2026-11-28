@@ -244,9 +244,25 @@ function decodeHtml(bytes, contentType = '') {
 
 // The article HTML from Readability -> parts, in page order
 const BLOCKS = 'h1, h2, h3, h4, h5, h6, p, li, table, pre, blockquote, dt, dd, figcaption';
-function partsFromArticleHtml(html, fullText) {
+function partsFromArticleHtml(html, fullText, notes = []) {
   const $ = cheerio.load(String(html));
   const parts = [];
+
+  // Footnote numbers ("[4]", "[a]", "[note 1]") are small raised marks
+  // (<sup>) with only a bracket inside: not content.
+  let footnotes = 0;
+  $('sup').each((i, el) => {
+    if (/^\s*\[\s*[\w\s]{1,8}\s*\]\s*$/.test($(el).text())) { $(el).remove(); footnotes += 1; }
+  });
+  // A list of references: list items that are mostly a citation (<cite>).
+  let references = 0;
+  $('li').each((i, el) => {
+    const all = cleanText($(el).text()).length;
+    const cited = cleanText($(el).find('cite').text()).length;
+    if (all > 0 && cited / all >= 0.5) { $(el).remove(); references += 1; }
+  });
+  if (footnotes) notes.push(`Removed ${footnotes} footnote numbers like "[4]".`);
+  if (references) notes.push(`Removed ${references} reference list entries (citations).`);
   $(BLOCKS).each((i, el) => {
     const node = $(el);
     // Skip a block inside another block (a paragraph inside a list item or a
@@ -281,11 +297,24 @@ function readArticle(html, url) {
     const document = dom.window.document;
     const pageTitle = cleanText(document.title);
     const article = new Readability(document).parse();
-    if (!article) return { title: pageTitle, parts: [], publishedAt: null };
+    if (!article) return { title: pageTitle, parts: [], publishedAt: null, notes: [] };
+    const notes = [];
+    // The whole text without the footnotes and references (used only when the
+    // page has text outside paragraph tags)
+    const cleanedText = (() => {
+      const $ = cheerio.load(String(article.content || ''));
+      $('sup').each((i, el) => { if (/^\s*\[\s*[\w\s]{1,8}\s*\]\s*$/.test($(el).text())) $(el).remove(); });
+      $('li').each((i, el) => {
+        const all = cleanText($(el).text()).length;
+        if (all > 0 && cleanText($(el).find('cite').text()).length / all >= 0.5) $(el).remove();
+      });
+      return $.root().text();
+    })();
     return {
       title: cleanText(article.title) || pageTitle,
-      parts: partsFromArticleHtml(article.content || '', article.textContent || ''),
+      parts: partsFromArticleHtml(article.content || '', cleanedText, notes),
       publishedAt: article.publishedTime || null,
+      notes,
     };
   } finally {
     dom.window.close();
@@ -351,6 +380,7 @@ async function readWebsite(job, fetched, deps) {
 }
 
 function websiteResult(job, read, reader, notes) {
+  notes.push(...(read.notes || []));
   return {
     title: read.title || job.sourceName,
     reader,

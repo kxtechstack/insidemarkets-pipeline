@@ -376,6 +376,25 @@ function newsPage(articleParagraphs) {
     <footer><p>Copyright 2026 Example News. All rights reserved. Privacy policy. Terms.</p></footer>
   </body></html>`;
 }
+// A wiki-style page: footnote numbers and a reference list
+function wikiPage() {
+  return `<!DOCTYPE html><html><head><title>Cosmetics - Example Wiki</title></head><body>
+  <nav><a href="/">Main page</a></nav>
+  <main><article><h1>Cosmetics</h1>
+    <p>Some early cosmetics contained harmful ingredients, such as lead, which caused serious health problems.<sup class="reference"><a href="#cite-4">[4]</a></sup> Modern cosmetics are tested for safety.<sup><a href="#n1">[note 1]</a></sup></p>
+    <p>In the European Union, cosmetic ingredients must be declared on the packaging using standard names, and fragrance allergens must be listed by name above a set level.<sup>[12]</sup></p>
+    <p>Prices of cosmetics rose by 5<sup>2</sup> percent in one example, which shows a raised number that is real content and must stay.</p>
+    <h2>Market</h2>
+    <p>The global cosmetics market is large and keeps growing, driven by skin care and online sales in Asia, according to several industry studies.</p>
+    <ul><li>Skin care is the biggest category.</li><li>Fragrance grows fastest in Europe.</li></ul>
+    <h2>References</h2>
+    <ol class="references">
+      <li><a href="#r1">^</a> <cite>Johansen, Jeanne (2010). Contact Dermatitis. Springer. ISBN 978-3-642-03827-3.</cite></li>
+      <li><a href="#r2">^</a> <cite>Fisher, Alexander (1986). Contact Dermatitis. Lea and Febiger.</cite></li>
+    </ol>
+  </article></main></body></html>`;
+}
+
 const ARTICLE = [
   'Skincare sales in Australia grew by 8% in the third quarter of 2026, led by sun care and serums, according to the latest retail figures released this week.',
   'Retailers in Sydney and Melbourne said demand for mineral sunscreen was strongest among shoppers aged 25 to 34, with online orders up sharply compared with last year.',
@@ -483,6 +502,14 @@ async function testReadText() {
   check('website: page title kept', /Skincare sales rise in Australia|Beauty market news/.test(page.title), page.title);
   check('website: article date kept', String(page.publishedAt || '').startsWith('2026-10-02'), String(page.publishedAt));
   check('website: scripts in the page never run', globalThis.PAGE_SCRIPT_RAN !== true);
+
+  // A wiki page: footnote numbers and the reference list are left out
+  const wiki = await readText(job, { kind: 'website', bytes: Buffer.from(wikiPage()), contentType: 'text/html', finalUrl: 'https://wiki.example.com/Cosmetics' }, { firecrawl: noFirecrawl });
+  const wikiText = wiki.parts.map((p) => p.text).join(' / ');
+  check('website: footnote numbers like "[4]" and "[note 1]" are removed', !/\[\s*(4|12|note 1)\s*\]/.test(wikiText) && wikiText.includes('caused serious health problems. Modern cosmetics are tested for safety.'), wikiText);
+  check('website: a real raised number (5 squared) stays', wikiText.includes('rose by 52 percent') || wikiText.includes('rose by 5 2 percent'), wikiText);
+  check('website: the reference list is removed, normal list items stay', !/Johansen|ISBN|Fisher/.test(wikiText) && wikiText.includes('Skin care is the biggest category.'), wikiText);
+  check('website: the removals are written in the notes', wiki.notes.some((n) => n.includes('3 footnote numbers')) && wiki.notes.some((n) => n.includes('2 reference list entries')), wiki.notes.join(' '));
 
   // Letters in an older character set (windows-1252: e with accent = byte 0xE9)
   const latin = Buffer.concat([
