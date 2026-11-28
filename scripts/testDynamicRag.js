@@ -5159,14 +5159,23 @@ async function testCustomInChat() {
     const out = await go({ on: true, hits: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => hit(n)) });
     return docs(out).length === 5 || docs(out).length;
   });
-  await check('Custom sources ON: a search for a place keeps only pieces naming it; a period keeps only dated pieces inside it (undated left out, counted)', async () => {
+  await check('Custom sources ON: a search for a place keeps only pieces naming it; a period keeps dated pieces inside it; an UNDATED piece is kept only when its document names a year of the period ("NIQ State of Beauty 2026" for "trends in 2026"), and still must name the place asked', async () => {
     const place = await go({ on: true, inputs: { countries: ['United Arab Emirates'] }, hits: [hit(1, { text: 'New rules in the UAE for cosmetics.' }), hit(2, { text: 'Rules in Japan.' })] });
     const pr = place.results.T1.output.removed.reasons;
     const dates = await go({ on: true, inputs: { date_from: '2025-01-01', date_to: '2025-06-30' }, hits: [hit(1), hit(2, { publishedAt: null }), hit(3, { publishedAt: '2024-05-01' })] });
     const dr = dates.results.T1.output.removed.reasons;
+    const niq = await go({ on: true, inputs: { date_from: '2026-01-01', date_to: '2026-12-31' }, hits: [
+      hit(1, { publishedAt: null, sourceName: 'NIQ State of Beauty 2026', title: 'NIQ State of Beauty 2026' }),
+      hit(2, { publishedAt: null, sourceName: 'Old notes', title: 'Old notes', text: 'Sales grew 20260 units in 2025.' }),
+      hit(3, { publishedAt: null, sourceName: 'Plan', title: 'Plan', text: 'Our 2026 plan for Japan.' })] });
+    const nr = niq.results.T1.output.removed.reasons;
+    const niqPlace = await go({ on: true, inputs: { date_from: '2026-01-01', date_to: '2026-12-31', countries: ['United Arab Emirates'] }, hits: [
+      hit(1, { publishedAt: null, sourceName: 'NIQ State of Beauty 2026', title: 'NIQ State of Beauty 2026', text: 'Skincare in Japan.' })] });
     return (docs(place).map((it) => it.document.piece_no).join() === '1' && pr['documents: do not name the place asked'] === 1 &&
-      docs(dates).map((it) => it.document.piece_no).join() === '1' && dr['documents: no date, and the question asks for a period'] === 1 && dr['documents: outside the dates asked'] === 1) ||
-      { p: docs(place).length, pr, d: docs(dates).length, dr };
+      docs(dates).map((it) => it.document.piece_no).join() === '1' && dr['documents: no date, and no year of the period asked in the document'] === 1 && dr['documents: outside the dates asked'] === 1 &&
+      docs(niq).map((it) => it.document.piece_no).join() === '1,3' && nr['documents: no date, and no year of the period asked in the document'] === 1 &&
+      docs(niqPlace).length === 0) ||
+      { p: docs(place).length, pr, d: docs(dates).length, dr, n: docs(niq).map((it) => it.document.piece_no), nr, np: docs(niqPlace).length };
   });
   await check('Custom sources ON: the document search fails -> the news answer goes on (done), with a note; never a crash', async () => {
     const out = await go({ on: true, fail: true, hits: [hit(1)] });

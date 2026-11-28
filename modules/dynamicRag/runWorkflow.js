@@ -938,6 +938,16 @@ function customToItem(hit) {
   };
 }
 
+// Does the text name a year of the period (from .. until) as a whole number?
+// (at most 10 years, a longer period checks none)
+function namesYearOf(text, from, until) {
+  const a = Number(String(from || until || '').slice(0, 4));
+  const b = Number(String(until || from || '').slice(0, 4));
+  if (!a || !b || b < a || b - a > 10) return false;
+  for (let y = a; y <= b; y += 1) if (new RegExp(`(?<!\\d)${y}(?!\\d)`).test(String(text))) return true;
+  return false;
+}
+
 async function withCustomSources(out, inputs, ctx) {
   const on = customOn === null ? CUSTOM_SOURCES_ON : customOn;
   const s = getStore();
@@ -963,8 +973,12 @@ async function withCustomSources(out, inputs, ctx) {
     const it = customToItem(hit);
     const text = `${it.title} ${it.text}`;
     if (dated) {
-      if (!it.date) { count(reasons, 'documents: no date, and the question asks for a period'); continue; }
-      if ((inputs.date_from && it.date < String(inputs.date_from).slice(0, 10)) || (until && it.date > String(until).slice(0, 10))) { count(reasons, 'documents: outside the dates asked'); continue; }
+      // 29 Nov ("What are the beauty market trends in 2026?"): an uploaded
+      // PDF has no date, so every piece of "NIQ State of Beauty 2026" was
+      // left out. An undated piece is kept when its document name or text
+      // names a year of the period asked ("2026"); other undated pieces stay out.
+      if (!it.date && !namesYearOf(text, inputs.date_from, until)) { count(reasons, 'documents: no date, and no year of the period asked in the document'); continue; }
+      if (it.date && ((inputs.date_from && it.date < String(inputs.date_from).slice(0, 10)) || (until && it.date > String(until).slice(0, 10)))) { count(reasons, 'documents: outside the dates asked'); continue; }
     }
     if ((inputs.countries || []).length && !inputs.countries.some((p) => textNamesPlace(text, p))) { count(reasons, 'documents: do not name the place asked'); continue; }
     if ((inputs.companies || []).length && !inputs.companies.some((c) => namesCompany(it, c))) { count(reasons, 'documents: do not name the company asked'); continue; }
