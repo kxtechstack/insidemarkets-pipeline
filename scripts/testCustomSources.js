@@ -13,7 +13,7 @@ const http = require('http');
 const zlib = require('zlib');
 const { receiveSource } = require('../modules/customSources/receiveSource');
 const { fetchSource, isPublicAddress, checkLink, detectFileType, fileNameFor } = require('../modules/customSources/fetchSource');
-const { readText, cleanText, tableRows } = require('../modules/customSources/readText');
+const { readText, cleanText, stripBullet, tableRows } = require('../modules/customSources/readText');
 const { checkText, junkShare } = require('../modules/customSources/checkText');
 const { cutPieces, sentencesOf, countWords } = require('../modules/customSources/cutPieces');
 const { saveSource } = require('../modules/customSources/saveSource');
@@ -408,6 +408,24 @@ async function testReadText() {
   check('file: table kept as rows', file.parts.some((p) => p.type === 'table' && p.text === 'Brand | Share\nA | 10%\nB | 20%'));
   check('file: empty parts dropped', !texts.includes(''));
   check('file: page count and characters per page', file.pageCount === 4 && file.pageChars[1] > 0 && file.pageChars[4] > 0, JSON.stringify(file.pageChars));
+
+  // Bullets (found in the first real PDF: the bullet font came out as "¢")
+  check('bullet "¢ " is removed', stripBullet('¢ Audit all labels.').text === 'Audit all labels.' && stripBullet('¢ Audit all labels.').isBullet);
+  check('bullets "• ▪ * · ► –" are removed', ['• A', '▪ A', '* A', '· A', '► A', '– A'].every((t) => stripBullet(t).text === 'A'), ['• A', '▪ A', '* A', '· A', '► A', '– A'].map((t) => stripBullet(t).text).join(','));
+  check('money is not a bullet ("$ 5", "£ 20")', !stripBullet('$ 5 off all serums').isBullet && !stripBullet('£ 20 price cap').isBullet);
+  check('normal text is not a bullet', !stripBullet('Audit all labels.').isBullet && !stripBullet('"Quoted" text').isBullet && !stripBullet('(a) first point').isBullet);
+  const bulletFile = await readText(job, { kind: 'file', bytes: Buffer.from('x'), fileName: 'a.pdf' }, {
+    partition: async () => [
+      { type: 'ListItem', text: '¢ Audit all labels against the new rules.', metadata: { page_number: 3 } },
+      { type: 'NarrativeText', text: '• Train regional teams before the deadlines.', metadata: { page_number: 3 } },
+    ],
+  });
+  check('file: bullet symbol removed from list items', bulletFile.parts[0].text === 'Audit all labels against the new rules.' && bulletFile.parts[0].type === 'list');
+  check('file: a text part starting with a bullet becomes a list item', bulletFile.parts[1].type === 'list' && bulletFile.parts[1].text === 'Train regional teams before the deadlines.');
+  const bulletPieces = cutPieces(job, { title: 'T', parts: bulletFile.parts });
+  check('pieces: list shows "- Audit ..." (no "- ¢")', bulletPieces.pieces[0].text === '- Audit all labels against the new rules.\n- Train regional teams before the deadlines.', JSON.stringify(bulletPieces.pieces[0].text));
+  const typedList = await readText({ sourceName: 'N' }, { kind: 'text', text: 'Actions:\n\n• Audit labels\n• Train teams' });
+  check('text: bullet lines become list items', typedList.parts.length === 3 && typedList.parts[1].type === 'list' && typedList.parts[2].text === 'Train teams', JSON.stringify(typedList.parts));
 
   // A 2-page file: too few pages to call anything "repeated"
   const twoPages = await readText(job, { kind: 'file', bytes: Buffer.from('x'), fileName: 'a.pdf' }, {

@@ -56,6 +56,20 @@ function cleanText(value, { keepLines = false } = {}) {
   return text.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()).filter(Boolean).join('\n');
 }
 
+/**
+ * A part that starts with one symbol and a space ("• ", "▪ ", "* ", or a
+ * bullet from a special font that comes out as "¢ ") is a list item: the
+ * symbol is the bullet, not content. Returns { text, isBullet }.
+ * A symbol followed by a number ("$5", "£ 20") is money, not a bullet.
+ */
+function stripBullet(text) {
+  const match = String(text).match(/^([\p{S}\p{Po}\p{Pd}])\s+(?=\S)/u);
+  if (!match) return { text, isBullet: false };
+  const rest = text.slice(match[0].length);
+  if (/^\p{Sc}$/u.test(match[1]) && /^\d/.test(rest)) return { text, isBullet: false };
+  return { text: rest, isBullet: true };
+}
+
 // A table written as HTML -> one line per row, cells split by " | "
 function tableRows(html) {
   const $ = cheerio.load(String(html));
@@ -165,10 +179,14 @@ async function readFile(job, fetched, deps) {
       continue;
     }
     const meta = el.metadata || {};
-    const type = TYPE_OF[label] || 'text';
-    const text = type === 'table' && meta.text_as_html
+    let type = TYPE_OF[label] || 'text';
+    let text = type === 'table' && meta.text_as_html
       ? (tableRows(meta.text_as_html) || cleanText(el.text))
       : cleanText(el.text);
+    if (type !== 'table' && type !== 'title') {
+      const bullet = stripBullet(text);
+      if (bullet.isBullet) { text = bullet.text; type = 'list'; }
+    }
     if (!text) continue;
     parts.push({
       type,
@@ -344,6 +362,12 @@ function readPlainText(job, fetched) {
       parts.push({ type: 'title', page: null, sheet: null, text: cleanText(heading[1]) });
       continue;
     }
+    const lines = block.split('\n').map((line) => cleanText(line)).filter(Boolean);
+    const bullets = lines.map(stripBullet);
+    if (lines.length > 0 && bullets.every((b) => b.isBullet)) {
+      bullets.forEach((b) => parts.push({ type: 'list', page: null, sheet: null, text: b.text }));
+      continue;
+    }
     const text = cleanText(block);
     if (text) parts.push({ type: 'text', page: null, sheet: null, text });
   }
@@ -371,4 +395,4 @@ async function readText(job, fetched, deps = {}) {
   throw new Error(`readText: unknown kind "${fetched.kind}"`);
 }
 
-module.exports = { readText, cleanText, tableRows, removeRepeatedLines, decodeHtml, readArticle };
+module.exports = { readText, cleanText, stripBullet, tableRows, removeRepeatedLines, decodeHtml, readArticle };
