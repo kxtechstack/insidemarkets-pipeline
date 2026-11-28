@@ -5109,6 +5109,85 @@ function fakeStep9Store(opts = {}) {
   };
 }
 
+// ── 29 Nov: the client's own documents (custom sources) in the chat ──────
+// Off = exactly as before. On = after the news search, a few clearly related
+// pieces of the client's documents are added (fake data, no AI, no cost).
+async function testCustomInChat() {
+  console.log('\nCUSTOM SOURCES in the chat — the client\'s own documents added to a news search (fake data, no AI)');
+  const runner = require('../modules/dynamicRag/runWorkflow');
+  const { sourceBook } = require('../modules/dynamicRag/generateAnswer');
+  const understood = { client: { company_name: 'Lumière Beauty Group', industry: 'Cosmetics', competitors: ['Lancôme'] }, companies: [], question_text: 'test question' };
+  const MODS = ['policy', 'market', 'outlook', 'competitor'];
+  const hit = (n, extra = {}) => ({ score: 0.03, meaningScore: 0.7, wordPlace: null, sourceId: 'src-1', documentId: 'doc-1', sourceName: 'NIQ State of Beauty', title: 'NIQ State of Beauty', heading: `Part ${n}`, sheet: null, pageFrom: n, pageTo: n, pieceNo: n, pieceId: `piece-${n}`, text: `Document text number ${n} about cosmetics rules.`, url: null, publishedAt: '2025-03-01T00:00:00Z', readAt: null, ...extra });
+  let calls = [];
+  const go = async ({ on, hits = [], fail = false, inputs = {} }) => {
+    const st = fakeStep9Store();
+    calls = [];
+    st.searchCustom = async (args) => { calls.push(args); if (fail) throw new Error('Qdrant is down'); return { results: hits, wordSearch: 'on' }; };
+    runner.useStore(st);
+    runner.useCustomSources(on);
+    const tasks = [{ task_id: 'T1', capability: 'retrieve_data', inputs: { query: 'cosmetics rules', modules: MODS, ...inputs }, depends_on: [] }];
+    const out = await runner.runWorkflow({ status: 'approved', batches: [['T1']] }, { tasks }, understood, { client_id: st.clientId }, { aiBudget: 10 });
+    runner.useCustomSources(null);
+    return out;
+  };
+  const docs = (out) => out.results.T1.output.items.filter((it) => it.module === 'custom');
+
+  await check('Custom sources OFF: the documents are never searched and the news found is the same as before', async () => {
+    const off = await go({ on: false, hits: [hit(1)] });
+    const base = await go({ on: false });
+    const ids = (o) => o.results.T1.output.items.map((it) => it.source_id).join();
+    return (calls.length === 0 && docs(off).length === 0 && ids(off) === ids(base) && off.results.T1.status === 'done') || { calls, ids: ids(off) };
+  });
+  await check('Custom sources ON: close pieces are added (module custom, document + page kept, the client asked), a far piece is left out (counted), a piece found by the word search is kept', async () => {
+    const out = await go({ on: true, hits: [hit(1), hit(2, { meaningScore: 0.3 }), hit(3, { meaningScore: null, wordPlace: 1 })] });
+    const o = out.results.T1.output;
+    const d = docs(out);
+    return (d.length === 2 && d[0].source_id === 'custom:piece-1' && d[0].document.page_from === 1 && d[0].title === 'NIQ State of Beauty · Part 1 · page 1' &&
+      d.map((it) => it.document.piece_no).join() === '1,3' && o.removed.reasons['documents: not close enough to the question'] === 1 &&
+      /2 pieces of the client's own documents added \(NIQ State of Beauty\)/.test(o.note) && calls[0].clientId === 'client-1' && calls[0].question === 'cosmetics rules') || { d, o: o.note, r: o.removed, calls };
+  });
+  await check('Custom sources ON: a document piece goes among the news by closeness (0.7 after the 0.81 and 0.77 news, before the 0.62 one)', async () => {
+    const out = await go({ on: true, hits: [hit(1)] });
+    const items = out.results.T1.output.items;
+    const at = items.findIndex((it) => it.module === 'custom');
+    const before = items.slice(0, at).every((it) => it.score != null && it.score >= 0.7);
+    const after = items.slice(at + 1).every((it) => it.module === 'custom' || it.score == null || it.score <= 0.7);
+    return (at > 0 && before && after) || items.map((it) => `${it.module}:${it.score}`);
+  });
+  await check('Custom sources ON: at most 5 document pieces per search', async () => {
+    const out = await go({ on: true, hits: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => hit(n)) });
+    return docs(out).length === 5 || docs(out).length;
+  });
+  await check('Custom sources ON: a search for a place keeps only pieces naming it; a period keeps only dated pieces inside it (undated left out, counted)', async () => {
+    const place = await go({ on: true, inputs: { countries: ['United Arab Emirates'] }, hits: [hit(1, { text: 'New rules in the UAE for cosmetics.' }), hit(2, { text: 'Rules in Japan.' })] });
+    const pr = place.results.T1.output.removed.reasons;
+    const dates = await go({ on: true, inputs: { date_from: '2025-01-01', date_to: '2025-06-30' }, hits: [hit(1), hit(2, { publishedAt: null }), hit(3, { publishedAt: '2024-05-01' })] });
+    const dr = dates.results.T1.output.removed.reasons;
+    return (docs(place).map((it) => it.document.piece_no).join() === '1' && pr['documents: do not name the place asked'] === 1 &&
+      docs(dates).map((it) => it.document.piece_no).join() === '1' && dr['documents: no date, and the question asks for a period'] === 1 && dr['documents: outside the dates asked'] === 1) ||
+      { p: docs(place).length, pr, d: docs(dates).length, dr };
+  });
+  await check('Custom sources ON: the document search fails -> the news answer goes on (done), with a note; never a crash', async () => {
+    const out = await go({ on: true, fail: true, hits: [hit(1)] });
+    const o = out.results.T1.output;
+    return (out.results.T1.status === 'done' && docs(out).length === 0 && o.items.length > 0 && /client's documents could not be searched \(Qdrant is down\)/.test(o.note)) || { s: out.results.T1.status, n: o.note };
+  });
+  await check('Custom sources ON: nothing found in the documents -> the news result is untouched (no note)', async () => {
+    const out = await go({ on: true, hits: [] });
+    return (docs(out).length === 0 && !/document/.test(out.results.T1.output.note || '')) || out.results.T1.output.note;
+  });
+  await check('The answer\'s source list: a document piece is a source named "Your documents" with its document and page; news sources have document null', async () => {
+    const out = await go({ on: true, hits: [hit(4)] });
+    const book = sourceBook(out);
+    const n = book.nums(['custom:piece-4'])[0];
+    const s = book.list[n - 1];
+    const news = book.list[book.nums(['policy:p1'])[0] - 1];
+    return (s && s.module === 'custom' && s.module_name === 'Your documents' && s.document && s.document.page_from === 4 && s.document.name === 'NIQ State of Beauty' && s.card === null &&
+      news && news.document === null) || { s, news };
+  });
+}
+
 // ── Step 9 part 2: the AI jobs, with a FAKE AI (no cost) ─────────────────
 async function testStep9Ai() {
   console.log('\nSTEP 9 part 2 — the AI jobs and the evidence check (fake data, FAKE AI, no cost)');
@@ -7551,7 +7630,7 @@ async function main() {
     if (run(6)) await testStep6();
     if (run(7)) await testStep7();
     if (run(8)) await testStep8();
-    if (run(9) && !want9Real) { await testStep9(); await testStep9Ai(); await testV51(); }
+    if (run(9) && !want9Real) { await testStep9(); await testStep9Ai(); await testV51(); await testCustomInChat(); }
     if (run(10) && !want9Real) await testStep10();
     if (want9Real) await testStep9Real();
     if (wantDbCheck) await testDbCheck();

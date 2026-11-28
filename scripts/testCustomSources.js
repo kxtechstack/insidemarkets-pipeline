@@ -24,6 +24,9 @@ const { runSource } = require('../modules/customSources/runSource');
 const { searchCustomSources } = require('../modules/customSources/searchCustomSources');
 const { readPdf, linesOfPage, partsFromLines, isSpacedLetters, withoutDoubles } = require('../modules/customSources/readPdf');
 const { SourceError } = require('../modules/customSources/sourceError');
+const { deleteSource, deleteClientSources } = require('../modules/customSources/deleteSource');
+const { checkAdmin, useAdminStore, useRunLoginSetting } = require('../modules/customSources/adminAccess');
+const { registerCustomSourcesRoute, useRouteFakes } = require('../modules/customSources/route');
 
 let passed = 0;
 let failed = 0;
@@ -1132,6 +1135,150 @@ async function testReadPdf() {
   check('real PDF: cut into 3 pieces, the table stays with its section', realPieces.pieces.length === 3 && realPieces.pieces[1].text.includes('Region | Change | Deadline') && realPieces.pieces[1].heading === 'Section 2: Ingredient Restrictions', realPieces.pieces.map((p) => `${p.heading}:${p.wordCount}`).join(' / '));
 }
 
+// ── Delete a source / all sources of a client, and the admin login ────────
+async function testDeleteAndAccess() {
+  console.log('\nDelete (deleteSource.js), admin login (adminAccess.js) and the addresses (route.js)');
+  const C1 = '11111111-1111-4111-8111-111111111111';
+  const C2 = '22222222-2222-4222-8222-222222222222';
+  const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const X = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';   // another client's source
+  const COL = 'custom_source_pieces';
+  // a storage with folders, remove and list (like Supabase)
+  const storageOf = (files, { failRemove = false } = {}) => ({
+    from() {
+      return {
+        async remove(paths) { if (failRemove) return { data: null, error: { message: 'storage is down' } }; paths.forEach((p) => delete files[p]); return { data: paths, error: null }; },
+        async list(folder, { limit, offset }) {
+          const names = new Map();
+          for (const p of Object.keys(files)) {
+            if (!p.startsWith(`${folder}/`)) continue;
+            const rest = p.slice(folder.length + 1).split('/');
+            names.set(rest[0], rest.length === 1 ? { name: rest[0], id: `id-${p}` } : { name: rest[0], id: null });
+          }
+          return { data: [...names.values()].slice(offset, offset + limit), error: null };
+        },
+      };
+    },
+  });
+  const setup = (opts = {}) => {
+    const files = { [`${C1}/a.pdf`]: 1, [`${C1}/old/b.pdf`]: 1, [`${C1}/deep/er/c.pdf`]: 1, [`${C2}/x.pdf`]: 1 };
+    const db = memoryDb({
+      'admin.custom_data_sources': [
+        { id: A, client_id: C1, storage_path: `${C1}/a.pdf` }, { id: B, client_id: C1, storage_path: `${C1}/old/b.pdf` },
+        { id: X, client_id: C2, storage_path: `${C2}/x.pdf` },
+      ].filter((r) => !(opts.noRowA && r.id === A)),
+      'public.custom_source_documents': [{ id: 'dA', source_id: A, client_id: C1 }, { id: 'dB', source_id: B, client_id: C1 }, { id: 'dX', source_id: X, client_id: C2 }],
+      'public.custom_source_pieces': [{ id: 'pA', document_id: 'dA' }, { id: 'pB', document_id: 'dB' }, { id: 'pX', document_id: 'dX' }],
+      'public.custom_source_run_log': [{ id: 'log1', source_id: A }],
+    }, opts.failOn || {});
+    db.storage = storageOf(files, opts);
+    const qdrant = memoryQdrant();
+    qdrant.collections[COL] = { points: new Map([['pA', { id: 'pA', payload: { source_id: A, client_id: C1 } }], ['pB', { id: 'pB', payload: { source_id: B, client_id: C1 } }], ['pX', { id: 'pX', payload: { source_id: X, client_id: C2 } }]]) };
+    if (opts.failQdrant) qdrant.delete = async () => { throw new Error(opts.failQdrant); };
+    return { db, qdrant, files, ids: (t) => db.data[t].map((r) => r.id).sort().join(), points: () => [...qdrant.collections[COL].points.keys()].sort().join() };
+  };
+  const code = async (fn) => { try { await fn(); return 'OK'; } catch (e) { return e.status; } };
+
+  {
+    const t = setup();
+    const out = await deleteSource(A, { db: t.db, qdrant: t.qdrant });
+    check('delete a source: its search data, text, pieces, file and row are gone; the other sources stay; the run log stays',
+      out.deleted && out.rowFound && t.points() === 'pB,pX' && t.ids('public.custom_source_documents') === 'dB,dX' && t.ids('public.custom_source_pieces') === 'pB,pX' &&
+      !(`${C1}/a.pdf` in t.files) && `${C1}/old/b.pdf` in t.files && t.ids('admin.custom_data_sources') === [B, X].sort().join() && t.ids('public.custom_source_run_log') === 'log1',
+      JSON.stringify({ out, p: t.points(), d: t.ids('public.custom_source_documents') }));
+  }
+  {
+    const t = setup({ noRowA: true });
+    const out = await deleteSource(A, { db: t.db, qdrant: t.qdrant });
+    check('delete when the row is already gone: the leftovers of that source are still removed (rowFound false)',
+      out.deleted && out.rowFound === false && t.points() === 'pB,pX' && t.ids('public.custom_source_documents') === 'dB,dX', JSON.stringify(out));
+  }
+  {
+    const t = setup({ failQdrant: 'Qdrant is down' });
+    const status = await code(() => deleteSource(A, { db: t.db, qdrant: t.qdrant }));
+    check('delete: Qdrant fails -> 500 and NOTHING else is deleted (the row stays, so Delete can be pressed again)',
+      status === 500 && t.ids('public.custom_source_documents') === 'dA,dB,dX' && t.ids('admin.custom_data_sources').includes(A), status);
+  }
+  {
+    const t = setup({ failQdrant: "Not Found: Collection `custom_source_pieces` doesn't exist!" });
+    const out = await deleteSource(A, { db: t.db, qdrant: t.qdrant });
+    check('delete: no Qdrant collection yet = nothing to remove there, the rest is deleted', out.deleted && t.ids('public.custom_source_documents') === 'dB,dX');
+  }
+  {
+    const t = setup({ failOn: { 'delete:custom_source_documents': 'db is down' } });
+    const status = await code(() => deleteSource(A, { db: t.db, qdrant: t.qdrant }));
+    check('delete: the text cannot be removed -> 500 and the row stays', status === 500 && t.ids('admin.custom_data_sources').includes(A), status);
+  }
+  {
+    const t = setup({ failRemove: true });
+    const out = await deleteSource(A, { db: t.db, qdrant: t.qdrant });
+    check('delete: the file cannot be removed from storage -> still deleted, with a note', out.deleted && /could not be removed from storage/.test(out.notes.join(' ')) && !t.ids('admin.custom_data_sources').includes(A), JSON.stringify(out));
+  }
+  check('delete: a bad source id -> 400', await code(() => deleteSource('not-a-uuid', { db: memoryDb(), qdrant: memoryQdrant() })) === 400);
+  {
+    const t = setup();
+    const out = await deleteClientSources(C1, { db: t.db, qdrant: t.qdrant });
+    check('delete all sources of a client: their search data, text, every file in the client folder (also in folders inside) and rows are gone; the other client is untouched',
+      out.deleted && out.sources === 2 && out.files === 3 && t.points() === 'pX' && t.ids('public.custom_source_documents') === 'dX' && t.ids('public.custom_source_pieces') === 'pX' &&
+      Object.keys(t.files).join() === `${C2}/x.pdf` && t.ids('admin.custom_data_sources') === X, JSON.stringify({ out, files: Object.keys(t.files) }));
+  }
+  check('delete all sources: a bad client id -> 400', await code(() => deleteClientSources('x', { db: memoryDb(), qdrant: memoryQdrant() })) === 400);
+
+  // the admin login
+  useAdminStore({
+    async emailOfToken(token) { if (token === 'boom') throw new Error('auth down'); return { admin: 'Sneha@KX.com', user: 'client@shop.com' }[token] || null; },
+    async isAdminEmail(email) { return email.toLowerCase() === 'sneha@kx.com'; },
+  });
+  const req = (token) => ({ headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const who = await Promise.all([checkAdmin(req(null)), checkAdmin(req('wrong')), checkAdmin(req('user')), checkAdmin(req('admin')), checkAdmin(req('boom'))]);
+  check('admin login: no token 401, a bad token 401, a client dashboard login 403, an admin login ok, a broken check 401 (never let in)',
+    who.map((w) => (w.ok ? 'ok' : w.status)).join() === '401,401,403,ok,401', who.map((w) => (w.ok ? 'ok' : w.status)).join());
+
+  // the addresses, on a real small server
+  const express = require('express');
+  const app = express();
+  const calls = [];
+  useRouteFakes({
+    db: memoryDb({ 'admin.custom_data_sources': [{ id: A, client_id: C1 }] }),
+    runSource: async (id) => { calls.push(`run:${id}`); return {}; },
+    deleteSource: async (id) => { calls.push(`delete:${id}`); if (id === B) { const e = new Error('This source is running now.'); e.status = 409; throw e; } return { deleted: true, sourceId: id }; },
+    deleteClientSources: async (id) => { calls.push(`client:${id}`); return { deleted: true, clientId: id, sources: 2 }; },
+  });
+  registerCustomSourcesRoute(app);
+  const server = await new Promise((ok) => { const sv = app.listen(0, '127.0.0.1', () => ok(sv)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const hit = async (method, url, token) => { const r = await fetch(`${base}${url}`, { method, headers: token ? { Authorization: `Bearer ${token}` } : {} }); return [r.status, await r.json()]; };
+  try {
+    useRunLoginSetting(false);
+    const runOpen = await hit('POST', `/custom-source/run/${A}`);
+    useRunLoginSetting(true);
+    const runNoLogin = await hit('POST', `/custom-source/run/${A}`);
+    const runAdmin = await hit('POST', `/custom-source/run/${A}`, 'admin');
+    const runMissing = await hit('POST', `/custom-source/run/${X}`, 'admin');
+    check('Run now: with CS_REQUIRE_ADMIN_LOGIN off it works with no login (today\'s admin console); on: no login 401, admin started, unknown source 404',
+      runOpen[0] === 200 && runNoLogin[0] === 401 && runAdmin[0] === 200 && runAdmin[1].status === 'started' && runMissing[0] === 404,
+      JSON.stringify([runOpen[0], runNoLogin[0], runAdmin[0], runMissing[0]]));
+    useRunLoginSetting(false);
+    calls.length = 0;
+    const delNoLogin = await hit('DELETE', `/custom-source/${A}`);
+    const delUser = await hit('DELETE', `/custom-source/${A}`, 'user');
+    const delAdmin = await hit('DELETE', `/custom-source/${A}`, 'admin');
+    const delBusy = await hit('DELETE', `/custom-source/${B}`, 'admin');
+    const delClient = await hit('DELETE', `/custom-source/client/${C1}`, 'admin');
+    const delClientNoLogin = await hit('DELETE', `/custom-source/client/${C1}`);
+    check('Delete addresses: ALWAYS need an admin login (none 401, client dashboard login 403, even with the Run setting off); admin: deleted; a busy source 409 with its message; /client/:id deletes the client\'s sources',
+      delNoLogin[0] === 401 && delUser[0] === 403 && delAdmin[0] === 200 && delAdmin[1].deleted && delBusy[0] === 409 && /running now/.test(delBusy[1].error) &&
+      delClient[0] === 200 && delClient[1].sources === 2 && delClientNoLogin[0] === 401 && calls.join() === `delete:${A},delete:${B},client:${C1}`,
+      JSON.stringify({ s: [delNoLogin[0], delUser[0], delAdmin[0], delBusy[0], delClient[0], delClientNoLogin[0]], calls }));
+  } finally {
+    server.close();
+    useRouteFakes(null);
+    useAdminStore(null);
+    useRunLoginSetting(null);
+  }
+}
+
 async function main() {
   await testReceiveSource();
   await testFetchSource();
@@ -1141,6 +1288,7 @@ async function main() {
   await testSaveAndRun();
   await testSearch();
   await testReadPdf();
+  await testDeleteAndAccess();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exitCode = 1;

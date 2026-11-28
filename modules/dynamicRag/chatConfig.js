@@ -196,4 +196,19 @@ module.exports = {
   // this many messages when one chat is opened (chatHistory.js)
   HISTORY_MAX_CHATS: 100,
   HISTORY_MAX_MESSAGES: 200,
+
+  // ── The client's own documents (custom sources) in the chat ────────────
+  // Off unless .env says DR_CUSTOM_SOURCES=on. Off = the chat works exactly
+  // as before (no document is ever searched).
+  CUSTOM_SOURCES_ON: String(process.env.DR_CUSTOM_SOURCES || '').toLowerCase() === 'on',
+  // After a news search, at most this many pieces of the client's documents
+  // are added to what the AI reads ...
+  CUSTOM_MAX_ITEMS: Number(process.env.DR_CUSTOM_MAX_ITEMS) || 5,
+  // ... and only clearly related ones: meaning score at least this (the
+  // same search model as the news, so the scores can be compared) ...
+  CUSTOM_MIN_MEANING: Number(process.env.DR_CUSTOM_MIN_MEANING) || 0.45,
+  // ... or one of the first places of the word search.
+  CUSTOM_MAX_WORD_PLACE: 2,
+  // What the screen and the AI call these sources
+  CUSTOM_MODULE_NAME: 'Your documents',
 };

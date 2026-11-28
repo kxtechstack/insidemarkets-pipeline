@@ -43,6 +43,7 @@ const {
   SEARCH_MAX_PIECES, EXACT_READ_MAX_ROWS, TAGGED_MAX_SIGNALS, RARE_WORD_MAX_SIGNALS,
   JOB_PROMPT_IDS, AI_ITEM_CHARS, AI_MAX_FINDINGS_IN, CLUSTER_AI_MIN, ANSWER_AI_CALLS, AI_CALL_TIMEOUT_MS,
   REPORTED_LATER_DAYS, MIN_SUPPORTED, ANSWER_TEXT, POINT_SOURCES_CHECK_FROM,
+  CUSTOM_SOURCES_ON, CUSTOM_MAX_ITEMS, CUSTOM_MIN_MEANING, CUSTOM_MAX_WORD_PLACE, CUSTOM_MODULE_NAME,
 } = require('./chatConfig');
 const COMPARE_BY_CODE_POINT = ANSWER_TEXT.compare_by_code_point;
 
@@ -95,6 +96,12 @@ function realStore() {
   };
   return {
     embed,
+    // the client's own documents (modules/customSources): { results, wordSearch }
+    // (with the chat's own search model, so it is not loaded twice)
+    async searchCustom(args) {
+      const { searchCustomSources } = require('../customSources/searchCustomSources');
+      return searchCustomSources(args, { embed });
+    },
     async searchPieces({ vector, clientId, moduleIds, dateFrom, dateTo, limit, offset = 0, only = null }) {
       const base = [{ key: 'client_id', match: { value: clientId } }, { key: 'module_id', match: { any: moduleIds } }];
       // only = { articleIds, pointIds }: search by meaning among these signals only
@@ -890,7 +897,106 @@ function uncommonTopicWords(inputs, understood) {
 }
 const stemOf = (w) => (w.length > 5 && w.endsWith('es') ? w.slice(0, -2) : w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w);
 const holdsWord = (it, words) => { const t = ` ${plain(`${it.title} ${it.text || ''}`)}`; return words.some((w) => t.includes(` ${stemOf(w)}`)); };
+// ── The client's own documents (custom sources) ──────────────────────────
+// 29 Nov (Sneha): the documents a client uploads in the admin console (PDF
+// reports, web pages) are searched too, AFTER the news search, which runs
+// exactly as before. Off unless .env DR_CUSTOM_SOURCES=on.
+//   - at most CUSTOM_MAX_ITEMS pieces, only clearly related ones (meaning
+//     score CUSTOM_MIN_MEANING, or the first CUSTOM_MAX_WORD_PLACE places of
+//     the word search)
+//   - the search's filters still count: a place / company asked must be named
+//     in the piece, a place / company left out must not be; a date range
+//     keeps only dated pieces inside it (undated documents are left out, noted)
+//   - merged with the news by score (the same search model scored both), so
+//     a close document piece is not cut off after 20 news
+//   - a problem never breaks the chat: the news answer goes on, with a note
+let customOn = null;
+/** Tests: turn the documents search on / off; null = .env (DR_CUSTOM_SOURCES). */
+function useCustomSources(on) { customOn = on; }
+
+function customToItem(hit) {
+  const pages = hit.pageFrom == null ? '' : hit.pageFrom === hit.pageTo || hit.pageTo == null ? `page ${hit.pageFrom}` : `pages ${hit.pageFrom}-${hit.pageTo}`;
+  const title = [hit.sourceName || hit.title || 'Document', hit.heading, pages].filter(Boolean).join(' · ');
+  return {
+    source_id: `custom:${hit.pieceId || `${hit.documentId}:${hit.pieceNo}`}`,
+    module: 'custom',
+    signal_id: hit.pieceId || null,
+    article_id: null,
+    title: cut(title, 200),
+    text: cutAtWord(hit.text || '', ITEM_TEXT_CHARS),
+    date: dayOf(hit.publishedAt),
+    url: hit.url || null,
+    countries: [],
+    companies: [],
+    impact: null,
+    group: null,
+    score: hit.meaningScore == null ? null : Math.round(hit.meaningScore * 1000) / 1000,
+    document: {
+      source_id: hit.sourceId, document_id: hit.documentId, name: hit.sourceName || hit.title || null,
+      page_from: hit.pageFrom == null ? null : hit.pageFrom, page_to: hit.pageTo == null ? null : hit.pageTo, piece_no: hit.pieceNo,
+    },
+  };
+}
+
+async function withCustomSources(out, inputs, ctx) {
+  const on = customOn === null ? CUSTOM_SOURCES_ON : customOn;
+  const s = getStore();
+  if (!on || !out || !Array.isArray(out.items) || typeof s.searchCustom !== 'function') return out;
+  const notes = [];
+  const reasons = {};
+  let hits;
+  try {
+    const found = await s.searchCustom({ question: searchTextOf(inputs.query), clientId: ctx.clientId, limit: CUSTOM_MAX_ITEMS * 3 });
+    hits = (found && found.results) || [];
+    if (found && found.wordSearch === 'off') notes.push(`documents: word search is off (${String(found.wordSearchProblem || '').slice(0, 80)}), meaning search only`);
+  } catch (e) {
+    return { ...out, note: [out.note, `the client's documents could not be searched (${String(e.message).slice(0, 100)}); the answer uses the news only`].filter(Boolean).join('; ') };
+  }
+  if (!hits.length) return out;
+
+  const dated = inputs.date_from || inputs.date_to;
+  const until = inputs.date_to ? readUntil(inputs, ctx.understood) : null;
+  const kept = [];
+  for (const hit of hits) {
+    const close = (hit.meaningScore != null && hit.meaningScore >= CUSTOM_MIN_MEANING) || (hit.wordPlace != null && hit.wordPlace <= CUSTOM_MAX_WORD_PLACE);
+    if (!close) { count(reasons, 'documents: not close enough to the question'); continue; }
+    const it = customToItem(hit);
+    const text = `${it.title} ${it.text}`;
+    if (dated) {
+      if (!it.date) { count(reasons, 'documents: no date, and the question asks for a period'); continue; }
+      if ((inputs.date_from && it.date < String(inputs.date_from).slice(0, 10)) || (until && it.date > String(until).slice(0, 10))) { count(reasons, 'documents: outside the dates asked'); continue; }
+    }
+    if ((inputs.countries || []).length && !inputs.countries.some((p) => textNamesPlace(text, p))) { count(reasons, 'documents: do not name the place asked'); continue; }
+    if ((inputs.companies || []).length && !inputs.companies.some((c) => namesCompany(it, c))) { count(reasons, 'documents: do not name the company asked'); continue; }
+    if ((inputs.not_countries || []).some((p) => textNamesPlace(text, p))) { count(reasons, 'documents: name a place left out'); continue; }
+    if ((inputs.not_companies || []).some((c) => namesCompany(it, c))) { count(reasons, 'documents: name a company left out'); continue; }
+    kept.push(it);
+    if (kept.length >= CUSTOM_MAX_ITEMS) break;
+  }
+  if (!kept.length) {
+    const why = Object.entries(reasons).map(([k, v]) => `${k} (${v})`).join(', ');
+    return { ...out, note: [out.note, ...notes, why ? `no document piece added: ${why}` : null].filter(Boolean).join('; ') };
+  }
+
+  // Merge by score: a document piece goes before the first news that is less close
+  const items = [...out.items];
+  for (const it of kept) {
+    const at = items.findIndex((n) => n.module !== 'custom' && (n.score == null || (it.score != null && n.score < it.score)));
+    if (it.score == null || at === -1) items.push(it); else items.splice(at, 0, it);
+  }
+  const names = [...new Set(kept.map((it) => it.document.name).filter(Boolean))];
+  notes.push(`${kept.length} pieces of the client's own documents added (${names.join(', ')})`);
+  const removed = { ...(out.removed || { count: 0, reasons: {} }) };
+  removed.reasons = { ...(removed.reasons || {}), ...reasons };
+  removed.count = Object.values(removed.reasons).reduce((a, b) => a + b, 0);
+  return { ...out, items, removed, documents: kept.length, note: [out.note, ...notes].filter(Boolean).join('; ') };
+}
+
 async function retrieveData(inputs, ctx) {
+  return withCustomSources(await retrieveNews(inputs, ctx), inputs, ctx);
+}
+
+async function retrieveNews(inputs, ctx) {
   const out = await retrieveDataOnce(inputs, ctx);
   const u = ctx.understood || {};
   if (!u.all_competitors || (u.companies || []).length || !(inputs.companies || []).length || !out.items) return out;
@@ -1469,7 +1575,7 @@ const failNoRetry = (msg) => { const e = new Error(msg); e.noRetry = true; retur
 
 const KINDS = ['fact', 'interpretation', 'hypothesis'];
 const weaker = (a, b) => (KINDS.indexOf(a) >= KINDS.indexOf(b) ? a : b);
-const MODULE_NAMES = { policy: 'Policy and Risk', market: 'Market Dynamics', outlook: 'Forward Outlook', competitor: 'Competitive Radar' };
+const MODULE_NAMES = { policy: 'Policy and Risk', market: 'Market Dynamics', outlook: 'Forward Outlook', competitor: 'Competitive Radar', custom: CUSTOM_MODULE_NAME };
 const count = (reasons, why, n = 1) => { reasons[why] = (reasons[why] || 0) + n; };
 
 // "T3.output" -> the done result of T3 (or null)
@@ -1543,7 +1649,8 @@ function gather(refs, ctx) {
 }
 
 function itemLine(code, it) {
-  const where = it.countries && it.countries.length ? it.countries.join(', ') : (it.module === 'outlook' ? 'no country' : 'Global');
+  const where = it.countries && it.countries.length ? it.countries.join(', ')
+    : (it.module === 'outlook' ? 'no country' : it.module === 'custom' ? "client's own document" : 'Global');
   return [`[${code}] ${it.date || 'no date'}`, MODULE_NAMES[it.module] || it.module, where,
     ...(it.companies && it.companies.length ? [it.companies.join(', ')] : []),
     ...(it.impact ? [`impact ${it.impact}`] : []),
@@ -2467,7 +2574,7 @@ async function runWorkflow(checked, workflow, understood, request, options = {})
 }
 
 module.exports = {
-  runWorkflow, useStore, useAi, usePrompts, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
+  runWorkflow, useStore, useAi, usePrompts, useCustomSources, customToItem, applyFilters, toItem, visible, sameCompany, textNamesPlace, numbersOk, pickItems, salvageList, TABLES, plainWords, cutAtWord, squeezedRegex, fuzzyRegex, wordsInTitles, rareWordsOf, namesTogether,
   newestShare, isCommonWord, searchTextOf, withoutCodes,
   // shared with Step 10 (generateAnswer.js): the same AI door, prompt reader and reply reader (and the same test fakes)
   callAiText: callAi, readPromptText: readPrompt, fillVars,

@@ -167,6 +167,7 @@ async function searchCustomSources({ question, clientId, limit = SEARCH_LIMIT, s
       pageFrom: p.page_from ?? null,
       pageTo: p.page_to ?? null,
       pieceNo: p.piece_no,
+      pieceId: p.piece_id || e.id,
       text: p.text,
       url: p.url || null,
       publishedAt: p.published_at || null,

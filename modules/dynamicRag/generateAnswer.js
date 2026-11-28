@@ -41,10 +41,10 @@
  * }
  */
 
-const { ANSWER_PROMPT_ID, ANSWER_TEXT } = require('./chatConfig');
+const { ANSWER_PROMPT_ID, ANSWER_TEXT, CUSTOM_MODULE_NAME } = require('./chatConfig');
 const workflowTools = require('./runWorkflow');
 
-const MODULE_NAMES = { policy: 'Policy and Risk', market: 'Market Dynamics', outlook: 'Forward Outlook', competitor: 'Competitive Radar' };
+const MODULE_NAMES = { policy: 'Policy and Risk', market: 'Market Dynamics', outlook: 'Forward Outlook', competitor: 'Competitive Radar', custom: CUSTOM_MODULE_NAME };
 const SECTION_TITLES = {
   extract_facts: 'Facts', summarise: 'Summary', compare: 'Comparison', cluster: 'Main groups of news',
   identify_patterns: 'Trends', identify_gaps: 'Gaps and unmet needs', discover_opportunities: 'Opportunities (ideas to test)',
@@ -109,6 +109,9 @@ function sourceBook(run) {
         // card; Policy and Competitive Radar news open as the signal itself
         card: it.group && it.group.id ? { kind: it.group.type === 'trend' ? 'trend' : 'market_card', id: it.group.id, name: it.group.name || null } : null,
         countries: it.countries || [], companies: it.companies || [], same_link: [],
+        // 29 Nov: a piece of the client's own document (module "custom"):
+        // which document and page, for the screen (null for news)
+        document: it.document || null,
       });
     }
     return byId.get(id);
