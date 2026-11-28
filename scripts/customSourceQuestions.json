@@ -1,0 +1,23 @@
+{
+  "about": "Search check for custom sources. Each question has the page(s) of the NIQ State of Beauty 2026 PDF where the answer really is (checked by hand). PASS = one of those pages is in the top 3 pieces from a source whose name or title has the word in sourceLike.",
+  "clientId": "b61b4d3b-caeb-457b-9971-636c83688ee4",
+  "sourceLike": "beauty",
+  "questions": [
+    { "q": "What share of global consumers bought a product through TikTok Shop?", "pages": [10], "answer": "22%" },
+    { "q": "How big are livestream beauty sales on Douyin in China?", "pages": [11], "answer": "$26 billion, +47% vs year ago" },
+    { "q": "How fast is online beauty growing compared with stores?", "pages": [8], "answer": "Online +18%, offline +3%" },
+    { "q": "What is the global beauty value growth?", "pages": [7], "answer": "+10% (MAT Q3 2025)" },
+    { "q": "Which regions drive beauty growth and where is it slowing?", "pages": [7], "answer": "Developing markets drive growth, Europe cools" },
+    { "q": "Which beauty categories are driving industry growth?", "pages": [14], "answer": "Skin care and fragrance" },
+    { "q": "What are the leading beauty trends for 2026?", "pages": [16, 3], "answer": "Transparency, simplicity, wellness" },
+    { "q": "Why are consumers checking ingredients more?", "pages": [17], "answer": "Transparency and ingredient scrutiny drive innovation" },
+    { "q": "Is Amazon winning against beauty specialty stores in the US?", "pages": [12, 13], "answer": "Amazon captures dollar and unit growth" },
+    { "q": "Are beauty prices going up in 2025?", "pages": [22, 25], "answer": "Price increases are global, with inflation outliers" },
+    { "q": "How does income level affect beauty spending?", "pages": [23], "answer": "K-shaped economy, uneven growth by income tier" },
+    { "q": "Does price elasticity protect beauty from price increases?", "pages": [24], "answer": "Low price elasticity insulates beauty" },
+    { "q": "How should brands work with influencers?", "pages": [27], "answer": "Effective influencer partnerships" },
+    { "q": "What are the keys to winning on the digital shelf?", "pages": [28, 29, 30, 31], "answer": "Availability, visibility, attractiveness" },
+    { "q": "How will AI change shelf strategy?", "pages": [32], "answer": "AI will transform shelf strategy" },
+    { "q": "Who is the NielsenIQ global beauty vertical leader?", "pages": [2], "answer": "Tara James Taylor" }
+  ]
+}

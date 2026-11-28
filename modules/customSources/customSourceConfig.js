@@ -121,4 +121,8 @@ module.exports = {
   // ── Step 7 (reportRun.js) ──────────────────────────────────────────────
   // Longest message kept in custom_source_run_log.error_message.
   LOG_MESSAGE_MAX_CHARS: 3000,
+
+  // ── Search (searchCustomSources.js) ────────────────────────────────────
+  SEARCH_LIMIT: 8,        // how many pieces come back
+  SEARCH_MIN_SCORE: 0.2,  // pieces less similar than this are left out (0 = nothing alike, 1 = same)
 };

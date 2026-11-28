@@ -13,12 +13,13 @@ const http = require('http');
 const zlib = require('zlib');
 const { receiveSource } = require('../modules/customSources/receiveSource');
 const { fetchSource, isPublicAddress, checkLink, detectFileType, fileNameFor } = require('../modules/customSources/fetchSource');
-const { readText, cleanText, stripBullet, tableRows } = require('../modules/customSources/readText');
+const { readText, cleanText, stripBullet, tableRows, removeRepeatedLines } = require('../modules/customSources/readText');
 const { checkText, junkShare } = require('../modules/customSources/checkText');
 const { cutPieces, sentencesOf, countWords } = require('../modules/customSources/cutPieces');
 const { saveSource } = require('../modules/customSources/saveSource');
 const { reportRun } = require('../modules/customSources/reportRun');
 const { runSource } = require('../modules/customSources/runSource');
+const { searchCustomSources } = require('../modules/customSources/searchCustomSources');
 const { SourceError } = require('../modules/customSources/sourceError');
 
 let passed = 0;
@@ -427,6 +428,19 @@ async function testReadText() {
   const typedList = await readText({ sourceName: 'N' }, { kind: 'text', text: 'Actions:\n\n• Audit labels\n• Train teams' });
   check('text: bullet lines become list items', typedList.parts.length === 3 && typedList.parts[1].type === 'list' && typedList.parts[2].text === 'Train teams', JSON.stringify(typedList.parts));
 
+  // A footer that ends with the page number (found in the NIQ PDF)
+  const footerParts = [];
+  for (let page = 1; page <= 6; page += 1) {
+    footerParts.push(textPart(`Real content of page ${page} about beauty sales.`, page));
+    footerParts.push(textPart(`Confidential and prop rietary \u00a9 202 6 Nielsen Con sumer LL C. All Rights Reserved. ${page}`, page));
+    footerParts.push(textPart('+14%', page));
+  }
+  const footerResult = removeRepeatedLines(footerParts.map((p) => ({ ...p, text: cleanText(p.text) })), 6);
+  const footerLeft = footerResult.parts.map((p) => p.text);
+  check('footer with page number at the end is removed on every page', !footerLeft.some((t) => t.includes('All Rights Reserved')), footerLeft.join(' / '));
+  check('page content stays (it has page numbers too, but differs)', footerLeft.filter((t) => t.startsWith('Real content of page')).length === 6);
+  check('short number lines like "+14%" are never removed as a footer', footerLeft.filter((t) => t === '+14%').length === 6);
+
   // A 2-page file: too few pages to call anything "repeated"
   const twoPages = await readText(job, { kind: 'file', bytes: Buffer.from('x'), fileName: 'a.pdf' }, {
     partition: async () => [
@@ -746,6 +760,15 @@ function memoryQdrant(failUpsert = false) {
     async delete(name, { filter }) {
       for (const [id, p] of collections[name].points) if (matchesFilter(p, filter)) collections[name].points.delete(id);
     },
+    async search(name, { vector, limit, score_threshold: minScore, filter }) {
+      if (!collections[name]) throw new Error(`Collection ${name} not found`);
+      this.lastFilter = filter;
+      const cosine = (a, b) => a.reduce((t, x, i) => t + x * b[i], 0) / (Math.hypot(...a) * Math.hypot(...b) || 1);
+      const fits = (p) => (filter.must || []).every((c) => (c.match.any ? c.match.any.includes(p.payload[c.key]) : p.payload[c.key] === c.match.value));
+      return [...collections[name].points.values()].filter(fits)
+        .map((p) => ({ id: p.id, score: cosine(vector, p.vector), payload: p.payload }))
+        .filter((h) => h.score >= minScore).sort((a, b) => b.score - a.score).slice(0, limit);
+    },
     points(name = 'custom_source_pieces') { return [...collections[name].points.values()]; },
   };
 }
@@ -891,6 +914,44 @@ async function testSaveAndRun() {
   await firstRun;
 }
 
+// ── Search: searchCustomSources.js ──────────────────────────────────────
+
+// A tiny "meaning" model for tests: one number per topic word
+const TOPICS = ['tiktok', 'price', 'skin', 'amazon'];
+const topicEmbed = async (text) => {
+  const lower = text.toLowerCase();
+  const v = Array.from({ length: 384 }, () => 0);
+  TOPICS.forEach((word, i) => { if (lower.includes(word)) v[i] = 1; });
+  v[383] = 0.01; // never all zero
+  return v;
+};
+
+async function testSearch() {
+  console.log('\nSearch: searchCustomSources.js');
+  const qdrant = memoryQdrant();
+  const db = memoryDb();
+  const save = async (sourceId, clientId, name, texts) => {
+    const job = { sourceId, clientId, sourceName: name, sourceType: 'pdf', kind: 'file', url: null };
+    const read = { title: name, reader: 'unstructured', parts: texts.map((t, i) => textPart(t, i + 1)), pageCount: texts.length, pageChars: {}, notes: [] };
+    const check = { status: 'ok', summary: { chars: 100 }, message: 'ok' };
+    await saveSource({ job, read, check, cut: cutPieces(job, read) }, { db, qdrant, embed: topicEmbed });
+  };
+  await save(id(1), CLIENT, 'NIQ Beauty', ['TikTok Shop sales grew fast.', 'Skin care leads growth.', 'Prices rose in 2025.']);
+  await save(id(2), OTHER_CLIENT, 'Other client report', ['TikTok Shop is huge for us.']);
+
+  const hits = await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, { qdrant, embed: topicEmbed });
+  check('search: best piece first, with source and page', hits[0] && hits[0].sourceName === 'NIQ Beauty' && hits[0].pageFrom === 1 && /TikTok/.test(hits[0].text), JSON.stringify(hits[0]));
+  check('search: never shows another client\'s pieces', hits.every((h) => h.sourceName !== 'Other client report'));
+  check('search: always filters by client', JSON.stringify(qdrant.lastFilter.must[0]) === JSON.stringify({ key: 'client_id', match: { value: CLIENT } }));
+  const onlySource = await searchCustomSources({ question: 'TikTok', clientId: CLIENT, sourceIds: [id(9)] }, { qdrant, embed: topicEmbed });
+  check('search: can be limited to some sources', onlySource.length === 0);
+  const code = async (fn) => { try { await fn(); return 'OK'; } catch (e) { return e.message; } };
+  check('search: empty question stops', /empty/.test(await code(() => searchCustomSources({ question: ' ', clientId: CLIENT }, { qdrant, embed: topicEmbed }))));
+  check('search: missing client stops', /clientId/.test(await code(() => searchCustomSources({ question: 'x', clientId: '' }, { qdrant, embed: topicEmbed }))));
+  const none = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, { qdrant: { search: async () => { throw new Error('Collection custom_source_pieces not found'); } }, embed: topicEmbed });
+  check('search: no collection yet gives no results (not a crash)', Array.isArray(none) && none.length === 0);
+}
+
 async function main() {
   await testReceiveSource();
   await testFetchSource();
@@ -898,6 +959,7 @@ async function main() {
   testCheckText();
   testCutPieces();
   await testSaveAndRun();
+  await testSearch();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exitCode = 1;

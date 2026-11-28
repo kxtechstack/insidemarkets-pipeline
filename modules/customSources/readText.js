@@ -92,6 +92,21 @@ function pageCharsOf(parts) {
 const short = (text, max = 60) => (text.length > max ? `${text.slice(0, max)}...` : text);
 
 /**
+ * How a line is compared with the same line on other pages.
+ * A footer often starts or ends with the page number ("... All Rights
+ * Reserved. 7"), so a number at the very start or end counts as the same.
+ * Numbers in the middle of a line are compared exactly ("sales grew 5%"
+ * and "sales grew 7%" are different lines).
+ * A line with fewer than 3 letters (like "+14%") is never a header or
+ * footer: it gets no key, so it is always kept.
+ */
+function repeatKey(text) {
+  const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
+  if ((lower.match(/\p{L}/gu) || []).length < 3) return null;
+  return lower.replace(/^\d+\s*|\s*\d+$/g, '#');
+}
+
+/**
  * A short line found on most pages is a running header or footer.
  * Returns the parts without those lines, and a note saying what was removed.
  */
@@ -100,7 +115,8 @@ function removeRepeatedLines(parts, pageCount) {
   const pagesByLine = new Map();
   for (const p of parts) {
     if (p.type === 'table' || !p.page || p.text.length > REPEATED_LINE_MAX_CHARS) continue;
-    const key = p.text.toLowerCase();
+    const key = repeatKey(p.text);
+    if (key === null) continue;
     if (!pagesByLine.has(key)) pagesByLine.set(key, new Set());
     pagesByLine.get(key).add(p.page);
   }
@@ -112,8 +128,8 @@ function removeRepeatedLines(parts, pageCount) {
   let removed = 0;
   const examples = [];
   for (const p of parts) {
-    const key = p.text.toLowerCase();
-    if (p.type !== 'table' && repeated.has(key)) {
+    const key = repeatKey(p.text);
+    if (p.type !== 'table' && key !== null && repeated.has(key)) {
       removed += 1;
       if (examples.length < 3 && !examples.includes(p.text)) examples.push(p.text);
     } else {
@@ -395,4 +411,4 @@ async function readText(job, fetched, deps = {}) {
   throw new Error(`readText: unknown kind "${fetched.kind}"`);
 }
 
-module.exports = { readText, cleanText, stripBullet, tableRows, removeRepeatedLines, decodeHtml, readArticle };
+module.exports = { readText, cleanText, stripBullet, tableRows, removeRepeatedLines, repeatKey, decodeHtml, readArticle };
