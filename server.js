@@ -19,10 +19,9 @@ const { startJobTracking, updateJobStage, completeJobTracking, markFullyComplete
 const { processQueueInBatches, retryFailedArticles, FORWARD_OUTLOOK_MODULE_ID, MARKET_DYNAMICS_MODULE_ID } = require('./modules/llmRelevanceProcessor');
 const { createClient } = require('@supabase/supabase-js');
 const { QdrantClient } = require('@qdrant/js-client-rest');
-const { extractContent } = require('./modules/customSourceExtractor');
-const { processCustomSource } = require('./modules/customSourceProcessor');
 const { startStaleJobWatcher, startRateLimitResumeWatcher } = require('./modules/jobRecovery');
 const { registerVoiceOfMarketRoute } = require('./modules/voiceOfMarket/route');
+const { registerCustomSourcesRoute } = require('./modules/customSources/route'); // custom sources: Run button (read, check, cut, save)
 // Decision Intelligence chat (Dynamic RAG) — the only chat in this server.
 // The old chats (decisionIntelligence, decisionIntelligenceV2, ragChat.js)
 // have been removed.
@@ -393,57 +392,6 @@ app.get('/client-status/:clientId', async (req, res) => {
       }
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// Run a single custom data source (website / pdf / file / text)
-app.post('/custom-source/run/:sourceId', async (req, res) => {
-  const { sourceId } = req.params;
-
-  try {
-    // Look up the source row
-    const { data: source, error } = await supabaseClient
-      .schema('admin')
-      .from('custom_data_sources')
-      .select('*')
-      .eq('id', sourceId)
-      .single();
-
-    if (error || !source) {
-      return res.status(404).json({ error: 'Custom data source not found' });
-    }
-
-    // Respond immediately, process in background (same pattern as /run)
-    res.json({ status: 'started', sourceId });
-
-    try {
-      const extracted = await extractContent(source);
-      const result = await processCustomSource(source, extracted);
-      console.log(`[CustomSource] Run complete for "${source.source_name}":`, result);
-    } catch (err) {
-      console.error(`[CustomSource] Run failed for "${source.source_name}":`, err.message);
-
-      await supabaseClient
-        .schema('admin')
-        .from('custom_data_sources')
-        .update({ last_run_status: 'failed', last_run_at: new Date().toISOString() })
-        .eq('id', sourceId);
-
-      // Log this failed attempt to the run history table too (this catch
-      // block covers extraction failures -- e.g. bad URL, unreachable file --
-      // which happen BEFORE processCustomSource's own try/catch would log it)
-      await supabaseClient.from('custom_source_run_log').insert({
-        source_id: sourceId,
-        client_id: source.client_id,
-        source_name: source.source_name,
-        status: 'failed',
-        error_message: err.message,
-      });
-    }
-
-  } catch (err) {
-    console.error('[CustomSource] Route error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1218,6 +1166,7 @@ registerDynamicRagRoute(app);
 registerCompetitiveRadarRoute(app);
 registerEmailAlertsRoute(app);
 registerVoiceOfMarketRoute(app);
+registerCustomSourcesRoute(app);
 
 app.listen(PORT, () => {
   console.log(`KX Pipeline server running on port ${PORT}`);
