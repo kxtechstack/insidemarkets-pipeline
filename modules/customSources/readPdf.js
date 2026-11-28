@@ -143,10 +143,14 @@ function linesOfPage(items) {
     for (const item of parts) {
       if (end !== null) {
         const gap = item.x - end;
-        // A cell that is only one symbol ("•" far left of its text) is a bullet, not a cell
-        const bulletBefore = /^[\p{S}\p{Po}\p{Pd}]$/u.test(text.split(' | ').pop().trim());
-        if (gap > PDF_CELL_GAP * item.size && !bulletBefore) { text += ' | '; cells += 1; }
-        else if ((gap > 0.15 * item.size || bulletBefore) && !/\s$/.test(text) && !/^\s/.test(item.text)) text += ' ';
+        const lastCell = text.split(' | ').pop().trim();
+        // "+" or "-" right before a number is its sign: "+10%", "-0.57"
+        const sign = /^[+\-\u2212\u2013]$/.test(lastCell) && /^\d/.test(item.text.trim());
+        // A cell that is only one other symbol ("•" far left of its text) is a bullet, not a cell
+        const symbolCell = !sign && /^[\p{S}\p{Po}\p{Pd}]$/u.test(lastCell);
+        if (sign) { /* joined with no space */ }
+        else if (gap > PDF_CELL_GAP * item.size && !symbolCell) { text += ' | '; cells += 1; }
+        else if (gap > 0.15 * item.size && !/\s$/.test(text) && !/^\s/.test(item.text)) text += ' ';
       }
       text += item.text;
       end = item.x + item.width;

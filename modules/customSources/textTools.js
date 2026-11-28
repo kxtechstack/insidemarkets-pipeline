@@ -20,13 +20,15 @@ function cleanText(value, { keepLines = false } = {}) {
  * A part that starts with one symbol and a space ("• ", "▪ ", "* ", or a
  * bullet from a special font that comes out as "¢ ") is a list item: the
  * symbol is the bullet, not content. Returns { text, isBullet }.
- * A symbol followed by a number ("$5", "£ 20") is money, not a bullet.
+ * A symbol followed by a number ("$5", "£ 20") is money, not a bullet, and
+ * "+ 4" or "- 0.57" is a sign, not a bullet.
  */
 function stripBullet(text) {
   const match = String(text).match(/^([\p{S}\p{Po}\p{Pd}])\s+(?=\S)/u);
   if (!match) return { text, isBullet: false };
   const rest = text.slice(match[0].length);
   if (/^\p{Sc}$/u.test(match[1]) && /^\d/.test(rest)) return { text, isBullet: false };
+  if (/^[+\-\u2212\u2013]$/.test(match[1]) && /^\d/.test(rest)) return { text, isBullet: false }; // "- 0.57" is a minus number
   return { text: rest, isBullet: true };
 }
 

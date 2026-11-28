@@ -417,6 +417,7 @@ async function testReadText() {
   check('bullet "¢ " is removed', stripBullet('¢ Audit all labels.').text === 'Audit all labels.' && stripBullet('¢ Audit all labels.').isBullet);
   check('bullets "• ▪ * · ► –" are removed', ['• A', '▪ A', '* A', '· A', '► A', '– A'].every((t) => stripBullet(t).text === 'A'), ['• A', '▪ A', '* A', '· A', '► A', '– A'].map((t) => stripBullet(t).text).join(','));
   check('money is not a bullet ("$ 5", "£ 20")', !stripBullet('$ 5 off all serums').isBullet && !stripBullet('£ 20 price cap').isBullet);
+  check('a sign before a number is not a bullet ("- 0.57", "+ 4%")', !stripBullet('- 0.57 for fragrance').isBullet && !stripBullet('+ 4% in Europe').isBullet && stripBullet('- Audit labels').isBullet);
   check('normal text is not a bullet', !stripBullet('Audit all labels.').isBullet && !stripBullet('"Quoted" text').isBullet && !stripBullet('(a) first point').isBullet);
   const bulletFile = await readText(job, { kind: 'file', bytes: Buffer.from('x'), fileName: 'a.pdf' }, {
     partition: async () => [
@@ -1018,6 +1019,8 @@ async function testReadPdf() {
   check('pdf lines: sideways text is kept as its own line', lines[2].text === 'Number of visible SKUs' && lines[2].rotated);
   const bulletLine = linesOfPage([at('•', 72, 640), at('Facebook. Facebook helps give people the power to build community.', 108, 640)])[0];
   check('pdf lines: a bullet far left of its text is not a table cell', bulletLine.cells === 1 && bulletLine.text === '• Facebook. Facebook helps give people the power to build community.', JSON.stringify(bulletLine));
+  const signs = linesOfPage([at('+', 80, 600), at('10%', 85, 600), at('-', 300, 600), at('0.57', 305, 600), at('\u2212', 500, 600), at('2.4%', 503, 600)])[0];
+  check('pdf lines: a + or - before a number is its sign (no space, no bullet)', signs.text === '+10% | -0.57 | \u22122.4%', JSON.stringify(signs.text));
   const boldLine = linesOfPage([at('Liquidity and Capital Resources', 80, 500, 10, { bold: true })])[0];
   check('pdf lines: an all-bold line is marked bold', boldLine.bold === true);
 
