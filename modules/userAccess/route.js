@@ -24,7 +24,15 @@ function registerUserAccessRoute(app) {
 
       // 1) Who is this? (fails if the login was removed / token is bad)
       const { data, error } = await supabase.auth.getUser(token);
-      if (error || !data || !data.user) {
+      if (error) {
+        // Only a real "bad / removed login" answer means log out.
+        // If Supabase itself is down or slow, do NOT kick everyone out.
+        if ([401, 403, 404].includes(error.status)) {
+          return res.status(401).json({ active: false, reason: 'invalid_session' });
+        }
+        throw error;
+      }
+      if (!data || !data.user) {
         return res.status(401).json({ active: false, reason: 'invalid_session' });
       }
 

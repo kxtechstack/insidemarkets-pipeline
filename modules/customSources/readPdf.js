@@ -143,8 +143,10 @@ function linesOfPage(items) {
     for (const item of parts) {
       if (end !== null) {
         const gap = item.x - end;
-        if (gap > PDF_CELL_GAP * item.size) { text += ' | '; cells += 1; }
-        else if (gap > 0.15 * item.size && !/\s$/.test(text) && !/^\s/.test(item.text)) text += ' ';
+        // A cell that is only one symbol ("•" far left of its text) is a bullet, not a cell
+        const bulletBefore = /^[\p{S}\p{Po}\p{Pd}]$/u.test(text.split(' | ').pop().trim());
+        if (gap > PDF_CELL_GAP * item.size && !bulletBefore) { text += ' | '; cells += 1; }
+        else if ((gap > 0.15 * item.size || bulletBefore) && !/\s$/.test(text) && !/^\s/.test(item.text)) text += ' ';
       }
       text += item.text;
       end = item.x + item.width;
@@ -197,6 +199,15 @@ function partsFromLines(pages, pageCount) {
   const fileBodySize = sizeOf(pages.flatMap((p) => p.lines));
   const PAGE_OWN_SIZE_MIN_CHARS = 300;
 
+  // How a line is compared across pages. A row ("Confidential | © 2026 ... | 7")
+  // is compared by its cells in any order, without cells that are only a page
+  // number, so "© ... | Confidential" on page 1 matches the others.
+  const lineKey = (line) => {
+    if (line.cells < 2) return repeatKey(line.text);
+    const cells = line.text.split(' | ').map((c) => c.trim()).filter((c) => c && !/^\d{1,4}$/.test(c));
+    return repeatKey(cells.sort().join(' | '));
+  };
+
   // Running headers and footers: a short line on most pages, at the top or
   // bottom of the page (the first 2 or last 3 lines). A line in the middle of
   // a page is never one, even when it repeats.
@@ -211,7 +222,7 @@ function partsFromLines(pages, pageCount) {
     for (const { page, lines } of pages) {
       for (const line of lines) {
         if (!edgesByPage.get(page).has(line) || line.text.length > REPEATED_LINE_MAX_CHARS) continue;
-        const key = repeatKey(line.text);
+        const key = lineKey(line);
         if (key === null) continue;
         if (!pagesByKey.has(key)) pagesByKey.set(key, new Set());
         pagesByKey.get(key).add(page);
@@ -248,7 +259,7 @@ function partsFromLines(pages, pageCount) {
     };
 
     for (const line of lines) {
-      const key = repeatKey(line.text);
+      const key = lineKey(line);
       if (key !== null && removedRepeats.has(key) && edgesByPage.get(page).has(line)) {
         repeatCount += 1;
         if (removedRepeats.get(key) === null) removedRepeats.set(key, line.text);

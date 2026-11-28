@@ -136,5 +136,12 @@ module.exports = {
 
   // ── Search (searchCustomSources.js) ────────────────────────────────────
   SEARCH_LIMIT: 8,        // how many pieces come back
-  SEARCH_MIN_SCORE: 0.2,  // pieces less similar than this are left out (0 = nothing alike, 1 = same)
+  SEARCH_MIN_SCORE: 0.2,  // meaning search: pieces less similar than this are left out (0 = nothing alike, 1 = same)
+  SEARCH_POOL: 20,        // how many pieces each search (meaning, words) brings before they are combined
+  // Combining the two lists: a piece gets 1 / (SEARCH_MIX_K + its place) from each
+  // list it is in. 60 is the usual value: a piece high in either list comes up,
+  // a piece in both lists comes up the most.
+  SEARCH_MIX_K: 60,
+  // The Postgres function for word search (made by SQL, see the design doc)
+  WORD_SEARCH_FUNCTION: 'custom_source_word_search',
 };

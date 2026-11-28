@@ -741,6 +741,21 @@ function memoryDb(tables = {}, failOn = {}, files = {}) {
   };
   return {
     data,
+    async rpc(name, args) {
+      if (failOn[`rpc:${name}`]) return { data: null, error: { message: failOn[`rpc:${name}`] } };
+      if (name !== 'custom_source_word_search') return { data: null, error: { message: `function ${name} does not exist` } };
+      const words = String(args.p_query).toLowerCase().match(/[a-z0-9]+/g) || [];
+      const rows = data['public.custom_source_pieces']
+        .filter((p) => p.client_id === args.p_client_id && args.p_document_ids.includes(p.document_id))
+        .map((p) => {
+          const head = String(p.heading || '').toLowerCase();
+          const body = String(p.text).toLowerCase();
+          const rank = words.reduce((t, w) => t + (head.includes(w) ? 2 : 0) + (body.includes(w) ? 1 : 0), 0);
+          return { id: p.id, rank };
+        })
+        .filter((r) => r.rank > 0).sort((a, b) => b.rank - a.rank).slice(0, args.p_limit);
+      return { data: rows, error: null };
+    },
     schema(schemaName) { return { from: (name) => table(schemaName, name) }; },
     from(name) { return table('public', name); },
     storage: fakeStorage(files).storage,
@@ -775,6 +790,7 @@ function memoryQdrant(failUpsert = false) {
         .map((p) => ({ id: p.id, score: cosine(vector, p.vector), payload: p.payload }))
         .filter((h) => h.score >= minScore).sort((a, b) => b.score - a.score).slice(0, limit);
     },
+    async retrieve(name, { ids }) { return ids.map((pid) => collections[name].points.get(pid)).filter(Boolean); },
     points(name = 'custom_source_pieces') { return [...collections[name].points.values()]; },
   };
 }
@@ -946,30 +962,41 @@ async function testSearch() {
   await save(id(2), OTHER_CLIENT, 'Other client report', ['TikTok Shop is huge for us.']);
 
   const sdeps = { db, qdrant, embed: topicEmbed };
-  const hits = await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, sdeps);
+  const hits = (await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, sdeps)).results;
   check('search: best piece first, with source and page', hits[0] && hits[0].sourceName === 'NIQ Beauty' && hits[0].pageFrom === 1 && /TikTok/.test(hits[0].text), JSON.stringify(hits[0]));
   check('search: never shows another client\'s pieces', hits.every((h) => h.sourceName !== 'Other client report'));
   check('search: always filters by client', JSON.stringify(qdrant.lastFilter.must[0]) === JSON.stringify({ key: 'client_id', match: { value: CLIENT } }));
   check('search: only live documents are searched', qdrant.lastFilter.must[1].key === 'document_id' && qdrant.lastFilter.must[1].match.any.length === 1);
-  const onlySource = await searchCustomSources({ question: 'TikTok', clientId: CLIENT, sourceIds: [id(9)] }, sdeps);
+  const onlySource = (await searchCustomSources({ question: 'TikTok', clientId: CLIENT, sourceIds: [id(9)] }, sdeps)).results;
   check('search: can be limited to some sources', onlySource.length === 0);
   const code = async (fn) => { try { await fn(); return 'OK'; } catch (e) { return e.message; } };
   check('search: empty question stops', /empty/.test(await code(() => searchCustomSources({ question: ' ', clientId: CLIENT }, sdeps))));
   check('search: missing client stops', /clientId/.test(await code(() => searchCustomSources({ question: 'x', clientId: '' }, sdeps))));
-  const none = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, { db, qdrant: { search: async () => { throw new Error('Collection custom_source_pieces not found'); } }, embed: topicEmbed });
+  const none = (await searchCustomSources({ question: 'zzz', clientId: CLIENT }, { db, qdrant: { search: async () => { throw new Error('Collection custom_source_pieces not found'); }, retrieve: async () => [] }, embed: topicEmbed })).results;
   check('search: no collection yet gives no results (not a crash)', Array.isArray(none) && none.length === 0);
 
   // A source deleted in the admin console: its rows are gone, its vectors are still in Qdrant
   const docsBefore = db.data['public.custom_source_documents'].length;
   db.data['public.custom_source_documents'] = db.data['public.custom_source_documents'].filter((d) => d.source_id !== id(1));
-  const afterDelete = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps);
+  const afterDelete = (await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps)).results;
   check('search: a deleted source never shows up (its vectors are ignored)', afterDelete.length === 0 && qdrant.points().some((p) => p.payload.source_id === id(1)), `${docsBefore} docs before, ${afterDelete.length} hits`);
 
   // The same file added twice as two sources: the text is shown once
   await save(id(4), CLIENT, 'Copy A', ['TikTok Shop is growing in Asia.']);
   await save(id(5), CLIENT, 'Copy B', ['TikTok Shop is growing in Asia.']);
-  const twice = await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps);
+  const twice = (await searchCustomSources({ question: 'TikTok', clientId: CLIENT }, sdeps)).results;
   check('search: the same text from two sources is shown once', twice.filter((h) => h.text === 'TikTok Shop is growing in Asia.').length === 1, twice.map((h) => h.sourceName).join(','));
+
+  // Words and meaning together
+  await save(id(6), CLIENT, 'Chart deck', ['Industry growth by category: skincare 13 percent, fragrance 12 percent.']);
+  const mixed = await searchCustomSources({ question: 'Which categories drive industry growth?', clientId: CLIENT }, sdeps);
+  const chart = mixed.results.find((h) => h.sourceName === 'Chart deck');
+  check('search: a piece the meaning search misses is found by its words', chart && chart.meaningScore === null && chart.wordPlace === 1, JSON.stringify(mixed.results.map((h) => [h.sourceName, h.meaningScore, h.wordPlace])));
+  check('search: word search is on', mixed.wordSearch === 'on');
+  const both = (await searchCustomSources({ question: 'TikTok Shop growing', clientId: CLIENT }, sdeps)).results;
+  check('search: a piece found both ways comes first', both[0].meaningScore !== null && both[0].wordPlace !== null, JSON.stringify(both.map((h) => [h.sourceName, h.meaningScore, h.wordPlace])));
+  const noWords = await searchCustomSources({ question: 'How big is TikTok?', clientId: CLIENT }, { ...sdeps, db: Object.assign(Object.create(db), { rpc: async () => ({ data: null, error: { message: 'function custom_source_word_search does not exist' } }) }) });
+  check('search: without word search, meaning search still works and says so', noWords.wordSearch === 'off' && /does not exist/.test(noWords.wordSearchProblem) && noWords.results.length > 0);
 }
 
 // ── PDFs: readPdf.js (our own reading of the PDF text) ──────────────────
@@ -989,6 +1016,8 @@ async function testReadPdf() {
   check('pdf lines: pieces at the same height make one line', lines[0].text === 'Amazon | 23.0 | 23.9%' && lines[0].cells === 3, JSON.stringify(lines[0]));
   check('pdf lines: a small gap is a space, not a cell', lines[1].text === 'Our sales grew in 2025.' && lines[1].cells === 1, JSON.stringify(lines[1]));
   check('pdf lines: sideways text is kept as its own line', lines[2].text === 'Number of visible SKUs' && lines[2].rotated);
+  const bulletLine = linesOfPage([at('•', 72, 640), at('Facebook. Facebook helps give people the power to build community.', 108, 640)])[0];
+  check('pdf lines: a bullet far left of its text is not a table cell', bulletLine.cells === 1 && bulletLine.text === '• Facebook. Facebook helps give people the power to build community.', JSON.stringify(bulletLine));
   const boldLine = linesOfPage([at('Liquidity and Capital Resources', 80, 500, 10, { bold: true })])[0];
   check('pdf lines: an all-bold line is marked bold', boldLine.bold === true);
 
@@ -1017,7 +1046,9 @@ async function testReadPdf() {
     at('EU', 80, 608), at('31%', 300, 608),
     at(n === 1 ? '• Audit all labels.' : `• Audit labels in ${CITY[n - 1]}.`, 80, 580),
     at(n === 1 ? '• Train regional teams.' : `• Train teams in ${CITY[n - 1]}.`, 80, 568),
-    at('Confidential and proprietary, Example Co. All Rights Reserved.', 300, 30, 7), at(String(n), 560, 30, 7),
+    ...(n === 1
+      ? [at('Example Co. All Rights Reserved.', 300, 30, 7), at('Confidential and proprietary', 500, 30, 7)] // page 1: the parts in the other order, no page number
+      : [at('Confidential and proprietary', 300, 30, 7), at('Example Co. All Rights Reserved.', 450, 30, 7), at(String(n), 600, 30, 7)]),
     at(String(n), 300, 15, 9),
   ]);
   const pages4 = [1, 2, 3, 4].map((n) => ({ page: n, lines: pageLines(n) }));
@@ -1028,7 +1059,7 @@ async function testReadPdf() {
   check('pdf parts: a short bold line is a heading', p1[2].type === 'title' && p1[2].text === 'Liquidity and Capital Resources');
   check('pdf parts: rows next to each other form one table', p1.some((p) => p.type === 'table' && p.text === 'Region | Share\nEU | 31%'), JSON.stringify(p1));
   check('pdf parts: bullet lines are list items without the bullet', p1.filter((p) => p.type === 'list').map((p) => p.text).join('/') === 'Audit all labels./Train regional teams.');
-  check('pdf parts: footer with page number removed on every page', !built.parts.some((p) => p.text.includes('All Rights Reserved')));
+  check('pdf parts: footer removed on every page, also when its parts are in another order', !built.parts.some((p) => p.text.includes('All Rights Reserved')), built.parts.filter((p) => p.text.includes('Reserved')).map((p) => `p${p.page}: ${p.text}`).join(' / '));
   check('pdf parts: page numbers removed', !built.parts.some((p) => /^\d+$/.test(p.text)) && built.notes.some((n) => n.includes('page numbers')), built.notes.join(' '));
   check('pdf parts: the notes say what was removed', built.notes.some((n) => n.includes('Removed 4 repeated lines')), built.notes.join(' '));
   check('pdf parts: a sentence end on every page is not a footer ("groups and channels." stays)', built.parts.filter((p) => p.text.includes('groups and channels.')).length === 4);
